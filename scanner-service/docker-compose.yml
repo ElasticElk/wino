@@ -1,0 +1,24 @@
+name: wine-scanner
+
+services:
+  scanner-server:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    restart: unless-stopped
+    # Connect to wine-cellar's network so we can reach its web service.
+    # In config.yaml, set base_url to http://wine-cellar-web:8000
+    # (or whatever the wine-cellar web service is named).
+    networks:
+      - default
+      - wine-cellar
+
+networks:
+  # External network from wine-cellar's docker-compose.
+  # Create with: docker network create wine-cellar
+  # Or reference wine-cellar-dev_default / wine-cellar_default depending on env.
+  wine-cellar:
+    external: true
+    name: ${WINE_CELLAR_NETWORK:-wine-cellar-dev_default}

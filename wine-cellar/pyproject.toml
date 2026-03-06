@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wine_cellar"
+version = "0.5.0"
+authors = [
+    {name = "Julian Dehm", email = "julian@dehm.dev"},
+    {name = "Phillippa Morland"},
+]
+description = "Self-hosted wine cellar"
+readme = "README.md"
+requires-python = ">=3.8"
+keywords = ["wine", "wine cellar", "wine database"]
+license = {text = "AGPL-3.0"}
+classifiers = [
+    "Framework :: Django",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    'importlib-metadata; python_version<"3.12"',
+		"Django>=5.0.0",
+]
+dynamic = ["version"]
+[tool.setuptools]
+packages = ["wine_cellar"]
+[tool.isort]
+profile = "black"
+skip_gitignore = true
+line_length = 88
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "wine_cellar.conf.test"
+# -- recommended but optional:
+python_files = ["test_*.py", "*_test.py"]
+[tool.coverage.run]
+omit = ["wine_cellar/conf/*","**/tests/*", "**/migrations/*"]
+
+
+[tool.commitizen]
+name = "cz_customize"
+tag_format = "$version"
+legacy_tag_formats = ["v$version"]
+version_scheme = "semver2"
+version_provider = "pep621"
+version_files = [
+    "wine_cellar/__init__.py:__version__",
+    "pyproject.toml:version",
+]
+update_changelog_on_bump = false
+major_version_zero = true
+changelog_merge_prerelease = true
+changelog_start_rev = "v0.0.12"
+
+[tool.commitizen.customize]
+commit_parser = '^((?P<change_type>feat|fix|refactor|perf|BREAKING CHANGE)(?:\((?P<scope>[^()\r\n]*)\)|\()?(?P<breaking>!)?|\w+!):\s(?P<subject>[^\n]*)(?P<body>(?:\n(?!Refs:|:\s#)[^\n]*)*)(?:\n(?P<footer>(?:Refs:[\s\S]*)?))?$'

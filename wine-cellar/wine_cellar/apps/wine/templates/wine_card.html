@@ -1,0 +1,37 @@
+{% load static i18n %}
+<li class="wine-card">
+    <div class="wine-card__image-wrapper">
+        <img src="{{ wine.image_thumbnail }}"
+             class="wine-card__img"
+             height="200"
+             width="auto"
+             loading="lazy"
+             alt="Image of a glass of {{ wine.get_type }} wine">
+    </div>
+    <div class="wine-card__detail_container">
+        <h2 class="wine-card__title">
+            <a class="wine-card__link" href="{% url 'wine-detail' wine.pk %}">{{ wine.name }}</a>
+        </h2>
+        {% if wine.get_grapes %}
+            <div class="pure-u-1-1">
+                <span class="text--gray">Grape</span>
+                <p>{{ wine.get_grapes | truncatechars:31 | title }}</p>
+            </div>
+        {% endif %}
+        {% if wine.vintage %}
+            <div class="pure-u-1-1">
+                <span class="text--gray">Vintage</span>
+                <p>{{ wine.vintage }}</p>
+            </div>
+        {% endif %}
+        {% if wine.drink_by %}
+            <div class="pure-u-1-1">
+                <span class="text--gray">Drink By</span>
+                <p>{{ wine.drink_by }}</p>
+            </div>
+        {% endif %}
+    </div>
+    <div class="wine-card__stock">
+        <p>{% translate "Stock:" %} {{ wine.total_stock }}</p>
+    </div>
+</li>

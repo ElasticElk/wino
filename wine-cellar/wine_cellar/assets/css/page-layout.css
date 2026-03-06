@@ -1,0 +1,79 @@
+html {
+  font-family: 'Helvetica', sans-serif;
+  background-color: var(--light);
+  height: 100%;
+  margin: 0;
+  line-height: 1.6em;
+}
+
+.layout,
+.pure-menu,
+.menu-link {
+  -webkit-transition: all 0.2s ease-out;
+  -moz-transition: all 0.2s ease-out;
+  -ms-transition: all 0.2s ease-out;
+  -o-transition: all 0.2s ease-out;
+  transition: all 0.2s ease-out;
+}
+
+/* for footer placement */
+.layout {
+  min-height: 99vh;
+  position: relative;
+}
+
+.main {
+  max-width: 1140px;
+  padding: 0 2rem 4rem 2rem;
+  margin: 0 auto;
+}
+
+.header__title {
+  font-size: var(--font-xl);
+  margin: 50px 0 35px 0;
+  font-weight: 300;
+  color: var(--text-color-gray);
+  text-align: center;
+}
+
+/* not strickly user in header element but here for convenience */
+h2.header__title {
+  font-size: var(--font-lg);
+}
+
+.pagination {
+  margin-top: 2em;
+  list-style: none;
+  padding: 0;
+  text-align: center;
+
+  li {
+    display: inline-block;
+    font-size: var(--font-md);
+
+    &.active {
+      color: var(--darker-purple);
+    }
+
+    a {
+      padding: 8px;
+      color: var(--dark-purple);
+    }
+  }
+}
+
+.settings-container {
+  margin-top: 1rem;
+}
+
+.footer {
+  text-align: center;
+  width: 100%;
+  position: absolute;
+  bottom: 0;
+  left: 0;
+
+  p {
+    margin-bottom: 0;
+  }
+}

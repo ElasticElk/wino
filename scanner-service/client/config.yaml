@@ -1,0 +1,16 @@
+server:
+  # URL of the scanner server (NAS, cloud, etc.)
+  url: "http://nas.local:8080"
+  timeout: 10
+
+hardware:
+  # "mock" for development, "evdev" for Raspberry Pi
+  scanner_backend: "mock"
+  scanner_device: "/dev/input/event0"
+  gpio_toggle_pin: 17
+  gpio_buzzer_pin: 23
+  gpio_led_green_pin: 27
+  gpio_led_red_pin: 22
+
+scanner:
+  debounce_seconds: 2

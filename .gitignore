@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Secrets / config
+.env.dev
+.env.prod
+.env.prod.db
+scanner-service/config.yaml
+
+# Wine Cellar
+wine-cellar/db.sqlite3
+wine-cellar/test_db.sqlite3
+wine-cellar/.coverage
+wine-cellar/node_modules/
+wine-cellar/static/
+wine-cellar/build/
+wine-cellar/media/
+wine-cellar/*.mo
+wine-cellar/site/
+
+# Claude Code
+.claude/

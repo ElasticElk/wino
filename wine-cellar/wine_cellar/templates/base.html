@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+{% load static settings i18n %}
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <link rel="stylesheet"
+              href="https://cdn.jsdelivr.net/npm/purecss@3.0.0/build/pure-min.css"
+              integrity="sha384-X38yfunGUhNzHpBaEBsWLO+A0HDYOQi8ufWDkZ0k9e0eXz/tH3II7uKZ9msv++Ls"
+              crossorigin="anonymous">
+        <link rel="stylesheet"
+              href="https://cdn.jsdelivr.net/npm/purecss@3.0.0/build/grids-responsive-min.css" />
+        <link rel="stylesheet" href="{% static 'base.css' %}">
+        <link rel="icon"
+              type="image/x-icon"
+              href="{% static 'images/favicon.svg' %}">
+        <script src="{% url 'javascript-catalog' %}"></script>
+        {% block styles %}
+        {% endblock styles %}
+        {% block extra_js %}
+        {% endblock extra_js %}
+        <title>
+            {% block title %}
+                Django Wine Cellar
+            {% endblock title %}
+        </title>
+    </head>
+    <body class="layout">
+        {% block menu %}
+            {% spaceless %}
+                <header>
+                    <!-- small screen menu -->
+                    <nav class="menu__sm">
+                        <!-- Menu toggle -->
+                        <input class="menu-toggle" type="checkbox" id="menu-toggle" value="text">
+                        <label class="menu-link" for="menu-toggle">
+                            {# djlint:off #}
+                            <span></span>
+                            {# djlint:on #}
+                        </label>
+                        <a href="{% url 'homepage' %}" class="pure-menu-heading pure-menu-link">Wine Cellar</a>
+                        <div class="pure-menu">
+                            <ul class="pure-menu-list">
+                                {% if user.is_authenticated %}
+                                    <li class="pure-menu-item">
+                                        <a href="{% url 'wine-list' %}" class="pure-menu-link">{% translate "Wines" %}</a>
+                                    </li>
+                                    <li class="pure-menu-item">
+                                        <a href="{% url 'wine-add' %}" class="pure-menu-link">{% translate "Add Wine" %}</a>
+                                    </li>
+                                    <li class="pure-menu-item">
+                                        <a href="{% url 'wine-scan' %}" class="pure-menu-link">{% translate "Scan Wine" %}</a>
+                                    </li>
+                                    <li class="pure-menu-item">
+                                        <a href="{% url 'wine-map' %}" class="pure-menu-link">{% translate "Map" %}</a>
+                                    </li>
+                                    <li class="pure-menu-item">
+                                        <a href="{% url 'storage-list' %}" class="pure-menu-link">{% translate "Storage" %}</a>
+                                    </li>
+                                    <li class="pure-menu-item">
+                                        <a href="{% url 'user-settings' %}" class="pure-menu-link">{% translate "Settings" %}</a>
+                                    </li>
+                                    <li class="pure-menu-item">
+                                        <form action="{% url 'account_logout' %}" method="post">
+                                            {% csrf_token %}
+                                            <button class="pure-menu-link button" type="submit">{% translate "Logout" %}</button>
+                                        </form>
+                                    </li>
+                                {% else %}
+                                    <li class="pure-menu-item">
+                                        <a href="{% url 'account_login' %}" class="pure-menu-link">{% translate "Login" %}</a>
+                                    </li>
+                                {% endif %}
+                            </ul>
+                        </div>
+                    </nav>
+                    <!-- large screen menu -->
+                    <nav class="pure-menu pure-menu-horizontal menu__md">
+                        <div class="menu__container">
+                            <a href="{% url 'homepage' %}" class="pure-menu-heading pure-menu-link">Wine Cellar</a>
+                            <ul class="pure-menu-list">
+                                {% if user.is_authenticated %}
+                                    <li class="pure-menu-item">
+                                        <a href="{% url 'wine-list' %}" class="pure-menu-link">{% translate "Wines" %}</a>
+                                    </li>
+                                    <li class="pure-menu-item">
+                                        <a href="{% url 'wine-add' %}" class="pure-menu-link">{% translate "Add Wine" %}</a>
+                                    </li>
+                                    <li class="pure-menu-item">
+                                        <a href="{% url 'wine-scan' %}" class="pure-menu-link">{% translate "Scan Wine" %}</a>
+                                    </li>
+                                    <li class="pure-menu-item">
+                                        <a href="{% url 'wine-map' %}" class="pure-menu-link">{% translate "Map" %}</a>
+                                    </li>
+                                    <li class="pure-menu-item">
+                                        <a href="{% url 'storage-list' %}" class="pure-menu-link">{% translate "Storage" %}</a>
+                                    </li>
+                                    <li class="pure-menu-item">
+                                        <a href="{% url 'user-settings' %}" class="pure-menu-link">{% translate "Settings" %}</a>
+                                    </li>
+                                    <li class="pure-menu-item">
+                                        <form action="{% url 'account_logout' %}" method="post">
+                                            {% csrf_token %}
+                                            <button class="pure-menu-link button" type="submit">{% translate "Logout" %}</button>
+                                        </form>
+                                    </li>
+                                {% else %}
+                                    <li class="pure-menu-item">
+                                        <a href="{% url 'account_login' %}" class="pure-menu-link">{% translate "Login" %}</a>
+                                    </li>
+                                {% endif %}
+                            </ul>
+                        </div>
+                    </nav>
+                </header>
+            {% endspaceless %}
+        {% endblock menu %}
+        <main class="main">
+            {% block header %}
+                <h1 class="brand-title">Django Wine Cellar</h1>
+            {% endblock header %}
+            {% block allauth_wrapper %}
+                {% block content %}
+                {% endblock content %}
+            {% endblock allauth_wrapper %}
+        </main>
+        <footer class="footer">
+            <p>
+                AGPL 3.0 | {% translate "Version" %} {% get_setting "VERSION" %} | <a href="https://github.com/the-broke-sommeliers/wine-cellar"
+    target="_blank">Github <span class="visually-hidden">(opens in new tab)</span></a>
+            </p>
+        </footer>
+    </body>
+</html>

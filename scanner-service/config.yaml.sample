@@ -1,0 +1,40 @@
+# Wine Scanner — Server Config
+# Used by both standalone mode (scanner_service.py) and server mode (server.py).
+#
+# For the thin scanner client, see client/config.yaml.
+
+wine_cellar:
+  # Internal URL for API calls (Docker: http://web:8000, local: http://127.0.0.1:8000)
+  base_url: "http://127.0.0.1:8000"
+  # Public URL for Telegram links (reachable from your phone)
+  web_url: "http://your-nas.local:8085"
+  api_token: "<generated-from-django-admin>"
+
+telegram:
+  bot_token: "<from-botfather>"
+  chat_ids:
+    - "<your-chat-id>"
+    - "<wife-chat-id>"
+
+grok:
+  api_key: "<your-xai-api-key>"
+
+# Hardware section is only needed for standalone mode (scanner_service.py).
+# The server (server.py) ignores this — the client handles hardware.
+hardware:
+  scanner_backend: "mock"
+  scanner_device: "/dev/input/event0"
+  gpio_toggle_pin: 17
+  gpio_buzzer_pin: 23
+  gpio_led_green_pin: 27
+  gpio_led_red_pin: 22
+
+scanner:
+  debounce_seconds: 2
+  unknown_barcode_cooldown: 30
+
+storage:
+  default_storage_name: "Wine Fridge"
+
+alerts:
+  low_stock_threshold: 1

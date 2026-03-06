@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+client/
+.git/
+.dockerignore
+Dockerfile
+docker-compose.yml
+config.yaml
+config.yaml.sample
+*.md
