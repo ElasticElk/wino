@@ -2,6 +2,8 @@ server:
   # URL of the scanner server (NAS, cloud, etc.)
   url: "http://nas.local:8080"
   timeout: 10
+  # Scanner API key (from Django Admin -> Scanners)
+  api_key: "<from-django-admin>"
 
 hardware:
   # "mock" for development, "evdev" for Raspberry Pi

@@ -179,6 +179,10 @@ class Source(UserContentModel):
 
 class Wine(UserContentModel):
     user = models.ForeignKey(get_user_model(), on_delete=models.CASCADE, null=True)
+    household = models.ForeignKey(
+        "scanner.Household", on_delete=models.CASCADE, null=True,
+        related_name="wines",
+    )
     name = models.CharField(max_length=100)
     barcode = models.CharField(max_length=100, null=True)
     wine_type = models.CharField(max_length=2, choices=WineType)
@@ -193,7 +197,7 @@ class Wine(UserContentModel):
         null=True,
     )
     drink_by = models.DateField(blank=True, null=True)
-    comment = models.CharField(max_length=250, blank=True)
+    comment = models.CharField(max_length=500, blank=True)
     rating = models.PositiveIntegerField(
         null=True,
         validators=[MinValueValidator(0), MaxValueValidator(10)],
@@ -329,9 +333,9 @@ class Wine(UserContentModel):
                     "size",
                     "vintage",
                     "country",
-                    "user",
+                    "household",
                 ],
-                name="unique wine",
+                name="unique wine per household",
             )
         ]
 

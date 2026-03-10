@@ -25,5 +25,15 @@ wine-cellar/media/
 wine-cellar/*.mo
 wine-cellar/site/
 
+# Logs
+*.log
+scanner-service/*.log
+
+# Media uploads
+wine-cellar/mediafiles/
+
+# Secrets files
+*.txt
+
 # Claude Code
 .claude/

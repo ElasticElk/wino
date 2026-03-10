@@ -1,26 +1,35 @@
-# Wine Scanner — Server Config
+# Wine Scanner -- Server Config
 # Used by both standalone mode (scanner_service.py) and server mode (server.py).
 #
 # For the thin scanner client, see client/config.yaml.
+#
+# BOOTSTRAP ONLY: The server fetches most config from the Wine Cellar DB
+# (Telegram users, scanner devices, API keys, etc.) via /api/scanner/config/.
+# Only base_url and api_token (admin) are needed here to bootstrap that call.
+#
+# To configure Telegram users, scanners, and API keys, use Django Admin.
 
 wine_cellar:
   # Internal URL for API calls (Docker: http://web:8000, local: http://127.0.0.1:8000)
   base_url: "http://127.0.0.1:8000"
-  # Public URL for Telegram links (reachable from your phone)
-  web_url: "http://your-nas.local:8085"
-  api_token: "<generated-from-django-admin>"
+  # Admin API token (staff user) -- used to fetch config from DB
+  api_token: "<admin-token-from-django>"
 
+# Fallback values used when DB config is not yet set up.
+# Once you configure things in Django Admin, these are ignored.
 telegram:
   bot_token: "<from-botfather>"
   chat_ids:
     - "<your-chat-id>"
-    - "<wife-chat-id>"
 
 grok:
   api_key: "<your-xai-api-key>"
 
+storage:
+  default_storage_name: "Wine Fridge"
+
 # Hardware section is only needed for standalone mode (scanner_service.py).
-# The server (server.py) ignores this — the client handles hardware.
+# The server (server.py) ignores this -- the client handles hardware.
 hardware:
   scanner_backend: "mock"
   scanner_device: "/dev/input/event0"
@@ -32,9 +41,6 @@ hardware:
 scanner:
   debounce_seconds: 2
   unknown_barcode_cooldown: 30
-
-storage:
-  default_storage_name: "Wine Fridge"
 
 alerts:
   low_stock_threshold: 1

@@ -12,7 +12,7 @@ import yaml
 
 from hardware.barcode_reader import create_reader
 from hardware.gpio_controls import ScanMode, create_controls
-from integrations.grok_vision import GrokVisionAPI, merge_wine_data
+from integrations.grok_vision import GrokVisionAPI, merge_wine_data, read_barcode_local
 from integrations.open_food_facts import OpenFoodFactsAPI
 from integrations.telegram_bot import TelegramBotHandler, TelegramNotifier
 from integrations.wine_cellar_api import WineCellarAPI
@@ -264,11 +264,12 @@ def main():
             pending_store=pending_store,
             pending_lock=pending_lock,
         )
+        bot_handler.set_local_barcode_reader(read_barcode_local)
         if grok:
             bot_handler.set_photo_callback(
                 _make_photo_handler(grok, off, pending_store)
             )
-            bot_handler.set_barcode_callback(grok.read_barcode)
+            bot_handler.set_triage_callback(grok.triage_photo)
         bot_handler.run_in_thread()
         print(f"  Telegram bot: ACTIVE ({len(chat_ids)} user(s))")
     else:

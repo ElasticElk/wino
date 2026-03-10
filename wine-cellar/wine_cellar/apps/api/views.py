@@ -1,4 +1,5 @@
 from django.contrib.auth.decorators import login_not_required
+from django.http import FileResponse
 from django.utils.decorators import method_decorator
 from rest_framework import status
 from rest_framework.authentication import TokenAuthentication
@@ -6,8 +7,11 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from rest_framework.parsers import MultiPartParser
+
+from wine_cellar.apps.scanner.models import Household, HouseholdMembership
 from wine_cellar.apps.storage.models import Storage, StorageItem
-from wine_cellar.apps.wine.models import Wine
+from wine_cellar.apps.wine.models import ImageType, Wine, WineImage
 
 from .serializers import (
     StockAddSerializer,
@@ -21,15 +25,54 @@ from .serializers import (
 
 @method_decorator(login_not_required, name="dispatch")
 class ScannerAPIView(APIView):
-    """Base view that bypasses Django's LoginRequiredMiddleware."""
+    """Base view that bypasses Django's LoginRequiredMiddleware.
+
+    Resolves the active household from X-Household header or user's default.
+    """
 
     authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
 
+    def get_household(self, request) -> Household:
+        """Resolve the household for this request.
+
+        Priority:
+        1. X-Household header (must be a household the user belongs to)
+        2. User's default household (is_default=True)
+        3. User's first household
+        """
+        header_id = request.META.get("HTTP_X_HOUSEHOLD")
+        if header_id:
+            try:
+                membership = HouseholdMembership.objects.select_related("household").get(
+                    user=request.user, household_id=int(header_id),
+                )
+                return membership.household
+            except (HouseholdMembership.DoesNotExist, ValueError):
+                pass
+
+        # Default household
+        membership = HouseholdMembership.objects.filter(
+            user=request.user, is_default=True,
+        ).select_related("household").first()
+        if membership:
+            return membership.household
+
+        # Fallback: first household
+        membership = HouseholdMembership.objects.filter(
+            user=request.user,
+        ).select_related("household").first()
+        if membership:
+            return membership.household
+
+        # No household at all — shouldn't happen after migration
+        raise Household.DoesNotExist("User has no household")
+
 
 class WineByBarcodeView(ScannerAPIView):
     def get(self, request, ean):
-        wines = Wine.objects.filter(barcode=ean, user=request.user)
+        household = self.get_household(request)
+        wines = Wine.objects.filter(barcode=ean, household=household)
         serializer = WineSerializer(wines, many=True)
         return Response({"count": wines.count(), "wines": serializer.data})
 
@@ -39,30 +82,36 @@ class StockAddView(ScannerAPIView):
         serializer = StockAddSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
+        household = self.get_household(request)
         wine_id = serializer.validated_data["wine_id"]
         storage_name = serializer.validated_data["storage_name"]
         price = serializer.validated_data.get("price")
         row = serializer.validated_data.get("row")
 
         try:
-            wine = Wine.objects.get(id=wine_id, user=request.user)
+            wine = Wine.objects.get(id=wine_id, household=household)
         except Wine.DoesNotExist:
             return Response(
                 {"error": "Wine not found"}, status=status.HTTP_404_NOT_FOUND
             )
 
-        storage, _ = Storage.objects.get_or_create(
-            name=storage_name,
-            user=request.user,
-            defaults={"location": storage_name, "rows": 0, "columns": 0},
-        )
+        storage = Storage.objects.filter(name=storage_name, household=household).first()
+        if not storage:
+            # Fall back to household's first storage, or create "Fridge"
+            storage = Storage.objects.filter(household=household).first()
+            if not storage:
+                storage = Storage.objects.create(
+                    name="Fridge", household=household,
+                    user=request.user, location="Fridge", rows=0, columns=0,
+                )
 
-        StorageItem.objects.create(
+        item = StorageItem.objects.create(
             storage=storage, wine=wine, user=request.user, price=price, row=row
         )
 
         return Response(
             {
+                "item_id": item.id,
                 "wine_id": wine.id,
                 "wine_name": f"{wine.name} {wine.vintage or ''}".strip(),
                 "stock_count": wine.total_stock,
@@ -79,18 +128,19 @@ class StockRemoveView(ScannerAPIView):
         serializer = StockRemoveSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
+        household = self.get_household(request)
         wine_id = serializer.validated_data["wine_id"]
         storage_name = serializer.validated_data.get("storage_name", "")
 
         try:
-            wine = Wine.objects.get(id=wine_id, user=request.user)
+            wine = Wine.objects.get(id=wine_id, household=household)
         except Wine.DoesNotExist:
             return Response(
                 {"error": "Wine not found"}, status=status.HTTP_404_NOT_FOUND
             )
 
         items = StorageItem.objects.filter(
-            wine=wine, user=request.user, deleted=False
+            wine=wine, wine__household=household, deleted=False
         )
         if storage_name:
             items = items.filter(storage__name=storage_name)
@@ -122,12 +172,13 @@ class StockSetView(ScannerAPIView):
         serializer = StockSetSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
+        household = self.get_household(request)
         wine_id = serializer.validated_data["wine_id"]
         target = serializer.validated_data["quantity"]
         storage_name = serializer.validated_data.get("storage_name", "")
 
         try:
-            wine = Wine.objects.get(id=wine_id, user=request.user)
+            wine = Wine.objects.get(id=wine_id, household=household)
         except Wine.DoesNotExist:
             return Response(
                 {"error": "Wine not found"}, status=status.HTTP_404_NOT_FOUND
@@ -140,8 +191,8 @@ class StockSetView(ScannerAPIView):
             # Need to add items
             storage, _ = Storage.objects.get_or_create(
                 name=storage_name or "Wine Fridge",
-                user=request.user,
-                defaults={"location": storage_name or "Wine Fridge", "rows": 0, "columns": 0},
+                household=household,
+                defaults={"user": request.user, "location": storage_name or "Wine Fridge", "rows": 0, "columns": 0},
             )
             for _ in range(diff):
                 StorageItem.objects.create(
@@ -150,7 +201,7 @@ class StockSetView(ScannerAPIView):
         elif diff < 0:
             # Need to remove items
             items = StorageItem.objects.filter(
-                wine=wine, user=request.user, deleted=False
+                wine=wine, wine__household=household, deleted=False
             )
             if storage_name:
                 items = items.filter(storage__name=storage_name)
@@ -171,8 +222,9 @@ class StockSetView(ScannerAPIView):
 
 class WineStockView(ScannerAPIView):
     def get(self, request, pk):
+        household = self.get_household(request)
         try:
-            wine = Wine.objects.get(id=pk, user=request.user)
+            wine = Wine.objects.get(id=pk, household=household)
         except Wine.DoesNotExist:
             return Response(
                 {"error": "Wine not found"}, status=status.HTTP_404_NOT_FOUND
@@ -189,8 +241,9 @@ class WineStockView(ScannerAPIView):
 
 class WineCreateView(ScannerAPIView):
     def post(self, request):
+        household = self.get_household(request)
         serializer = WineCreateSerializer(
-            data=request.data, context={"request": request}
+            data=request.data, context={"request": request, "household": household}
         )
         serializer.is_valid(raise_exception=True)
         wine = serializer.save()
@@ -214,11 +267,12 @@ class WineInStockView(ScannerAPIView):
     """
 
     def get(self, request):
+        household = self.get_household(request)
         storage_filter = request.query_params.get("storage", "")
 
         items = StorageItem.objects.filter(
-            user=request.user, deleted=False
-        ).select_related("wine", "storage")
+            wine__household=household, deleted=False
+        ).select_related("wine", "wine__region", "storage").prefetch_related("wine__grapes")
 
         if storage_filter:
             items = items.filter(storage__name=storage_filter)
@@ -228,11 +282,26 @@ class WineInStockView(ScannerAPIView):
         for item in items:
             wine = item.wine
             if wine.id not in wine_map:
+                # Extract producer from comment ("Producer: X | description")
+                producer = ""
+                if wine.comment:
+                    for part in wine.comment.split("|"):
+                        part = part.strip()
+                        if part.startswith("Producer:"):
+                            producer = part[len("Producer:"):].strip()
+                            break
+
+                grapes = wine.grapes.all()
+                grape = grapes[0].name if grapes else ""
+
                 wine_map[wine.id] = {
                     "id": wine.id,
                     "name": f"{wine.name} {wine.vintage or ''}".strip(),
                     "wine_type": wine.wine_type,
                     "barcode": wine.barcode or "",
+                    "producer": producer,
+                    "country": wine.country or "",
+                    "grape": grape,
                     "stock_count": 0,
                     "items": [],
                 }
@@ -251,21 +320,22 @@ class WineUpdateView(ScannerAPIView):
     """Update fields on an existing wine."""
 
     def patch(self, request, pk):
+        household = self.get_household(request)
         try:
-            wine = Wine.objects.get(id=pk, user=request.user)
+            wine = Wine.objects.get(id=pk, household=household)
         except Wine.DoesNotExist:
             return Response(
                 {"error": "Wine not found"}, status=status.HTTP_404_NOT_FOUND
             )
 
         serializer = WineCreateSerializer(
-            data=request.data, context={"request": request}, partial=True
+            data=request.data, context={"request": request, "household": household}, partial=True
         )
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
         # Update simple fields
-        for field in ("name", "wine_type", "vintage", "country", "abv", "price", "barcode"):
+        for field in ("name", "wine_type", "category", "vintage", "country", "abv", "price", "barcode"):
             if field in data:
                 setattr(wine, field, data[field])
 
@@ -278,11 +348,22 @@ class WineUpdateView(ScannerAPIView):
                 parts.append(f"Producer: {producer}")
             if description:
                 parts.append(description)
-            wine.comment = " | ".join(parts)[:250]
+            wine.comment = " | ".join(parts)[:500]
 
         rating = data.get("rating")
         if rating is not None:
             wine.rating = rating
+
+        # drink_by
+        if "drink_by" in data:
+            wine.drink_by = data["drink_by"]
+
+        # Size
+        size_litres = data.get("size")
+        if size_litres:
+            from wine_cellar.apps.wine.models import Size
+            size_obj, _ = Size.objects.get_or_create(name=size_litres, user=request.user)
+            wine.size = size_obj
 
         wine.save()
 
@@ -290,7 +371,6 @@ class WineUpdateView(ScannerAPIView):
         grape_name = data.get("grape_variety", "")
         if grape_name:
             from wine_cellar.apps.wine.models import Grape
-
             grape, _ = Grape.objects.get_or_create(name=grape_name, user=request.user)
             wine.grapes.clear()
             wine.grapes.add(grape)
@@ -299,12 +379,48 @@ class WineUpdateView(ScannerAPIView):
         region_name = data.get("region", "")
         if region_name:
             from wine_cellar.apps.wine.models import Region
-
-            region, _ = Region.objects.get_or_create(
-                name=region_name, user=request.user
-            )
+            region, _ = Region.objects.get_or_create(name=region_name, user=request.user)
             wine.region = region
             wine.save()
+
+        # Update appellation if provided
+        appellation_name = data.get("appellation", "")
+        if appellation_name:
+            from wine_cellar.apps.wine.models import Appellation
+            appellation, _ = Appellation.objects.get_or_create(
+                name=appellation_name, user=request.user
+            )
+            wine.appellation = appellation
+            wine.save()
+
+        # Update vineyard if provided
+        vineyard_name = data.get("vineyard", "")
+        if vineyard_name:
+            from wine_cellar.apps.wine.models import Vineyard
+            vy, _ = Vineyard.objects.get_or_create(
+                name=vineyard_name, user=request.user,
+                defaults={"region": region_name, "country": data.get("country", "")},
+            )
+            wine.vineyard.clear()
+            wine.vineyard.add(vy)
+
+        # Update food pairings if provided
+        food_pairing_names = data.get("food_pairings", [])
+        if food_pairing_names:
+            from wine_cellar.apps.wine.models import FoodPairing
+            wine.food_pairings.clear()
+            for fp_name in food_pairing_names:
+                fp, _ = FoodPairing.objects.get_or_create(name=fp_name, user=request.user)
+                wine.food_pairings.add(fp)
+
+        # Update attributes if provided
+        attribute_names = data.get("attributes", [])
+        if attribute_names:
+            from wine_cellar.apps.wine.models import Attribute
+            wine.attributes.clear()
+            for attr_name in attribute_names:
+                attr, _ = Attribute.objects.get_or_create(name=attr_name, user=request.user)
+                wine.attributes.add(attr)
 
         return Response(
             {
@@ -317,11 +433,39 @@ class WineUpdateView(ScannerAPIView):
         )
 
 
-class StorageListView(ScannerAPIView):
-    """List all storages (fridges) for the user."""
+class WineSearchView(ScannerAPIView):
+    """Search all wines by name (case-insensitive substring match)."""
 
     def get(self, request):
-        storages = Storage.objects.filter(user=request.user).order_by("name")
+        household = self.get_household(request)
+        q = request.query_params.get("q", "").strip()
+        if not q:
+            return Response({"count": 0, "wines": []})
+
+        wines = Wine.objects.filter(
+            household=household, name__icontains=q
+        ).order_by("name")[:20]
+
+        serializer = WineSerializer(wines, many=True)
+        return Response({"count": len(serializer.data), "wines": serializer.data})
+
+
+class WineListAllView(ScannerAPIView):
+    """List all wines for the household."""
+
+    def get(self, request):
+        household = self.get_household(request)
+        wines = Wine.objects.filter(household=household).order_by("name")
+        serializer = WineSerializer(wines, many=True)
+        return Response({"count": len(serializer.data), "wines": serializer.data})
+
+
+class StorageListView(ScannerAPIView):
+    """List all storages (fridges) for the household."""
+
+    def get(self, request):
+        household = self.get_household(request)
+        storages = Storage.objects.filter(household=household).order_by("name")
         return Response({
             "storages": [
                 {
@@ -341,9 +485,10 @@ class StockMoveView(ScannerAPIView):
     """Move a StorageItem to a different drawer and/or storage."""
 
     def patch(self, request, pk):
+        household = self.get_household(request)
         try:
             item = StorageItem.objects.get(
-                id=pk, user=request.user, deleted=False
+                id=pk, wine__household=household, deleted=False
             )
         except StorageItem.DoesNotExist:
             return Response(
@@ -357,8 +502,8 @@ class StockMoveView(ScannerAPIView):
         if storage_name:
             storage, _ = Storage.objects.get_or_create(
                 name=storage_name,
-                user=request.user,
-                defaults={"location": storage_name, "rows": 0, "columns": 0},
+                household=household,
+                defaults={"user": request.user, "location": storage_name, "rows": 0, "columns": 0},
             )
             item.storage = storage
 
@@ -374,3 +519,95 @@ class StockMoveView(ScannerAPIView):
             "storage": item.storage.name,
             "drawer": item.row,
         })
+
+
+class WineImageUploadView(ScannerAPIView):
+    """Upload a label photo for a wine."""
+
+    parser_classes = [MultiPartParser]
+
+    def post(self, request, pk):
+        household = self.get_household(request)
+        try:
+            wine = Wine.objects.get(id=pk, household=household)
+        except Wine.DoesNotExist:
+            return Response(
+                {"error": "Wine not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        image_file = request.FILES.get("image")
+        if not image_file:
+            return Response(
+                {"error": "No image file provided"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        image_type = request.data.get("image_type", "FR")
+        if image_type not in [c[0] for c in ImageType.choices]:
+            image_type = "FR"
+
+        # Replace existing image of same type
+        WineImage.objects.filter(
+            wine=wine, image_type=image_type
+        ).delete()
+
+        wine_image = WineImage.objects.create(
+            wine=wine,
+            user=request.user,
+            image=image_file,
+            image_type=image_type,
+        )
+
+        return Response(
+            {
+                "id": wine_image.id,
+                "wine_id": wine.id,
+                "image_url": request.build_absolute_uri(wine_image.image.url),
+                "image_type": image_type,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    def get(self, request, pk):
+        """Get image URLs for a wine."""
+        household = self.get_household(request)
+        try:
+            wine = Wine.objects.get(id=pk, household=household)
+        except Wine.DoesNotExist:
+            return Response(
+                {"error": "Wine not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        images = WineImage.objects.filter(wine=wine)
+        return Response({
+            "wine_id": wine.id,
+            "images": [
+                {
+                    "id": img.id,
+                    "image_url": request.build_absolute_uri(img.image.url),
+                    "thumbnail_url": request.build_absolute_uri(img.thumbnail.url) if img.thumbnail else None,
+                    "image_type": img.image_type,
+                }
+                for img in images
+            ],
+        })
+
+
+class WineImageFileView(ScannerAPIView):
+    """Serve the actual image file through the authenticated API."""
+
+    def get(self, request, pk):
+        household = self.get_household(request)
+        try:
+            image = WineImage.objects.get(id=pk, wine__household=household)
+        except WineImage.DoesNotExist:
+            return Response(
+                {"error": "Image not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        if not image.image:
+            return Response(
+                {"error": "No file"}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        return FileResponse(image.image.open("rb"), content_type="image/jpeg")

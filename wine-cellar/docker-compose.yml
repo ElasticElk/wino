@@ -26,10 +26,12 @@ services:
     image: postgres:16
     volumes:
       - postgres_data:/var/lib/postgresql/data/
+    ports:
+      - 127.0.0.1:5433:5432
     environment:
-      - POSTGRES_USER=django_dev_user
-      - POSTGRES_PASSWORD=django_dev_password
-      - POSTGRES_DB=django_dev
+      - POSTGRES_USER=wino
+      - POSTGRES_PASSWORD=wino_dev
+      - POSTGRES_DB=wino_dev
   redis:
     image: redis:alpine
   celery:

@@ -32,9 +32,21 @@ urlpatterns = [
         name="api-wine-stock",
     ),
     path(
+        "wines/<int:pk>/images/",
+        views.WineImageUploadView.as_view(),
+        name="api-wine-images",
+    ),
+    path(
         "wines/<int:pk>/",
         views.WineUpdateView.as_view(),
         name="api-wine-update",
     ),
+    path(
+        "images/<int:pk>/file/",
+        views.WineImageFileView.as_view(),
+        name="api-image-file",
+    ),
+    path("wines/search/", views.WineSearchView.as_view(), name="api-wine-search"),
+    path("wines/all/", views.WineListAllView.as_view(), name="api-wine-list-all"),
     path("wines/", views.WineCreateView.as_view(), name="api-wine-create"),
 ]

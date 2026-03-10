@@ -4,6 +4,10 @@ from wine_cellar.apps.wine.models import UserContentModel, Wine
 
 
 class Storage(UserContentModel):
+    household = models.ForeignKey(
+        "scanner.Household", on_delete=models.CASCADE, null=True,
+        related_name="storages",
+    )
     name = models.CharField(max_length=100, verbose_name="Storage Name")
     description = models.TextField(
         verbose_name="Storage Description", null=True, blank=True

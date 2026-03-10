@@ -26,6 +26,7 @@ def load_config(path: str = "config.yaml") -> dict:
 def main():
     config = load_config()
     server_url = config["server"]["url"].rstrip("/")
+    api_key = config["server"].get("api_key", "")
 
     reader = create_reader(config)
     gpio = create_controls(config)
@@ -67,7 +68,7 @@ def main():
             try:
                 resp = requests.post(
                     f"{server_url}/scan",
-                    json={"barcode": barcode, "mode": mode.value},
+                    json={"barcode": barcode, "mode": mode.value, "api_key": api_key},
                     timeout=timeout,
                 )
                 resp.raise_for_status()

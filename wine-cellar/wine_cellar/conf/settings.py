@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "rest_framework.authtoken",
     "wine_cellar.apps.api",
+    "wine_cellar.apps.scanner",
 ]
 
 REST_FRAMEWORK = {

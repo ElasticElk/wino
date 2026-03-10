@@ -3,3 +3,6 @@ requests>=2.31
 python-telegram-bot>=21.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
+Pillow>=10.0
+pyzbar>=0.1.9
+pycountry>=24.6
