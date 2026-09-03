@@ -3,6 +3,7 @@ from django.conf import settings
 from django.utils.translation import gettext_lazy as _
 
 from wine_cellar.apps.storage.models import Storage
+from wine_cellar.apps.scanner.households import get_user_household, scope
 from wine_cellar.apps.user.views import get_user_settings
 
 
@@ -36,12 +37,14 @@ class StockForm(forms.Form):
         self.user = kwargs.pop("user")
         self.storage_item = kwargs.pop("storage_item", None)
         super().__init__(*args, **kwargs)
-        user_fields = ["storage"]
-        for user_field in user_fields:
-            self.fields[user_field].queryset = self.fields[
-                user_field
-            ].queryset.model.objects.filter(user=self.user)
-            self.fields[user_field].user = self.user
+        # Storages belong to the household, not the person. Filtering on user
+        # here meant a member could not place a bottle in a storage a
+        # housemate had created — including every storage in their own cellar.
+        household = get_user_household(self.user)
+        self.fields["storage"].queryset = scope(
+            self.fields["storage"].queryset.model.objects.all(), household,
+        )
+        self.fields["storage"].user = self.user
         user_settings = get_user_settings(self.user)
         self.fields["price"].help_text = _(
             "Enter the price of the bottle in %(currency)s."

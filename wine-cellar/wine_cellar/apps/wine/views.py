@@ -13,6 +13,7 @@ from django.utils.formats import number_format
 from django.views.generic import DeleteView, DetailView, FormView, TemplateView
 from django_filters.views import FilterView
 
+from wine_cellar.apps.scanner.households import HouseholdScopedMixin, scope
 from wine_cellar.apps.storage.models import StorageItem
 from wine_cellar.apps.user.views import get_user_settings
 from wine_cellar.apps.wine.filters import WineFilter
@@ -20,45 +21,33 @@ from wine_cellar.apps.wine.forms import WineEditForm, WineForm, image_fields_map
 from wine_cellar.apps.wine.models import Wine, WineImage
 
 
-class HomePageView(TemplateView):
+class HomePageView(HouseholdScopedMixin, TemplateView):
     template_name = "homepage.html"
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        wines = Wine.objects.filter(user=self.request.user).count()
+        household_wines = self.scoped(Wine.objects.all())
+        wines = household_wines.count()
         wines_in_stock = (
-            Wine.objects.filter(storageitem__isnull=False, storageitem__deleted=False)
-            .filter(user=self.request.user)
+            household_wines.filter(
+                storageitem__isnull=False, storageitem__deleted=False,
+            )
             .distinct()
             .count()
         )
-        countries = (
-            Wine.objects.filter(user=self.request.user)
-            .values_list("country")
-            .distinct()
-            .count()
-        )
+        countries = household_wines.values_list("country").distinct().count()
         oldest = "-"
         youngest = "-"
         try:
-            oldest = (
-                Wine.objects.filter(user=self.request.user)
-                .filter(vintage__isnull=False)
-                .earliest("vintage")
-                .vintage
-            )
-            youngest = (
-                Wine.objects.filter(user=self.request.user)
-                .filter(vintage__isnull=False)
-                .latest("vintage")
-                .vintage
-            )
+            dated = household_wines.filter(vintage__isnull=False)
+            oldest = dated.earliest("vintage").vintage
+            youngest = dated.latest("vintage").vintage
         except Wine.DoesNotExist:
             pass
         total_value = StorageItem.objects.aggregate(
             total=Sum(
                 Coalesce("price", "wine__price"),
-                filter=Q(deleted=False, wine__user=self.request.user),
+                filter=Q(deleted=False, wine__household=self.household),
             )
         )["total"] or Decimal("0")
         total_value = total_value.quantize(Decimal("0"))
@@ -83,7 +72,7 @@ class HomePageView(TemplateView):
         return context
 
 
-class WineCreateView(FormView):
+class WineCreateView(HouseholdScopedMixin, FormView):
     template_name = "wine_create.html"
     form_class = WineForm
     success_url = reverse_lazy("wine-list")
@@ -103,7 +92,7 @@ class WineCreateView(FormView):
         if form_step is None:
             form_step = 5
         if form_step == 5 or "save_finish" in self.request.POST:
-            self.process_form_data(self.request.user, form.cleaned_data)
+            self.process_form_data(self.request.user, form.cleaned_data, self.household)
             return super().form_valid(form)
         elif form_step < 5:
             # FIXME: hacky workaround to increase form_step field
@@ -114,7 +103,7 @@ class WineCreateView(FormView):
         return super().form_invalid(form)
 
     @staticmethod
-    def process_form_data(user, cleaned_data):
+    def process_form_data(user, cleaned_data, household=None):
         abv = cleaned_data["abv"]
         size = cleaned_data["size"][0]
         category = cleaned_data["category"]
@@ -146,6 +135,9 @@ class WineCreateView(FormView):
             name=name,
             barcode=barcode,
             user=user,
+            # Without this the wine is invisible to the API and the bot, which
+            # scope by household — the web form used to create orphans.
+            household=household,
             vintage=vintage,
             drink_by=drink_by,
             wine_type=wine_type,
@@ -170,7 +162,7 @@ class WineCreateView(FormView):
                 )
 
 
-class WineUpdateView(FormView):
+class WineUpdateView(HouseholdScopedMixin, FormView):
     template_name = "wine_edit.html"
     form_class = WineEditForm
     success_url = reverse_lazy("wine-list")
@@ -183,12 +175,12 @@ class WineUpdateView(FormView):
 
     def get_initial(self):
         initial = super().get_initial()
-        wine = get_object_or_404(Wine, pk=self.kwargs["pk"], user=self.request.user)
+        wine = get_object_or_404(self.scoped(Wine.objects.all()), pk=self.kwargs["pk"])
         initial.update(model_to_dict(wine))
         return initial
 
     def form_valid(self, form):
-        wine = get_object_or_404(Wine, pk=self.kwargs["pk"], user=self.request.user)
+        wine = get_object_or_404(self.scoped(Wine.objects.all()), pk=self.kwargs["pk"])
         self.process_form_data(wine, self.request.user, form.cleaned_data)
         self.success_url = reverse_lazy("wine-detail", kwargs={"pk": wine.pk})
         return super().form_valid(form)
@@ -254,13 +246,12 @@ class WineUpdateView(FormView):
                 )
 
 
-class WineDetailView(DetailView):
+class WineDetailView(HouseholdScopedMixin, DetailView):
     template_name = "wine_detail.html"
     model = Wine
 
     def get_queryset(self):
-        qs = super().get_queryset()
-        return qs.filter(user=self.request.user)
+        return self.scoped(super().get_queryset())
 
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
@@ -273,7 +264,7 @@ class WineDetailView(DetailView):
         return ctx
 
 
-class WineListView(FilterView):
+class WineListView(HouseholdScopedMixin, FilterView):
     model = Wine
     template_name = "wine_list.html"
     context_object_name = "wines"
@@ -288,41 +279,40 @@ class WineListView(FilterView):
                 F("price"),
             )
         )
-        return qs.filter(user=self.request.user)
+        return self.scoped(qs)
 
 
 class WineScanView(TemplateView):
     template_name = "scan_wine.html"
 
 
-class WineScannedView(TemplateView):
+class WineScannedView(HouseholdScopedMixin, TemplateView):
     template_name = "scanned_wine.html"
 
     def dispatch(self, request, *args, **kwargs):
         code = self.kwargs["code"]
-        wine = Wine.objects.filter(barcode=code).filter(user=self.request.user).first()
+        wine = self.scoped(Wine.objects.filter(barcode=code)).first()
         if wine:
             return redirect(reverse("wine-detail", kwargs={"pk": wine.pk}))
 
         return super().dispatch(request, *args, **kwargs)
 
 
-class WineDeleteView(DeleteView):
+class WineDeleteView(HouseholdScopedMixin, DeleteView):
     model = Wine
     template_name = "wine_confirm_delete.html"
     success_url = reverse_lazy("wine-list")
 
     def get_queryset(self):
-        qs = super().get_queryset()
-        return qs.filter(user=self.request.user)
+        return self.scoped(super().get_queryset())
 
 
-class WineMapView(TemplateView):
+class WineMapView(HouseholdScopedMixin, TemplateView):
     template_name = "wine_map.html"
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        wines = Wine.objects.filter(user=self.request.user)
+        wines = self.scoped(Wine.objects.all())
 
         context.update(
             {

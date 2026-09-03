@@ -10,7 +10,8 @@ from rest_framework.views import APIView
 
 from rest_framework.parsers import MultiPartParser
 
-from wine_cellar.apps.scanner.models import Household, HouseholdMembership
+from wine_cellar.apps.scanner.households import get_user_household
+from wine_cellar.apps.scanner.models import Household
 from wine_cellar.apps.storage.models import Storage, StorageItem
 from wine_cellar.apps.wine.models import ImageType, Wine, WineImage
 
@@ -58,37 +59,22 @@ class ScannerAPIView(APIView):
     def get_household(self, request) -> Household:
         """Resolve the household for this request.
 
-        Priority:
-        1. X-Household header (must be a household the user belongs to)
-        2. User's default household (is_default=True)
-        3. User's first household
+        Priority: X-Household header (only if the user belongs to it), then
+        their default household, then their first. Shares one implementation
+        with the web layer so the two cannot drift apart again.
         """
         header_id = request.META.get("HTTP_X_HOUSEHOLD")
+        requested = None
         if header_id:
             try:
-                membership = HouseholdMembership.objects.select_related("household").get(
-                    user=request.user, household_id=int(header_id),
-                )
-                return membership.household
-            except (HouseholdMembership.DoesNotExist, ValueError):
-                pass
+                requested = int(header_id)
+            except (TypeError, ValueError):
+                requested = None
 
-        # Default household
-        membership = HouseholdMembership.objects.filter(
-            user=request.user, is_default=True,
-        ).select_related("household").first()
-        if membership:
-            return membership.household
-
-        # Fallback: first household
-        membership = HouseholdMembership.objects.filter(
-            user=request.user,
-        ).select_related("household").first()
-        if membership:
-            return membership.household
-
-        # No household at all — shouldn't happen after migration
-        raise Household.DoesNotExist("User has no household")
+        household = get_user_household(request.user, household_id=requested)
+        if household is None:
+            raise Household.DoesNotExist("User has no household")
+        return household
 
 
 class WineByBarcodeView(ScannerAPIView):

@@ -10,6 +10,7 @@ from django.db.models import Q
 from django.forms import DateField, ImageField
 from django.utils.translation import gettext_lazy as _
 
+from wine_cellar.apps.scanner.households import household_member_ids
 from wine_cellar.apps.user.views import get_user_settings
 from wine_cellar.apps.wine.fields import OpenMultipleChoiceField
 from wine_cellar.apps.wine.models import (
@@ -172,10 +173,16 @@ class WineBaseForm(TomSelectMixin, WineFormPostCleanMixin, forms.Form):
             "region",
             "appellation",
         ]
+        # Vocabulary (grapes, regions, sizes...) is shared across the
+        # household, so a member sees terms a housemate already added instead
+        # of silently creating a duplicate.
+        household_user_ids = household_member_ids(user)
         for user_field in user_fields:
             self.fields[user_field].queryset = self.fields[
                 user_field
-            ].queryset.model.objects.filter(Q(user=None) | Q(user=user))
+            ].queryset.model.objects.filter(
+                Q(user=None) | Q(user__in=household_user_ids)
+            )
             self.fields[user_field].user = user
         user_settings = get_user_settings(user)
         self.fields["price"].help_text = _(

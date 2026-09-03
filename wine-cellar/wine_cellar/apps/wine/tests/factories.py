@@ -4,6 +4,7 @@ import factory
 from factory import post_generation
 from factory.django import DjangoModelFactory, ImageField
 
+from wine_cellar.apps.scanner.households import get_user_household
 from wine_cellar.apps.user.tests.factories import UserFactory
 from wine_cellar.apps.wine.models import (
     Appellation,
@@ -81,6 +82,9 @@ class WineFactory(DjangoModelFactory):
         model = Wine
 
     user = factory.SubFactory(UserFactory)
+    # Wines are scoped by household, not by user — a wine without one is
+    # invisible everywhere, which is exactly the orphan bug this guards against.
+    household = factory.LazyAttribute(lambda o: get_user_household(o.user))
     name = factory.Faker("name")
     wine_type = random.choice(WineType.choices)[0]
     vintage = random.randint(1900, 2024)
