@@ -37,6 +37,7 @@ class WineSerializer(serializers.ModelSerializer):
             "abv",
             "price",
             "barcode",
+            "producer",
             "comment",
             "rating",
             "grape_variety",
@@ -151,13 +152,9 @@ class WineCreateSerializer(serializers.Serializer):
         attribute_names = validated_data.pop("attributes", [])
         category = validated_data.pop("category", None)
 
-        # Build comment: "Producer: X | Tasting notes here"
-        parts = []
-        if producer:
-            parts.append(f"Producer: {producer}")
-        if description:
-            parts.append(description)
-        comment = " | ".join(parts)[:500]
+        # producer and description are separate columns; the comment holds
+        # only the tasting notes.
+        comment = (description or "")[:500]
 
         # Size
         size_obj = None
@@ -221,6 +218,7 @@ class WineCreateSerializer(serializers.Serializer):
             user=user,
             household=household,
             name=validated_data["name"],
+            producer=producer,
             barcode=validated_data.get("barcode", ""),
             wine_type=validated_data.get("wine_type", "RE"),
             category=category,

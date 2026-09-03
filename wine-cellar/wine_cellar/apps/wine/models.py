@@ -184,6 +184,10 @@ class Wine(UserContentModel):
         related_name="wines",
     )
     name = models.CharField(max_length=100)
+    # Was packed into `comment` as "Producer: X | tasting notes" and parsed back
+    # by prefix match in four places. Any update carrying a producer but no
+    # description rebuilt the string and silently destroyed the notes.
+    producer = models.CharField(max_length=100, blank=True, default="")
     barcode = models.CharField(max_length=100, null=True)
     wine_type = models.CharField(max_length=2, choices=WineType)
     category = models.CharField(max_length=2, choices=Category, null=True)

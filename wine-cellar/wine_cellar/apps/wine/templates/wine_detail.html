@@ -127,6 +127,12 @@
                             </td>
                         </tr>
                     {% endif %}
+                    {% if wine.producer %}
+                        <tr>
+                            <th>{% translate "Producer" %}</th>
+                            <td>{{ wine.producer }}</td>
+                        </tr>
+                    {% endif %}
                     {% if wine.comment %}
                         <tr>
                             <th>{% translate "Comment" %}</th>

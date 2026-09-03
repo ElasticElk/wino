@@ -305,15 +305,7 @@ class WineInStockView(ScannerAPIView):
         for item in items:
             wine = item.wine
             if wine.id not in wine_map:
-                # Extract producer from comment ("Producer: X | description")
-                producer = ""
-                if wine.comment:
-                    for part in wine.comment.split("|"):
-                        part = part.strip()
-                        if part.startswith("Producer:"):
-                            producer = part[len("Producer:"):].strip()
-                            break
-
+                producer = wine.producer
                 grapes = wine.grapes.all()
                 grape = grapes[0].name if grapes else ""
 
@@ -339,6 +331,37 @@ class WineInStockView(ScannerAPIView):
         return Response({"count": len(wines_in_stock), "wines": wines_in_stock})
 
 
+class WineDetailView(ScannerAPIView):
+    """One wine with its stock locations, in a constant number of queries.
+
+    The bot previously built a detail card by calling list_all_wines() *and*
+    wines_in_stock() and merging them — two full-collection fetches to render
+    one card. Five other callbacks (set quantity, move, drawer view, ...) did
+    the same to act on a single bottle.
+    """
+
+    def get(self, request, pk):
+        household = self.get_household(request)
+        wine = wine_queryset(household).filter(pk=pk).first()
+        if wine is None:
+            return Response(
+                {"error": "Wine not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        data = WineSerializer(wine).data
+        data["items"] = [
+            {
+                "item_id": item.id,
+                "storage": item.storage.name,
+                "drawer": item.row,
+            }
+            for item in StorageItem.objects.filter(
+                wine=wine, deleted=False,
+            ).select_related("storage").order_by("storage__name", "row")
+        ]
+        return Response(data)
+
+
 class WineUpdateView(ScannerAPIView):
     """Update fields on an existing wine."""
 
@@ -362,16 +385,14 @@ class WineUpdateView(ScannerAPIView):
             if field in data:
                 setattr(wine, field, data[field])
 
-        # Update comment from producer + description
-        producer = data.get("producer", "")
-        description = data.get("description", "")
-        if producer or description:
-            parts = []
-            if producer:
-                parts.append(f"Producer: {producer}")
-            if description:
-                parts.append(description)
-            wine.comment = " | ".join(parts)[:500]
+        # Each field stands alone now. Previously both were packed into
+        # `comment`, so a payload with a producer and no description wiped the
+        # tasting notes — which is exactly what "Update from label" sends when
+        # Grok reads a producer off the label but writes no notes.
+        if "producer" in data:
+            wine.producer = data["producer"]
+        if "description" in data:
+            wine.comment = (data["description"] or "")[:500]
 
         rating = data.get("rating")
         if rating is not None:

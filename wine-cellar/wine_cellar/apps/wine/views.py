@@ -109,6 +109,7 @@ class WineCreateView(HouseholdScopedMixin, FormView):
         category = cleaned_data["category"]
         barcode = cleaned_data["barcode"]
         comment = cleaned_data["comment"]
+        producer = cleaned_data.get("producer", "")
         country = cleaned_data["country"]
         region = cleaned_data["region"]
         appellation = cleaned_data["appellation"]
@@ -133,6 +134,7 @@ class WineCreateView(HouseholdScopedMixin, FormView):
             region=region[0] if region else None,
             appellation=appellation[0] if appellation else None,
             name=name,
+            producer=producer,
             barcode=barcode,
             user=user,
             # Without this the wine is invisible to the API and the bot, which
@@ -192,6 +194,7 @@ class WineUpdateView(HouseholdScopedMixin, FormView):
         category = cleaned_data["category"]
         barcode = cleaned_data["barcode"]
         comment = cleaned_data["comment"]
+        producer = cleaned_data.get("producer", "")
         country = cleaned_data["country"]
         region = cleaned_data["region"]
         appellation = cleaned_data["appellation"]
@@ -216,6 +219,7 @@ class WineUpdateView(HouseholdScopedMixin, FormView):
         wine.region = region[0] if region else None
         wine.appellation = appellation[0] if appellation else None
         wine.name = name
+        wine.producer = producer
         wine.barcode = barcode
         wine.rating = rating
         wine.vintage = vintage

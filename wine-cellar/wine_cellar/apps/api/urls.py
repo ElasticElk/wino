@@ -27,6 +27,11 @@ urlpatterns = [
         name="api-storage-list",
     ),
     path(
+        "wines/<int:pk>/detail/",
+        views.WineDetailView.as_view(),
+        name="api-wine-detail",
+    ),
+    path(
         "wines/<int:pk>/stock/",
         views.WineStockView.as_view(),
         name="api-wine-stock",

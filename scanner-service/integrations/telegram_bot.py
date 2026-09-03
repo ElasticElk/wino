@@ -1747,12 +1747,6 @@ class TelegramBotHandler:
         wine_id = wine["id"]
         text = f"\U0001F377 <b>{wine['name']}</b>\n\n"
         producer = wine.get("producer", "")
-        if not producer:
-            comment = wine.get("comment", "")
-            if comment:
-                parts = comment.split(" | ", 1)
-                if parts[0].startswith("Producer:"):
-                    producer = parts[0].replace("Producer: ", "")
         if producer:
             text += f"\U0001F464 {producer}\n"
         if wine.get("vintage"):
@@ -1813,8 +1807,7 @@ class TelegramBotHandler:
         Returns (text, InlineKeyboardMarkup) or (None, None) if wine not found.
         """
         api = api or self.api
-        wines = api.wines_in_stock()
-        wine = next((w for w in wines if w["id"] == wine_id), None)
+        wine = api.get_wine_detail(wine_id)
         if not wine:
             return None, None
 
@@ -2607,18 +2600,11 @@ class TelegramBotHandler:
 
                 text = f"📝 <b>{wine['name']}</b>\n\n"
 
+                producer = wine.get("producer", "")
+                if producer:
+                    text += f"👤 {producer}\n\n"
                 comment = wine.get("comment", "")
-                if comment:
-                    parts = comment.split(" | ", 1)
-                    if len(parts) == 2 and parts[0].startswith("Producer:"):
-                        text += f"👤 {parts[0]}\n\n"
-                        text += f"{parts[1]}\n"
-                    elif parts[0].startswith("Producer:"):
-                        text += f"👤 {parts[0]}\n"
-                    else:
-                        text += f"{comment}\n"
-                else:
-                    text += "<i>No tasting notes yet.</i>\n"
+                text += f"{comment}\n" if comment else "<i>No tasting notes yet.</i>\n"
 
                 text += "\n"
                 if wine.get("appellation_name"):
@@ -2767,9 +2753,7 @@ class TelegramBotHandler:
         elif action == "ml":
             wine_id = data["wine_id"]
             try:
-                # Get wine's current items
-                wines = api.wines_in_stock()
-                wine = next((w for w in wines if w["id"] == wine_id), None)
+                wine = api.get_wine_detail(wine_id)
                 if not wine:
                     await query.edit_message_text("Wine not found in stock.")
                     return
@@ -2814,8 +2798,7 @@ class TelegramBotHandler:
                 storage = next((s for s in storages if s["id"] == storage_id), None)
                 storage_name = storage["name"] if storage else api.default_storage
 
-                wines = api.wines_in_stock()
-                wine = next((w for w in wines if w["id"] == wine_id), None)
+                wine = api.get_wine_detail(wine_id)
                 if not wine:
                     await query.edit_message_text("Wine not found in stock.")
                     return
@@ -2869,8 +2852,7 @@ class TelegramBotHandler:
             wine_id = data["wine_id"]
             page = data.get("page", 0)
             try:
-                wines = api.wines_in_stock()
-                wine = next((w for w in wines if w["id"] == wine_id), None)
+                wine = api.get_wine_detail(wine_id)
                 if not wine:
                     await query.edit_message_text("Wine not found in stock.")
                     return

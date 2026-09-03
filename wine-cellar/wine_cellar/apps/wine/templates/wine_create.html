@@ -48,6 +48,7 @@
                         <legend>
                             <h2 class="form-subhead text--gray">{% translate "Origin" %}</h2>
                         </legend>
+                        {% include 'forms/form_field.html' with field=form.producer %}
                         {% include 'forms/form_field.html' with field=form.vineyard %}
                         {% include 'forms/form_field.html' with field=form.region %}
                         {% include 'forms/form_field.html' with field=form.appellation %}

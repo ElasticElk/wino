@@ -23,9 +23,9 @@ CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
 
 
 def _producer_hint(wine) -> str:
-    """Producer is stored inside `comment` as "Producer: X | notes"."""
-    if wine.comment and wine.comment.startswith("Producer: "):
-        return wine.comment.split(" | ", 1)[0][len("Producer: "):]
+    """Producer, falling back to the first vineyard when it isn't set."""
+    if wine.producer:
+        return wine.producer
     if wine.vineyard.exists():
         return wine.vineyard.first().name
     return ""

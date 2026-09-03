@@ -94,21 +94,18 @@ class WineCellarAPI:
         return resp.json()
 
     def get_wine_detail(self, wine_id: int) -> dict | None:
-        """Get full wine details, including storage locations."""
-        wines = self.list_all_wines()
-        wine = next((w for w in wines if w["id"] == wine_id), None)
-        if not wine:
+        """Full details for one wine, including its stock locations.
+
+        One request. This used to fetch every wine in the cellar *and* every
+        in-stock wine, then merge the two client-side, to render a single card.
+        """
+        resp = self.session.get(
+            f"{self.base_url}/api/wines/{wine_id}/detail/", timeout=10,
+        )
+        if resp.status_code == 404:
             return None
-        # Merge in location items from in-stock endpoint
-        try:
-            in_stock = self.wines_in_stock()
-            stock_entry = next((w for w in in_stock if w["id"] == wine_id), None)
-            if stock_entry:
-                wine["items"] = stock_entry.get("items", [])
-                wine["producer"] = stock_entry.get("producer", "")
-        except Exception:
-            pass
-        return wine
+        resp.raise_for_status()
+        return resp.json()
 
     def refresh_references(self, wine_id: int, wait_seconds: int = 240,
                            poll_seconds: int = 5) -> dict:

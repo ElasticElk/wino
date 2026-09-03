@@ -361,6 +361,11 @@ class WineBaseForm(TomSelectMixin, WineFormPostCleanMixin, forms.Form):
         required=False,
         help_text=_("Enter the barcode number of the wine as indicated on the label."),
     )
+    producer = forms.CharField(
+        max_length=100,
+        required=False,
+        help_text=_("The winery, producer or domaine that made this wine."),
+    )
     comment = forms.CharField(
         max_length=250,
         required=False,
