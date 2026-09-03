@@ -7,6 +7,7 @@ from django.templatetags.static import static
 from django.utils.formats import number_format
 
 from wine_cellar.apps.user.models import UserSettings
+from wine_cellar.apps.wine.models import Wine
 
 
 @pytest.mark.django_db
@@ -96,3 +97,35 @@ def test_get_average_respects_user_currency(user, wine_factory, storage_item_fac
     currency = settings.CURRENCY_SYMBOLS.get(us.currency)
     expected = f"{number_format(avg, use_l10n=True)}{currency}"
     assert wine.get_average_price_with_currency == expected
+
+
+# --- market price display ----------------------------------------------------
+
+@pytest.mark.django_db
+def test_market_price_shown_in_the_viewers_currency():
+    wine = Wine(market_price=Decimal("14"), market_price_currency="EUR")
+    # Labelled as a conversion — it must not read as a quoted UK price.
+    assert wine.market_price_display("GBP") == "£12 (from €14)"
+
+
+@pytest.mark.django_db
+def test_market_price_in_the_same_currency_is_not_annotated():
+    wine = Wine(market_price=Decimal("14"), market_price_currency="EUR")
+    assert wine.market_price_display("EUR") == "€14"
+
+
+@pytest.mark.django_db
+def test_price_in_an_unrateable_currency_is_still_shown():
+    """Previously returned "" and silently hid a price we actually had.
+
+    Grok is now told a real price in another currency beats null, so currencies
+    outside CURRENCY_RATES_TO_USD reach here routinely.
+    """
+    wine = Wine(market_price=Decimal("120"), market_price_currency="CHF")
+    assert wine.market_price_display("GBP") == "CHF 120"
+
+
+@pytest.mark.django_db
+def test_no_price_renders_as_empty():
+    assert Wine().market_price_display("GBP") == ""
+    assert Wine(market_price=Decimal("10")).market_price_display("GBP") == ""

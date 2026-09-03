@@ -109,10 +109,20 @@ Context:
 
 Step 1 — Briefly summarise what the searches actually returned. Quote real values from real pages: "Vivino: 4.1 (243 ratings)", "Tim Atkin SA Report 2022: 92pts", "The Wine Society £27.99, Lea & Sandeman £29, Majestic £24" etc. If you find data on adjacent vintages (e.g. you searched 2024 but only found 2022/2023 data), report that — adjacent vintages are usually a valid fallback.
 
-Step 2 — Extract the values into JSON. For market_price, use the median of the real prices you found, not the maximum. **Use adjacent-vintage data when the exact vintage is missing — don't return null just because the exact vintage page wasn't indexed yet.** Most non-fine wines have stable pricing year to year; Vivino ratings carry across vintages on the same wine page; critic scores from the prior 1-2 vintages are a strong indicator. Apply confidence accordingly:
+Step 2 — Extract the values into JSON. For market_price, use the median of the real prices you found, not the maximum.
+
+**A real price in another currency beats null.** If you find listings only in
+EUR, USD, ZAR or similar, return that figure and set market_price_currency to
+the currency you actually found — it gets converted afterwards. Returning null
+because nothing was listed in {target_currency} throws away a price you have.
+Only use null when you found no prices anywhere. **Use adjacent-vintage data when the exact vintage is missing — don't return null just because the exact vintage page wasn't indexed yet.** Most non-fine wines have stable pricing year to year; Vivino ratings carry across vintages on the same wine page; critic scores from the prior 1-2 vintages are a strong indicator. Apply confidence accordingly:
   • high   — exact wine + exact vintage found on a live page (Vivino, named critic, named retailer)
   • medium — exact wine but adjacent vintage (e.g. 2023 data when asked 2024), or same producer's comparable cuvée. Use the values you found, mark medium.
   • low    — searches returned nothing on this wine OR the producer's comparable wines; value = null
+
+Confidence describes how well you know the *price*, not whether it was quoted in
+the requested currency. Real EUR listings for an Italian wine are high or medium
+confidence, not low.
 
 The reasoning field should be one short sentence quoting or citing what you found ("Vivino 4.0 from ~150 ratings on the wine page covering all vintages", "2023 listed at £9.99-£12.25 across Frontier/Winedirect/Ministry of Drinks; assuming similar for 2024", "Tim Atkin SA Report 2022 gave the 2020 vintage 92pts").
 

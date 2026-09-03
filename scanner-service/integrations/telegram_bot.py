@@ -1339,6 +1339,18 @@ class TelegramBotHandler:
         it used to spend the turn explaining that only commands work.
         """
         text = (update.message.text or "").strip()
+
+        # A pasted link is not a wine name. Searching the cellar for a URL
+        # returns nothing and tells the sender nothing about why.
+        if re.search(r"https?://|www\.", text, re.IGNORECASE):
+            await update.message.reply_text(
+                "\U0001F517 I can't open links yet.\n\n"
+                "If that's a wine list, take a <b>screenshot</b> or photo of it "
+                "and send me that — I'll read it and tell you what to order.",
+                parse_mode="HTML",
+            )
+            return
+
         if len(text) >= 3:
             await self._do_search(update, text)
             return

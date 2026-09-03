@@ -299,18 +299,34 @@ class Wine(UserContentModel):
         return "Average"
 
     def market_price_display(self, target_currency: str) -> str:
-        """Return a human-readable market price converted to `target_currency`,
-        or empty string if no market_price set."""
+        """Human-readable market price, converted where we can.
+
+        Prices are stored in whatever currency they were actually found in —
+        a real EUR listing for an Italian wine is worth more than nothing at
+        all. When there's no conversion rate for that currency, show the
+        original rather than hiding a price we do have.
+        """
         from wine_cellar.apps.wine.utils import convert_price
 
         if self.market_price is None or not self.market_price_currency:
             return ""
+
         amount = convert_price(
             self.market_price, self.market_price_currency, target_currency,
         )
         if amount is None:
-            return ""
+            original = settings.CURRENCY_SYMBOLS.get(
+                self.market_price_currency, self.market_price_currency + " ",
+            )
+            return f"{original}{self.market_price:,.0f}"
+
         symbol = settings.CURRENCY_SYMBOLS.get(target_currency, target_currency)
+        if self.market_price_currency != target_currency:
+            # Say so — a converted figure shouldn't read as a quoted one.
+            original = settings.CURRENCY_SYMBOLS.get(
+                self.market_price_currency, self.market_price_currency + " ",
+            )
+            return f"{symbol}{amount:,.0f} (from {original}{self.market_price:,.0f})"
         return f"{symbol}{amount:,.0f}"
 
     def get_absolute_url(self):

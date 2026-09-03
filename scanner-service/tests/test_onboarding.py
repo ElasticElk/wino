@@ -109,3 +109,26 @@ def test_empty_state_invites_a_photo_and_never_mentions_scanning():
 def test_empty_state_takes_a_context_line():
     text, _ = empty_cellar("Yskas is empty")
     assert "Yskas is empty" in text
+
+
+@pytest.mark.asyncio
+async def test_a_pasted_link_is_not_searched_for(handler):
+    """Someone shared a wine-list URL and the bot searched the cellar for it."""
+    handler._do_search = AsyncMock()
+    u = _update(111, "WINE LIST — Saviano's\nhttps://share.google/VTAfvGok")
+
+    await handler._unknown_text(u, MagicMock())
+
+    handler._do_search.assert_not_awaited()
+    reply = u.message.reply_text.call_args.args[0]
+    assert "screenshot" in reply.lower()
+
+
+@pytest.mark.asyncio
+async def test_plain_text_still_searches(handler):
+    handler._do_search = AsyncMock()
+    u = _update(111, "chenin")
+
+    await handler._unknown_text(u, MagicMock())
+
+    handler._do_search.assert_awaited_once()
