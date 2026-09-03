@@ -1,7 +1,11 @@
 services:
   web:
     image: ghcr.io/the-broke-sommeliers/wine-cellar-web:latest
-    command: gunicorn wine_cellar.conf.wsgi:application --bind 0.0.0.0:8000
+    # 3 workers so one slow request can't block the whole app (the default
+    # is a single sync worker), and an explicit timeout above the default 30s.
+    command: >
+      gunicorn wine_cellar.conf.wsgi:application --bind 0.0.0.0:8000
+      --workers 3 --timeout 120 --graceful-timeout 30
     volumes:
       - static_volume:/home/app/web/staticfiles
       - media_volume:/home/app/web/mediafiles

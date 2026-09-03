@@ -47,6 +47,8 @@ Auth: `Authorization: Token <token>` header. Optional `X-Household: <id>` header
 - `POST /api/stock/set/` — Set exact quantity
 - `PATCH /api/stock/<pk>/move/` — Move bottle
 - `GET /api/wines/<pk>/stock/` — Stock details for a wine
+- `POST /api/wines/<pk>/refresh-references/` — **Queues** a Grok reference lookup, returns `202 {task_id}`
+- `GET /api/wines/<pk>/refresh-references/?task_id=<id>` — Poll that task (`PENDING`/`SUCCESS`/`FAILURE`); without `task_id`, returns the wine's stored reference values
 - `GET /api/images/<pk>/file/` — Serve wine image file
 - `GET /api/storages/` — List storages
 - `GET /api/scanner/config/` — Scanner bootstrap config (admin-only, returns telegram_users, scanners, service config)
@@ -112,6 +114,16 @@ Service: `scanner-server` (FastAPI :8080). Connects to wine-cellar network for i
 
 ## Inter-Service Communication
 Scanner → Wine Cellar via REST API over shared Docker network (`http://web:8000` dev, `wine-cellar-web:8000` prod). Token auth from config.yaml.
+
+## Background Work (Celery)
+
+`refresh_wine_references` looks up critic score, Vivino rating and market price via Grok's live web search. It runs **as a Celery task, never inline**: the search budgets 120s per attempt and retries once, while gunicorn's default timeout is 30s with a single sync worker — so a synchronous call both died and blocked every other request (bot traffic included) until it did. Prod gunicorn is now pinned to `--workers 3 --timeout 120`.
+
+Callers POST to queue, then poll the same URL with `?task_id=`. The Telegram client (`WineCellarAPI.refresh_references`) does this polling on its own background thread; the web detail page does it in JS.
+
+`drink_by_reminder` (beat, 02:30 daily) is household-scoped, like everything else.
+
+**The dev celery workers bind-mount the source** (`.:/usr/src/app`), same as `web`. Without that they ran whatever was baked into the image, so task changes silently never took effect — a `restart` could not pick them up, only a rebuild. If a task appears unregistered (`Received unregistered task of type ...`), check that mount first.
 
 ## Auth
 - Web: Django built-in + django-allauth (OAuth/OIDC)

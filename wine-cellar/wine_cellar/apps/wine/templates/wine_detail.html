@@ -202,31 +202,50 @@
                     if (!btn) return;
                     btn.addEventListener("click", async () => {
                         btn.disabled = true;
-                        status.textContent = "{% translate 'Asking Grok...' %}";
+                        status.textContent = "{% translate 'Asking Grok — this can take a minute...' %}";
                         const csrf = document.cookie.match(/csrftoken=([^;]+)/);
+                        const headers = {
+                            "X-CSRFToken": csrf ? csrf[1] : "",
+                            "Content-Type": "application/json",
+                        };
+                        const done = (msg) => { status.textContent = msg; btn.disabled = false; };
                         try {
+                            // The server queues the lookup and answers 202 at
+                            // once; a live web search is far too slow to hold a
+                            // request open for. Poll until the task settles.
                             const resp = await fetch(btn.dataset.url, {
-                                method: "POST",
-                                headers: {
-                                    "X-CSRFToken": csrf ? csrf[1] : "",
-                                    "Content-Type": "application/json",
-                                },
-                                credentials: "same-origin",
+                                method: "POST", headers, credentials: "same-origin",
                             });
-                            const data = await resp.json();
-                            if (resp.ok && data.updated) {
-                                status.textContent = "{% translate 'Updated. Reloading...' %}";
-                                setTimeout(() => location.reload(), 600);
-                            } else if (resp.ok) {
-                                status.textContent = data.message || "{% translate 'Low confidence — no update.' %}";
-                                btn.disabled = false;
-                            } else {
-                                status.textContent = data.error || "{% translate 'Request failed.' %}";
-                                btn.disabled = false;
+                            const queued = await resp.json();
+                            if (!resp.ok) { done(queued.error || "{% translate 'Request failed.' %}"); return; }
+                            if (!queued.task_id) { location.reload(); return; }
+
+                            const deadline = Date.now() + 240000;
+                            while (Date.now() < deadline) {
+                                await new Promise(r => setTimeout(r, 4000));
+                                const poll = await fetch(
+                                    `${btn.dataset.url}?task_id=${encodeURIComponent(queued.task_id)}`,
+                                    { credentials: "same-origin" },
+                                );
+                                if (!poll.ok) continue;
+                                const body = await poll.json();
+                                if (body.state === "SUCCESS") {
+                                    const result = body.result || {};
+                                    if (result.updated) {
+                                        status.textContent = "{% translate 'Updated. Reloading...' %}";
+                                        setTimeout(() => location.reload(), 600);
+                                    } else {
+                                        done(result.message || "{% translate 'Low confidence — no update.' %}");
+                                    }
+                                    return;
+                                }
+                                if (body.state === "FAILURE") {
+                                    done("{% translate 'Lookup failed.' %}"); return;
+                                }
                             }
+                            done("{% translate 'Still looking — check back shortly.' %}");
                         } catch (e) {
-                            status.textContent = "{% translate 'Network error.' %}";
-                            btn.disabled = false;
+                            done("{% translate 'Network error.' %}");
                         }
                     });
                 })();

@@ -44,6 +44,12 @@ services:
   celery:
     build: .
     command: celery -A wine_cellar.conf worker -l info
+    # Same bind mount as `web`. Without it the workers run whatever was baked
+    # into the image, so task changes silently never took effect — a restart
+    # could not pick them up, only a rebuild.
+    volumes:
+      - .:/usr/src/app
+      - /usr/src/app/node_modules
     env_file:
       - ./.env.dev
     depends_on:
@@ -54,7 +60,14 @@ services:
     restart: unless-stopped
   celery-beat:
     build: .
-    command: celery -A wine_cellar.conf beat -l info
+    # Keep beat's schedule DB out of the bind-mounted source tree.
+    command: celery -A wine_cellar.conf beat -l info --schedule /tmp/celerybeat-schedule
+    # Same bind mount as `web`. Without it the workers run whatever was baked
+    # into the image, so task changes silently never took effect — a restart
+    # could not pick them up, only a rebuild.
+    volumes:
+      - .:/usr/src/app
+      - /usr/src/app/node_modules
     env_file:
       - ./.env.dev
     depends_on:

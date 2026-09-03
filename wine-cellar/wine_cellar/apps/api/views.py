@@ -1,6 +1,7 @@
 from django.contrib.auth.decorators import login_not_required
 from django.db.models import Count, Q
 from django.http import FileResponse
+from django.urls import reverse
 from django.utils.decorators import method_decorator
 from rest_framework import status
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
@@ -75,6 +76,20 @@ class ScannerAPIView(APIView):
         if household is None:
             raise Household.DoesNotExist("User has no household")
         return household
+
+    def handle_exception(self, exc):
+        """Turn "no household" into a clean 403 instead of a 500.
+
+        Every provisioned user has a household, but an account created outside
+        the normal flow does not — and an uncaught DoesNotExist here surfaced
+        as a server error rather than something a client could act on.
+        """
+        if isinstance(exc, Household.DoesNotExist):
+            return Response(
+                {"error": "You do not belong to a household yet."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().handle_exception(exc)
 
 
 class WineByBarcodeView(ScannerAPIView):
@@ -442,128 +457,77 @@ class WineUpdateView(ScannerAPIView):
 
 
 class WineRefreshReferencesView(ScannerAPIView):
-    """Refresh critic_score, vivino_rating, market_price by re-asking Grok.
+    """Queue a reference refresh (POST) and report on it (GET).
 
-    Text-only call (no photo). Currency comes from the requesting user's settings.
-    Only writes fields when Grok returns reference_confidence >= "medium".
+    The Grok lookup runs a live web search and can take minutes; it used to run
+    inline, where gunicorn's 30s default timeout killed the worker before it
+    finished and — with the default single sync worker — blocked every other
+    request, bot traffic included, until it did. POST now enqueues a Celery
+    task and returns 202 immediately; callers poll GET with the task_id.
     """
 
     # Allow web (session) and API (token) callers — the refresh button on the
     # wine detail page calls this directly from the user's session.
     authentication_classes = [SessionAuthentication, TokenAuthentication]
 
-    def post(self, request, pk):
-        from django.utils import timezone
-
-        from wine_cellar.apps.wine.grok_references import fetch_references, validate_reference_field
-
+    def _get_wine(self, request, pk):
         household = self.get_household(request)
-        try:
-            wine = Wine.objects.get(id=pk, household=household)
-        except Wine.DoesNotExist:
+        return Wine.objects.filter(id=pk, household=household).first()
+
+    def post(self, request, pk):
+        from wine_cellar.apps.wine.tasks import refresh_wine_references
+
+        wine = self._get_wine(request, pk)
+        if wine is None:
             return Response({"error": "Wine not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        currency = "USD"
-        country = ""
-        if hasattr(request.user, "user_settings"):
-            currency = request.user.user_settings.currency or "USD"
-            country = request.user.user_settings.country or ""
-
-        # Producer hint extracted from comment ("Producer: X | ...") or first vineyard
-        producer = ""
-        if wine.comment and wine.comment.startswith("Producer: "):
-            producer = wine.comment.split(" | ", 1)[0][len("Producer: "):]
-        elif wine.vineyard.exists():
-            producer = wine.vineyard.first().name
-
-        data = fetch_references(
-            name=wine.name,
-            producer=producer,
-            vintage=wine.vintage,
-            target_currency=currency,
-            target_country=country,
-            country=wine.country or "",
-            region=wine.region.name if wine.region else "",
-            appellation=wine.appellation.name if wine.appellation else "",
-            grape=", ".join(g.name for g in wine.grapes.all()),
-            vineyard=", ".join(v.name for v in wine.vineyard.all()),
+        async_result = refresh_wine_references.delay(wine.id, request.user.id)
+        return Response(
+            {
+                "status": "queued",
+                "task_id": async_result.id,
+                "wine_id": wine.id,
+                "poll": request.build_absolute_uri(
+                    reverse("api-wine-refresh-references", kwargs={"pk": wine.id}),
+                ),
+            },
+            status=status.HTTP_202_ACCEPTED,
         )
-        if data is None:
-            return Response(
-                {"error": "Grok request failed"}, status=status.HTTP_502_BAD_GATEWAY,
-            )
 
-        # Per-field preservation: each field keeps its prior value unless THIS
-        # refresh produces a valid replacement for that specific field. A bad
-        # search day for one field doesn't destroy good prior data.
-        rank = {"high": 3, "medium": 2, "low": 1}
-        persisted_confidences = []
-        details = {"critic_score": None, "vivino_rating": None, "market_price": None}
+    def get(self, request, pk):
+        """Report on a queued refresh, or just the wine's current references.
 
-        critic = data.get("critic_score")
-        if validate_reference_field(critic, data.get("critic_score_confidence"), data.get("critic_score_reasoning")):
-            if isinstance(critic, (int, float)) and 0 <= critic <= 100:
-                wine.critic_score = int(critic)
-                conf = data.get("critic_score_confidence", "").lower()
-                persisted_confidences.append(conf)
-                details["critic_score"] = {"value": int(critic), "confidence": conf}
+        Pass ?task_id= to learn whether that run finished; without it this is
+        simply the wine's stored reference values.
+        """
+        from celery.result import AsyncResult
 
-        vivino = data.get("vivino_rating")
-        if validate_reference_field(vivino, data.get("vivino_rating_confidence"), data.get("vivino_rating_reasoning")):
-            if isinstance(vivino, (int, float)) and 0 <= vivino <= 5:
-                wine.vivino_rating = round(float(vivino), 1)
-                conf = data.get("vivino_rating_confidence", "").lower()
-                persisted_confidences.append(conf)
-                details["vivino_rating"] = {"value": round(float(vivino), 1), "confidence": conf}
+        wine = self._get_wine(request, pk)
+        if wine is None:
+            return Response({"error": "Wine not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        price = data.get("market_price")
-        if validate_reference_field(price, data.get("market_price_confidence"), data.get("market_price_reasoning")):
-            if isinstance(price, (int, float)) and price >= 0:
-                wine.market_price = price
-                currency_returned = data.get("market_price_currency") or currency
-                if isinstance(currency_returned, str):
-                    wine.market_price_currency = currency_returned.upper()[:3]
-                conf = data.get("market_price_confidence", "").lower()
-                persisted_confidences.append(conf)
-                details["market_price"] = {
-                    "value": float(price), "currency": wine.market_price_currency,
-                    "confidence": conf,
-                }
-
-        if not persisted_confidences:
-            # Nothing landed this run — wine fields are untouched (per-field
-            # preservation), so just report that no update happened.
-            kept_any = any(getattr(wine, f) is not None for f in (
-                "critic_score", "vivino_rating", "market_price",
-            ))
-            return Response({
-                "updated": False,
-                "confidence": "low",
-                "message": "Grok's live search did not find usable references for this wine. Existing values (if any) were kept.",
-                "details": details,
-                "kept_prior": kept_any,
-            })
-
-        # Aggregate confidence: highest of THIS run's new fields and any prior
-        # confidence that still applies to kept fields. Avoids regressing the
-        # aggregate when a high-confidence prior field is still in place.
-        candidates = list(persisted_confidences)
-        if wine.reference_confidence:
-            candidates.append(wine.reference_confidence.lower())
-        wine.reference_confidence = max(candidates, key=lambda c: rank.get(c, 0))
-        wine.reference_updated = timezone.now()
-        wine.save()
-
-        return Response({
-            "updated": True,
-            "confidence": wine.reference_confidence,
+        current = {
             "critic_score": wine.critic_score,
             "vivino_rating": float(wine.vivino_rating) if wine.vivino_rating is not None else None,
             "category_rating": wine.category_rating,
             "market_price": float(wine.market_price) if wine.market_price is not None else None,
             "market_price_currency": wine.market_price_currency,
-            "details": details,
-        })
+            "confidence": wine.reference_confidence,
+            "reference_updated": wine.reference_updated,
+        }
+
+        task_id = request.query_params.get("task_id")
+        if not task_id:
+            return Response({"state": "IDLE", "current": current})
+
+        result = AsyncResult(task_id)
+        payload = {"state": result.state, "current": current}
+        if result.successful():
+            payload["result"] = result.result
+        elif result.failed():
+            # Don't leak a traceback to the client; the worker logged it.
+            payload["result"] = {"updated": False, "error": "Lookup failed"}
+        return Response(payload)
 
 
 class WineSearchView(ScannerAPIView):

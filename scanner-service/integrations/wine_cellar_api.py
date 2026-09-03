@@ -1,4 +1,5 @@
 import logging
+import time
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -109,17 +110,55 @@ class WineCellarAPI:
             pass
         return wine
 
-    def refresh_references(self, wine_id: int) -> dict:
-        """Re-ask Grok for critic_score / vivino_rating / market_price for this wine.
+    def refresh_references(self, wine_id: int, wait_seconds: int = 240,
+                           poll_seconds: int = 5) -> dict:
+        """Re-ask Grok for critic_score / vivino_rating / market_price.
 
-        Returns dict like {"updated": bool, "confidence": str, ...}
+        The server enqueues the lookup and returns 202 immediately — a live web
+        search takes far longer than a request should hold a worker open. We
+        then poll from this thread, which is already a background executor on
+        the bot side, so waiting here costs nothing that matters.
+
+        Returns the usual {"updated": bool, "confidence": str, ...}. On timeout
+        returns updated=False with a message; the task keeps running and the
+        values will simply be there next time the card is opened.
         """
         resp = self.session.post(
-            f"{self.base_url}/api/wines/{wine_id}/refresh-references/",
-            timeout=60,
+            f"{self.base_url}/api/wines/{wine_id}/refresh-references/", timeout=15,
         )
         resp.raise_for_status()
-        return resp.json()
+        queued = resp.json()
+
+        task_id = queued.get("task_id")
+        if not task_id:
+            # Older server, or it answered synchronously — take it at face value.
+            return queued
+
+        deadline = time.time() + wait_seconds
+        status_url = f"{self.base_url}/api/wines/{wine_id}/refresh-references/"
+        while time.time() < deadline:
+            time.sleep(poll_seconds)
+            try:
+                poll = self.session.get(
+                    status_url, params={"task_id": task_id}, timeout=15,
+                )
+                poll.raise_for_status()
+                body = poll.json()
+            except requests.RequestException as e:
+                logger.warning(f"[API] refresh_references poll failed: {e}")
+                continue
+
+            state = body.get("state")
+            if state == "SUCCESS":
+                return body.get("result") or {"updated": False}
+            if state == "FAILURE":
+                return body.get("result") or {"updated": False, "error": "Lookup failed"}
+
+        logger.info(f"[API] refresh_references still running for wine #{wine_id}")
+        return {
+            "updated": False,
+            "message": "Still looking — the values will appear on the wine shortly.",
+        }
 
     def search_wines(self, query: str) -> list[dict]:
         """Search wines by name within this household."""

@@ -25,6 +25,10 @@ wine-cellar/media/
 wine-cellar/*.mo
 wine-cellar/site/
 
+# Celery beat runtime state (written into the source tree by the dev bind mount)
+celerybeat-schedule*
+celerybeat.pid
+
 # Logs
 *.log
 scanner-service/*.log
