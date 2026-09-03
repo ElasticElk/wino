@@ -4,3 +4,6 @@ __pycache__/
 /config.yaml
 
 .env
+__pycache__/
+*.pyc
+.pytest_cache/

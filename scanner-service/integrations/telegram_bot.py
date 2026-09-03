@@ -111,16 +111,71 @@ def _extract_barcode_from_message(message) -> str | None:
     return None
 
 
-def _active_pendings(pending_store: dict) -> dict:
-    """Return only non-stale, non-resolved pending barcodes.
-    Filters out internal temp keys (_label_, _edit_)."""
+class NotProvisionedError(Exception):
+    """Raised when a chat_id has no API client mapped to it.
+
+    Never fall back to an arbitrary household here — that would silently hand
+    one user another household's cellar.
+    """
+
+    def __init__(self):
+        super().__init__(
+            "You're not set up for a household yet. Ask an owner to run "
+            "/adduser with your chat ID (send /myid to get it)."
+        )
+
+
+def pending_key(household_id, barcode: str) -> str:
+    """Namespace a pending barcode to its household.
+
+    The store is process-global and shared by every household on the bot. Keying
+    on the bare barcode meant one household's photo could be matched against
+    another's in-flight scan, and /pending and /flush spanned all tenants.
+
+    Internal keys (_label_N, _edit_<wine_id>) are already globally unique — a
+    counter and a database PK — and some call sites write them directly, so they
+    must never be prefixed or the reads and writes won't agree.
+    """
+    if barcode.startswith("_"):
+        return barcode
+    return f"{household_id}:{barcode}" if household_id is not None else barcode
+
+
+def _active_pendings(pending_store: dict, household_id=None) -> dict:
+    """Return non-stale, non-resolved pending barcodes as {barcode: data}.
+
+    Filters out internal temp keys (_label_, _edit_). When household_id is
+    given, only that household's entries are returned. Keys are unwrapped back
+    to bare barcodes so callers and callback_data stay unchanged.
+    """
     now = time.time()
-    return {
-        bc: data for bc, data in pending_store.items()
-        if not bc.startswith("_")
-        and not data.get("resolved")
-        and (now - data.get("time", 0)) < PENDING_TIMEOUT_SECONDS
-    }
+    active = {}
+    for key, data in pending_store.items():
+        if key.startswith("_") or data.get("resolved"):
+            continue
+        if (now - data.get("time", 0)) >= PENDING_TIMEOUT_SECONDS:
+            continue
+        if household_id is not None and data.get("household_id") != household_id:
+            continue
+        active[data.get("barcode") or key] = data
+    return active
+
+
+def _sweep_pendings(pending_store: dict) -> int:
+    """Drop every entry past its TTL, including internal _label_/_edit_ keys.
+
+    Entries hold the full label JPEG in "photo_data". Nothing else evicts them:
+    _active_pendings only filters what it *lists*, and /flush only pops the
+    active ones — so without this the store grows for the life of the process.
+    """
+    now = time.time()
+    stale = [
+        key for key, data in pending_store.items()
+        if (now - data.get("time", 0)) >= PENDING_TIMEOUT_SECONDS
+    ]
+    for key in stale:
+        pending_store.pop(key, None)
+    return len(stale)
 
 
 def _clean_wine_data(grok_data: dict) -> dict:
@@ -173,7 +228,90 @@ def _grok_summary(data: dict) -> str:
         text += f"\n🍽 Pairs with: {', '.join(data['food_pairings'])}\n"
     if data.get("attributes"):
         text += f"✨ {', '.join(data['attributes'])}\n"
+    text += _references_block(data)
     return text
+
+
+def _category_label(score) -> str:
+    """Word label for a category_rating 0-100.
+
+    Bands recalibrated for the 70/30 critic+Vivino composite — Vivino rarely
+    exceeds 4.3-4.5 so the composite sits ~5pts below a pure critic score.
+    """
+    try:
+        s = float(score)
+    except (TypeError, ValueError):
+        return ""
+    if s >= 95:
+        return "Outstanding"
+    if s >= 85:
+        return "Excellent"
+    if s >= 80:
+        return "Very Good"
+    if s >= 75:
+        return "Good"
+    return "Average"
+
+
+def _references_block(data: dict) -> str:
+    """Render critic / Vivino / category / market price lines if any are present."""
+    critic = data.get("critic_score")
+    vivino = data.get("vivino_rating")
+    market = data.get("market_price")
+    currency = data.get("market_price_currency") or ""
+    confidence = data.get("reference_confidence") or ""
+    category = data.get("category_rating")
+    # Fallback compute: blend if both, else use whichever is available
+    if category is None:
+        try:
+            if critic is not None and vivino is not None:
+                category = round(float(critic) * 0.7 + float(vivino) * 20.0 * 0.3)
+            elif critic is not None:
+                category = int(critic)
+            elif vivino is not None:
+                category = round(float(vivino) * 20.0)
+        except (TypeError, ValueError):
+            category = None
+
+    if not any(v is not None for v in (critic, vivino, market, category)):
+        return ""
+
+    lines = ["\n📊 <b>References</b>"]
+    if critic is not None:
+        lines.append(f"  ⭐ Critic: {critic}/100")
+    if vivino is not None:
+        lines.append(f"  🍇 Vivino: {vivino}/5")
+    if category is not None:
+        label = _category_label(category)
+        lines.append(f"  🏷 Category: {label}" if label else f"  🏷 Category: {category}/100")
+    if market is not None:
+        try:
+            lines.append(f"  💰 Market: ~{float(market):,.0f} {currency}".rstrip())
+        except (TypeError, ValueError):
+            pass
+    if confidence:
+        lines.append(f"  <i>(confidence: {confidence})</i>")
+    return "\n".join(lines) + "\n"
+
+
+def empty_cellar(context_line: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    """The one empty-state card, used everywhere a cellar or fridge is empty.
+
+    The empty state is the highest-intent screen a new member sees, and it was
+    nine separate dead ends — one of which told people to "scan a bottle first",
+    pointing at hardware most of them don't have. Every one now says the same
+    thing: send a photo.
+    """
+    text = (
+        f"\U0001F377 <b>{context_line or 'Your cellar is empty'}</b>\n\n"
+        "\U0001F4F8 <b>Send me a photo of a bottle</b> and I'll add it.\n\n"
+        "Point your camera at the front label — I'll read the producer, grape, "
+        "region and vintage, write tasting notes, and look up ratings and price."
+    )
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("\u2139\uFE0F How it works", callback_data=_cb("howto")),
+    ]])
+    return text, keyboard
 
 
 class BrowseSession:
@@ -595,6 +733,7 @@ class TelegramNotifier:
             keyboard = [
                 [InlineKeyboardButton("📸 Send label photo", callback_data=_cb("retry", barcode=barcode))],
                 [InlineKeyboardButton("✅ Add with OFF data", callback_data=_cb("off", barcode=barcode))],
+                [InlineKeyboardButton("🔗 Link to existing wine", callback_data=_cb("link", barcode=barcode))],
                 [InlineKeyboardButton("✏️ Add manually", callback_data=_cb("man", barcode=barcode))],
                 [InlineKeyboardButton("❌ Skip", callback_data=_cb("skip", barcode=barcode))],
             ]
@@ -606,6 +745,7 @@ class TelegramNotifier:
             )
             keyboard = [
                 [InlineKeyboardButton("📸 Send label photo", callback_data=_cb("retry", barcode=barcode))],
+                [InlineKeyboardButton("🔗 Link to existing wine", callback_data=_cb("link", barcode=barcode))],
                 [InlineKeyboardButton("✏️ Add manually", callback_data=_cb("man", barcode=barcode))],
                 [InlineKeyboardButton("❌ Skip", callback_data=_cb("skip", barcode=barcode))],
             ]
@@ -647,6 +787,10 @@ class TelegramBotHandler:
         self._triage_callback = None
         self._local_barcode_reader = None
         self._browse_sessions: dict[str, BrowseSession] = {}
+        self._chat_id_to_currency: dict[str, str] = {}
+        self._chat_id_to_country: dict[str, str] = {}
+        self._enriching_wine_ids: set[int] = set()
+        self._label_seq = 0
 
     def _get_api(self, update_or_id=None):
         """Get the household-specific API client for a chat_id, or fallback.
@@ -663,7 +807,17 @@ class TelegramBotHandler:
             chat_id = str(update_or_id.message.chat_id)
         else:
             chat_id = str(update_or_id)
-        return self._chat_id_to_api.get(chat_id, self.api)
+
+        api = self._chat_id_to_api.get(chat_id)
+        if api is not None:
+            return api
+        # No mapping. self.api is just "whichever client was built first", so
+        # falling back to it would drop this user into an arbitrary household.
+        # Only safe when there is exactly one client to begin with.
+        if len(self._chat_id_to_api) <= 1 and self.api is not None:
+            return self.api
+        logger.warning(f"[auth] no API client mapped for chat_id={chat_id}; refusing")
+        raise NotProvisionedError()
 
     def set_photo_callback(self, callback: Callable):
         """Set callback for when a label photo is received. Called with (barcode, photo_bytes).
@@ -693,6 +847,84 @@ class TelegramBotHandler:
         """
         self._api_factory = factory
 
+    def set_currency(self, chat_id: str, currency: str):
+        """Register a chat_id's preferred currency (used for Grok price estimates)."""
+        if chat_id and currency:
+            self._chat_id_to_currency[str(chat_id)] = currency
+
+    def set_country(self, chat_id: str, country: str):
+        """Register a chat_id's country (used for Grok price-context grounding)."""
+        if chat_id:
+            self._chat_id_to_country[str(chat_id)] = country or ""
+
+    async def _enrich_references_async(self, wine_id: int, chat_id: str, api, wine_name: str = ""):
+        """Background task: run live-search refresh on a freshly-created wine.
+
+        Fires after wine creation so the user gets immediate feedback on "Wine added"
+        and a follow-up message a moment later with whatever Grok's web search found.
+        """
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(
+                None, functools.partial(api.refresh_references, wine_id),
+            )
+        except Exception as e:
+            logger.warning(f"[enrich] refresh_references failed for wine #{wine_id}: {e}")
+            self._enriching_wine_ids.discard(wine_id)
+            return
+        finally:
+            # Whether or not we end up sending a follow-up, the enrich is done.
+            self._enriching_wine_ids.discard(wine_id)
+
+        if not result.get("updated"):
+            # Nothing usable — silent. The user already saw "added" and the wine
+            # detail card will just have no references; they can manually refresh later.
+            logger.info(f"[enrich] wine #{wine_id}: live search found nothing usable")
+            return
+
+        # Build a short summary line and post it to the user
+        critic = result.get("critic_score")
+        vivino = result.get("vivino_rating")
+        market = result.get("market_price")
+        currency = result.get("market_price_currency", "")
+        confidence = result.get("confidence", "")
+        parts = []
+        if critic is not None:
+            parts.append(f"⭐ {critic}/100")
+        if vivino is not None:
+            parts.append(f"🍇 {vivino}/5")
+        if market is not None:
+            parts.append(f"💰 ~{market:.0f} {currency}".rstrip())
+        if not parts:
+            return
+        label = wine_name or f"wine #{wine_id}"
+        msg = f"📊 <b>Ratings &amp; price for {label}</b>\n  " + " · ".join(parts)
+        if confidence:
+            msg += f"\n  <i>(confidence: {confidence})</i>"
+        try:
+            await self._app.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
+        except Exception as e:
+            logger.warning(f"[enrich] failed to send refs message: {e}")
+
+    def _kick_enrich(self, wine_id: int, chat_id, api, wine_name: str = ""):
+        """Fire-and-forget wrapper to schedule _enrich_references_async."""
+        try:
+            self._enriching_wine_ids.add(wine_id)
+            asyncio.create_task(
+                self._enrich_references_async(wine_id, str(chat_id), api, wine_name),
+            )
+        except Exception as e:
+            logger.warning(f"[enrich] could not schedule enrichment: {e}")
+            self._enriching_wine_ids.discard(wine_id)
+
+    def _currency_for(self, chat_id) -> str:
+        """Return the currency for a given chat_id, defaulting to USD."""
+        return self._chat_id_to_currency.get(str(chat_id), "USD")
+
+    def _country_for(self, chat_id) -> str:
+        """Return the country code for a given chat_id, defaulting to empty (no grounding)."""
+        return self._chat_id_to_country.get(str(chat_id), "")
+
     def add_chat_id(self, chat_id: str, api_client=None):
         """Hot-add a chat_id to the bot's allowed list (no restart needed)."""
         chat_id = str(chat_id)
@@ -721,6 +953,7 @@ class TelegramBotHandler:
         app.add_handler(CommandHandler("status", self._cmd_status, filters=user_filter))
         app.add_handler(CommandHandler("stock", self._cmd_stock, filters=user_filter))
         app.add_handler(CommandHandler("fridge", self._cmd_fridge, filters=user_filter))
+        app.add_handler(CommandHandler("search", self._cmd_search, filters=user_filter))
         app.add_handler(CommandHandler("recent", self._cmd_recent, filters=user_filter))
         app.add_handler(CommandHandler("help", self._cmd_help, filters=user_filter))
         app.add_handler(CommandHandler("pending", self._cmd_pending, filters=user_filter))
@@ -730,19 +963,131 @@ class TelegramBotHandler:
         app.add_handler(CommandHandler("switch", self._cmd_switch, filters=user_filter))
         app.add_handler(CommandHandler("adduser", self._cmd_adduser, filters=user_filter))
         app.add_handler(CommandHandler("removeuser", self._cmd_removeuser, filters=user_filter))
+        # Unfiltered: the START button every Telegram client shows sends /start,
+        # and answering it is the only way a new person can get their chat ID.
+        app.add_handler(CommandHandler("start", self._cmd_start))
         app.add_handler(CommandHandler("myid", self._cmd_myid))  # no filter — anyone can get their ID
         app.add_handler(CallbackQueryHandler(self._handle_callback))
         app.add_handler(MessageHandler(filters.PHOTO & user_filter, self._handle_photo))
+        # Catch-all for unknown commands and plain text from authorised users
+        app.add_handler(MessageHandler(filters.COMMAND & user_filter, self._unknown_command))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & user_filter, self._unknown_text))
+        # Fallbacks for unprovisioned chats. Registered last so provisioned users
+        # always match one of the handlers above; only strangers reach these.
+        app.add_handler(MessageHandler(filters.COMMAND, self._stranger_fallback))
+        app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO), self._stranger_fallback))
+        app.add_error_handler(self._on_error)
 
         return app
 
+    async def _stranger_fallback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Anything at all from an unprovisioned chat gets the onboarding reply."""
+        if self._is_known(update):
+            return  # provisioned users are handled above; nothing to do here
+        await self._greet_stranger(update)
+
+    async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE):
+        """Last-resort handler so a failure is never silent.
+
+        Without this, an exception anywhere in a handler is logged and the user
+        sees nothing at all — the bot simply appears to ignore them. That is the
+        single most common way this bot "breaks" from the outside.
+        """
+        err = context.error
+        logger.exception(f"Unhandled error while processing update: {err}")
+
+        if isinstance(err, NotProvisionedError):
+            text = f"\U0001F6AB {err}"
+        else:
+            text = (
+                "⚠️ Something went wrong handling that.\n"
+                "If it was a button from an older message, the session has "
+                "likely expired — send the command again."
+            )
+
+        chat_id = None
+        if isinstance(update, Update):
+            if update.effective_chat:
+                chat_id = update.effective_chat.id
+            if update.callback_query:
+                # Clear the button's spinner even when the branch below fails.
+                try:
+                    await update.callback_query.answer()
+                except Exception:
+                    pass
+        if chat_id is None:
+            return
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+        except Exception as e:
+            logger.warning(f"[error-handler] could not notify chat {chat_id}: {e}")
+
     # --- Commands ---
+
+    def _is_known(self, update) -> bool:
+        """True if this chat is provisioned. Cheap; safe to call before any API use."""
+        chat = getattr(update, "effective_chat", None)
+        return chat is not None and str(chat.id) in self.chat_ids
+
+    async def _greet_stranger(self, update: Update):
+        """Reply to someone who isn't provisioned yet.
+
+        Telegram shows a START button on first open, which sends /start. If that
+        goes unanswered the bot looks broken, and there is no way for the person
+        to discover /myid. This is the entire top of the funnel, so it must
+        always answer — and it must hand over the one thing an owner needs.
+
+        It also matters that they message us first: a bot cannot open a
+        conversation with a user, so the welcome in _cmd_adduser can only be
+        delivered to someone who has already sent something.
+        """
+        chat_id = update.effective_chat.id
+        name = (update.effective_user.first_name if update.effective_user else "") or "there"
+        await update.message.reply_text(
+            f"\U0001F44B Hi <b>{name}</b> — welcome to <b>Wine Cellar</b>.\n\n"
+            f"You're not connected to a cellar yet. Here's your ID:\n\n"
+            f"\U0001F194 <code>{chat_id}</code>\n\n"
+            f"Send that to whoever runs your cellar and ask them to add you. "
+            f"Tap the number above to copy it.\n\n"
+            f"As soon as they do, I'll message you here and you can start "
+            f"adding wine by sending me a photo of a bottle.",
+            parse_mode="HTML",
+        )
+
+    async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_known(update):
+            await self._greet_stranger(update)
+            return
+        api = self._get_api(update)
+        # Try to get household name for a personalised greeting
+        household_name = ""
+        try:
+            hh = api.get_household()
+            if hh and hh.get("name"):
+                household_name = f" ({hh['name']})"
+        except Exception:
+            pass
+        name = update.effective_user.first_name or "there"
+        text = (
+            f"👋 Welcome, <b>{name}</b>!\n\n"
+            f"🍷 <b>Wine Fridge Scanner</b>{household_name}\n\n"
+            "I help you manage your wine collection. "
+            "Scan barcodes, snap label photos, and browse your cellar — all from here.\n\n"
+            "Here are some commands to get started:\n"
+            "/status — Inventory overview\n"
+            "/fridge — What's in the fridge\n"
+            "/stock — Browse wines by type\n"
+            "/help — All commands\n\n"
+            "📷 You can also send a <b>photo of a barcode or wine label</b> to add a wine."
+        )
+        await update.message.reply_text(text, parse_mode="HTML")
 
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             "🍷 <b>Wine Fridge Scanner</b>\n\n"
             "/fridge \u2014 What's in the fridge (adjust stock)\n"
             "/status \u2014 Inventory summary\n"
+            "/search \u2014 Find a wine by name\n"
             "/stock \u2014 Browse wines by type\n"
             "/storages \u2014 View storage locations\n"
             "/recent \u2014 Last 10 changes\n"
@@ -759,6 +1104,29 @@ class TelegramBotHandler:
             "📷 Send a <b>barcode photo</b> (no reply) to scan without the hardware scanner."
         )
         await update.message.reply_text(text, parse_mode="HTML")
+
+    async def _unknown_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        cmd = update.message.text.split()[0] if update.message.text else "that"
+        await update.message.reply_text(
+            f"🤔 I don't recognise <b>{cmd}</b>. Try /help for a list of commands.",
+            parse_mode="HTML",
+        )
+
+    async def _unknown_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Plain text from a provisioned user is treated as a search.
+
+        Typing a wine name is the most natural thing to do in a chat window, and
+        it used to spend the turn explaining that only commands work.
+        """
+        text = (update.message.text or "").strip()
+        if len(text) >= 3:
+            await self._do_search(update, text)
+            return
+        await update.message.reply_text(
+            "\U0001F4A1 Type a wine name to search, send a <b>photo</b> of a bottle to add one, "
+            "or try /help.",
+            parse_mode="HTML",
+        )
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         api = self._get_api(update)
@@ -828,7 +1196,8 @@ class TelegramBotHandler:
         try:
             wines = api.wines_in_stock()
             if not wines:
-                await update.message.reply_text("\U0001F377 No wines in stock.")
+                text, kb = empty_cellar()
+                await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
                 return
 
             # Clean up stale sessions
@@ -849,6 +1218,53 @@ class TelegramBotHandler:
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
 
+    async def _cmd_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/search <name> — find a wine by name. Also backs plain-text search."""
+        query = " ".join(context.args).strip() if context.args else ""
+        if not query:
+            await update.message.reply_text(
+                "\U0001F50D Search for a wine by name:\n"
+                "<code>/search chenin</code>\n\n"
+                "Or just type the name — no command needed.",
+                parse_mode="HTML",
+            )
+            return
+        await self._do_search(update, query)
+
+    async def _do_search(self, update: Update, query: str):
+        api = self._get_api(update)
+        try:
+            wines = api.search_wines(query)
+        except Exception as e:
+            await update.message.reply_text(f"Error searching: {e}")
+            return
+
+        if not wines:
+            await update.message.reply_text(
+                f"\U0001F50D Nothing matching <b>{query}</b> in your cellar.\n\n"
+                f"\U0001F4F8 If you've just bought it, send me a photo of the label.",
+                parse_mode="HTML",
+            )
+            return
+
+        lines = [f"\U0001F50D <b>{len(wines)} match{'es' if len(wines) != 1 else ''} for \"{query}\"</b>\n"]
+        keyboard = []
+        for w in wines[:8]:
+            emoji = WINE_TYPE_EMOJI.get(w.get("wine_type", ""), "\U0001F377")
+            stock = w.get("stock_count", 0)
+            stock_str = f"{stock}x" if stock else "none left"
+            lines.append(f"{emoji} <b>{w['name']}</b> — {stock_str}")
+            keyboard.append([InlineKeyboardButton(
+                f"\U0001F4CB {w['name'][:40]}", callback_data=_cb("det", wine_id=w["id"]),
+            )])
+        if len(wines) > 8:
+            lines.append(f"\n<i>... and {len(wines) - 8} more — try a narrower search.</i>")
+
+        await update.message.reply_text(
+            "\n".join(lines), parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
     async def _cmd_recent(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         api = self._get_api(update)
         await update.message.reply_text(
@@ -858,8 +1274,10 @@ class TelegramBotHandler:
         )
 
     async def _cmd_pending(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        self._sweep()
+        api = self._get_api(update)
         with self._lock:
-            active = _active_pendings(self.pending_store)
+            active = _active_pendings(self.pending_store, self._hid(api))
         if not active:
             await update.message.reply_text("No pending barcodes.")
             return
@@ -877,22 +1295,31 @@ class TelegramBotHandler:
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
     async def _cmd_flush(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        api = self._get_api(update)
+        hid = self._hid(api)
         with self._lock:
-            active = _active_pendings(self.pending_store)
-            if not active:
-                await update.message.reply_text("Nothing to flush.")
-                return
+            active = _active_pendings(self.pending_store, hid)
             count = len(active)
             for bc in list(active.keys()):
-                self.pending_store.pop(bc, None)
-        await update.message.reply_text(f"🗑 Flushed {count} pending barcode(s).")
+                self.pending_store.pop(pending_key(hid, bc), None)
+            # Also drop expired and internal (_label_/_edit_) leftovers, which
+            # never appear in _active_pendings but do hold photo bytes.
+            swept = _sweep_pendings(self.pending_store)
+        if not count and not swept:
+            await update.message.reply_text("Nothing to flush.")
+            return
+        msg = f"🗑 Flushed {count} pending barcode(s)."
+        if swept:
+            msg += f"\nAlso cleared {swept} expired entr{'y' if swept == 1 else 'ies'}."
+        await update.message.reply_text(msg)
 
     async def _cmd_storages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         api = self._get_api(update)
         try:
             storages = api.list_storages()
             if not storages:
-                await update.message.reply_text("No storage locations configured.")
+                text, kb = empty_cellar("No storage locations yet")
+                await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
                 return
 
             text = "📍 <b>Storage Locations</b>\n\n"
@@ -1047,20 +1474,60 @@ class TelegramBotHandler:
                     pass
             self.add_chat_id(chat_id, api_client=new_api or api)
 
+            household_label = result.get("household", "your cellar")
+            delivered = await self._welcome_new_member(
+                context, chat_id, display_name, household_label,
+            )
+
             if status_text == "created":
                 text = (
                     f"\u2705 <b>New user created:</b> {display_name}\n"
-                    f"Added to <b>{result['household']}</b>\n"
-                    f"Username: <code>{result['username']}</code>\n\n"
-                    f"They can now use this bot immediately!"
+                    f"Added to <b>{household_label}</b>\n"
+                    f"Username: <code>{result['username']}</code>"
                 )
             else:
                 text = (
-                    f"\u2705 <b>{result['display_name']}</b> added to <b>{result['household']}</b>"
+                    f"\u2705 <b>{result['display_name']}</b> added to <b>{household_label}</b>"
+                )
+            if delivered:
+                text += "\n\n\U0001F4EC I've welcomed them and they can start adding wine now."
+            else:
+                # A bot cannot open a conversation with a user — they have to
+                # message it first. Say so, or the add looks done when it isn't.
+                text += (
+                    "\n\n\u26A0\uFE0F I couldn't message them — they haven't opened "
+                    "the bot yet. Ask them to search for this bot and tap "
+                    "<b>Start</b>, then they're good to go."
                 )
             await update.message.reply_text(text, parse_mode="HTML")
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
+
+    async def _welcome_new_member(self, context, chat_id, display_name, household_name) -> bool:
+        """Message a freshly added member. Returns False if we couldn't reach them.
+
+        This is the moment they're most likely to act, and until now nothing was
+        sent here at all — the "they can use it immediately" confirmation went to
+        the adder, so the new person never learned anything had happened.
+        """
+        name = display_name or "there"
+        text = (
+            f"\U0001F389 You're in, <b>{name}</b>!\n\n"
+            f"You've been added to <b>{household_name}</b>.\n\n"
+            f"\U0001F4F8 <b>To add a wine, just send me a photo of the bottle.</b>\n"
+            f"I'll read the label and fill in the details — grape, region, "
+            f"tasting notes, food pairings, even a price estimate.\n\n"
+            f"Other things I can do:\n"
+            f"/fridge — what's in the cellar right now\n"
+            f"/search — find a wine by name\n"
+            f"/help — everything else"
+        )
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+            return True
+        except Exception as e:
+            logger.info(f"[adduser] could not welcome {chat_id}: {e}")
+            return False
 
     async def _cmd_removeuser(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Remove a user from a household: /removeuser <chat_id> [household]"""
@@ -1118,7 +1585,8 @@ class TelegramBotHandler:
             return
 
         if not storages:
-            await update.message.reply_text("No storages found. Scan a bottle first!")
+            text, kb = empty_cellar()
+            await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
             return
 
         # Determine which storage to show
@@ -1160,11 +1628,13 @@ class TelegramBotHandler:
             return
 
         if not wines:
-            text = "\U0001F377 The fridge is empty!"
+            text, kb = empty_cellar(
+                f"{storage_name} is empty" if storage_name else "Your cellar is empty",
+            )
             if hasattr(update_or_query, "edit_message_text"):
-                await update_or_query.edit_message_text(text)
+                await update_or_query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
             else:
-                await update_or_query.message.reply_text(text)
+                await update_or_query.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
             return
 
         # Clean stale sessions
@@ -1261,7 +1731,9 @@ class TelegramBotHandler:
         session.all_wines = wines
         if not wines:
             del self._browse_sessions[session_key]
-            await query.edit_message_text("\U0001F377 The fridge is empty!")
+            await query.edit_message_text(
+                empty_cellar()[0], reply_markup=empty_cellar()[1], parse_mode="HTML",
+            )
             return
         # If currently showing a flat list, stay on the same page (clamped)
         filtered = session.filtered_wines
@@ -1300,6 +1772,8 @@ class TelegramBotHandler:
         if wine.get("vineyards"):
             text += f"\U0001F3E1 {', '.join(wine['vineyards'])}\n"
 
+        text += _references_block(wine)
+
         items = wine.get("items", [])
         stock_count = wine.get("stock_count", 0)
         text += f"\n\U0001F4E6 <b>{stock_count}x in stock</b>\n"
@@ -1326,7 +1800,10 @@ class TelegramBotHandler:
                 InlineKeyboardButton("\U0001F4E6 Move", callback_data=_cb("ml", wine_id=wine_id)),
                 InlineKeyboardButton("\U0001F5C4 Drawer", callback_data=_cb("dw", wine_id=wine_id)),
             ],
-            [InlineKeyboardButton("\u270f\ufe0f Update from label", callback_data=_cb("ed", wine_id=wine_id))],
+            [
+                InlineKeyboardButton("\U0001F504 Refresh refs", callback_data=_cb("rr", wine_id=wine_id)),
+                InlineKeyboardButton("\u270f\ufe0f Update from label", callback_data=_cb("ed", wine_id=wine_id)),
+            ],
         ])
         return text, keyboard
 
@@ -1381,38 +1858,91 @@ class TelegramBotHandler:
         )])
         return "\n".join(lines), InlineKeyboardMarkup(keyboard)
 
-    def _is_pending(self, barcode: str) -> bool:
+    @staticmethod
+    def _hid(api):
+        """Household id for an API client, or None in single-tenant fallback mode."""
+        return getattr(api, "household_id", None)
+
+    def _pkey(self, api, barcode: str) -> str:
+        """Household-scoped key for a barcode in the shared pending store."""
+        return pending_key(self._hid(api), barcode)
+
+    def _get_pending(self, api, barcode: str) -> dict:
+        """Read a pending entry for this household. Returns {} when absent."""
         with self._lock:
-            data = self.pending_store.get(barcode)
+            return dict(self.pending_store.get(self._pkey(api, barcode), {}))
+
+    def _is_pending(self, api, barcode: str) -> bool:
+        with self._lock:
+            data = self.pending_store.get(self._pkey(api, barcode))
             if not data or data.get("resolved"):
                 return False
             return (time.time() - data.get("time", 0)) < PENDING_TIMEOUT_SECONDS
 
-    def _resolve_pending(self, barcode: str):
-        with self._lock:
-            if barcode in self.pending_store:
-                self.pending_store[barcode]["resolved"] = True
+    def _resolve_pending(self, api, barcode: str):
+        """Drop a pending entry once it has been acted on.
 
-    def _create_pending(self, barcode: str, off_data=None):
+        Popping rather than flagging matters: the entry holds the label photo
+        bytes, and a flagged entry is filtered out of every listing while
+        staying in memory forever. Callers read what they need before calling
+        this, and a second tap on a stale button still reads as "already
+        handled" because _is_pending() returns False either way.
+        """
+        with self._lock:
+            self.pending_store.pop(self._pkey(api, barcode), None)
+
+    def _next_label_key(self) -> str:
+        """Unique key for a label analysed without a barcode.
+
+        Previously keyed on id(grok_data) — a memory address, which CPython
+        reuses after GC, so two concurrent label flows could collide.
+        """
+        with self._lock:
+            self._label_seq += 1
+            return f"_label_{self._label_seq}"
+
+    def _sweep(self):
+        """Evict expired pendings. Cheap; call on any user-initiated entry point."""
+        with self._lock:
+            dropped = _sweep_pendings(self.pending_store)
+        if dropped:
+            logger.info(f"[pending] swept {dropped} expired entr{'y' if dropped == 1 else 'ies'}")
+
+    def _create_pending(self, api, barcode: str, off_data=None):
         """Create a new pending entry for a barcode (e.g. when user says 'new wine')."""
         with self._lock:
-            self.pending_store[barcode] = {
+            self.pending_store[self._pkey(api, barcode)] = {
                 "off_data": off_data,
                 "time": time.time(),
+                "barcode": barcode,
+                "household_id": self._hid(api),
             }
+
+    def _update_pending(self, api, barcode: str, **fields):
+        """Merge fields into an existing pending entry, if it's still there."""
+        with self._lock:
+            entry = self.pending_store.get(self._pkey(api, barcode))
+            if entry is not None:
+                entry.update(fields)
 
     # --- Callback handler ---
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
-        api = self._get_api(query)
 
         data = _parse_cb(query.data)
         action = data.get("action", "")
 
-        # Fridge +/- use custom answer toasts; all others answer immediately
+        # Fridge +/- use custom answer toasts; all others answer immediately.
+        # answer() fails on callbacks older than ~48h; that must not abort the
+        # handler, or every button in the user's scrollback becomes a no-op.
         if action not in ("+", "-", "mv", "ss"):
-            await query.answer()
+            try:
+                await query.answer()
+            except Exception as e:
+                logger.info(f"[callback] answer() failed (likely a stale button): {e}")
+
+        api = self._get_api(query)
 
         if action == "swh":
             household_id = data.get("wine_id") or int(query.data.split(":")[1])
@@ -1438,16 +1968,31 @@ class TelegramBotHandler:
                 await self._cmd_status(update, context)
             return
 
+        if action == "howto":
+            await query.edit_message_text(
+                "\U0001F4F8 <b>Adding a wine</b>\n\n"
+                "1. Take a photo of the <b>front label</b> — straight on, whole "
+                "label in frame, no flash glare.\n"
+                "2. Send it to me here. No caption needed.\n"
+                "3. I'll show you what I read off it — tap <b>Confirm</b>.\n"
+                "4. Pick where you're putting the bottle.\n\n"
+                "That's it. Ratings and a price estimate arrive a few seconds later.\n\n"
+                "\U0001F4E6 A photo of a <b>barcode</b> works too — I'll look it up "
+                "and ask for a label photo if I don't recognise it.",
+                parse_mode="HTML",
+            )
+            return
+
         if action == "x":
             barcode = data.get("barcode", "")
             if barcode:
-                self._resolve_pending(barcode)
+                self._resolve_pending(api, barcode)
             await query.edit_message_text("Cancelled.")
             return
 
         if action == "skip":
             barcode = data.get("barcode", "")
-            self._resolve_pending(barcode)
+            self._resolve_pending(api, barcode)
             await query.edit_message_text("Skipped.")
             return
 
@@ -1580,14 +2125,26 @@ class TelegramBotHandler:
             row = data.get("row")
             wine_id = data.get("wine_id")
             try:
+                # Only show the "looking up" tail if there's actually an enrich
+                # in flight for this wine (i.e. it was just created from a scan,
+                # not when adding stock to a wine that already exists).
+                tail = ""
+                if wine_id and wine_id in self._enriching_wine_ids:
+                    tail = (
+                        "\n\n⏳ <i>Looking up ratings and price — these will arrive "
+                        "in a follow-up message in a few seconds.</i>"
+                    )
                 if row and row > 0 and item_id:
                     api.move_item(item_id, row=row)
                     await query.edit_message_text(
-                        f"✅ Placed in drawer {row}.",
+                        f"✅ Placed in drawer {row}.{tail}",
                         parse_mode="HTML",
                     )
                 else:
-                    await query.edit_message_text("✅ Added (no drawer assigned).")
+                    await query.edit_message_text(
+                        f"✅ Added (no drawer assigned).{tail}",
+                        parse_mode="HTML",
+                    )
             except Exception as e:
                 await query.edit_message_text(f"Error setting drawer: {e}")
 
@@ -1614,7 +2171,7 @@ class TelegramBotHandler:
         # --- "It's a new/different wine" with a duplicate barcode ---
         elif action == "nw":
             barcode = data["barcode"]
-            self._create_pending(barcode)
+            self._create_pending(api, barcode)
             await query.edit_message_text(
                 f"🆕 <b>New wine with barcode <code>{barcode}</code></b>\n\n"
                 f"📸 <b>Reply to this message</b> with a label photo "
@@ -1668,7 +2225,7 @@ class TelegramBotHandler:
                 logger.warning(f"Failed to undo stock change for wine {wine_id}: {e}")
 
             undo_line = "↩️ Stock change undone.\n\n" if undo_ok else "⚠️ Could not undo the stock change — please fix manually.\n\n"
-            self._create_pending(barcode)
+            self._create_pending(api, barcode)
             await query.edit_message_text(
                 f"{undo_line}"
                 f"🆕 <b>New wine with barcode <code>{barcode}</code></b>\n\n"
@@ -1680,12 +2237,11 @@ class TelegramBotHandler:
         # --- Add with Open Food Facts data ---
         elif action == "off":
             barcode = data["barcode"]
-            if not self._is_pending(barcode):
+            if not self._is_pending(api, barcode):
                 await query.edit_message_text("This barcode was already handled or expired.")
                 return
 
-            with self._lock:
-                off_data = self.pending_store.get(barcode, {}).get("off_data", {})
+            off_data = self._get_pending(api, barcode).get("off_data", {})
             if not off_data:
                 await query.edit_message_text("No OFF data found for this barcode.")
                 return
@@ -1702,22 +2258,25 @@ class TelegramBotHandler:
                 }
                 result = api.create_wine(wine_data)
                 stock = api.add_stock(result["id"])
-                self._resolve_pending(barcode)
+                self._resolve_pending(api, barcode)
                 await query.edit_message_text(
                     f"🍷 <b>Wine added:</b> {result['name']}\n"
-                    f"📊 In stock: {stock['stock_count']}",
+                    f"📊 In stock: {stock['stock_count']}\n\n"
+                    f"⏳ <i>Looking up ratings and price — these will arrive in a follow-up message in a few seconds.</i>",
                     parse_mode="HTML",
                 )
+                # Background live-search enrichment — sends a follow-up message when done
+                self._kick_enrich(result["id"], update.effective_chat.id, api, result.get("name", ""))
             except Exception as e:
                 await query.edit_message_text(f"Error creating wine: {e}")
 
         # --- Add manually via web UI ---
         elif action == "man":
             barcode = data["barcode"]
-            if not self._is_pending(barcode):
+            if not self._is_pending(api, barcode):
                 await query.edit_message_text("This barcode was already handled or expired.")
                 return
-            self._resolve_pending(barcode)
+            self._resolve_pending(api, barcode)
             await query.edit_message_text(
                 f"Add manually in Wine Cellar:\n"
                 f"🔗 {api.web_url}/wine/add/{barcode}",
@@ -1727,12 +2286,11 @@ class TelegramBotHandler:
         # --- Confirm Grok extraction and create wine ---
         elif action == "grok":
             barcode = data["barcode"]
-            if not self._is_pending(barcode):
+            if not self._is_pending(api, barcode):
                 await query.edit_message_text("This barcode was already handled or expired.")
                 return
 
-            with self._lock:
-                merged = self.pending_store.get(barcode, {}).get("grok_merged")
+            merged = self._get_pending(api, barcode).get("grok_merged")
             if not merged:
                 await query.edit_message_text("Error: no extracted data found.")
                 return
@@ -1743,14 +2301,16 @@ class TelegramBotHandler:
                     wine_data["barcode"] = barcode
                 result = api.create_wine(wine_data)
                 wine_id = result["id"]
+                # Background live-search enrichment — sends a follow-up message when done.
+                # Kicked early so search runs in parallel with photo upload + stock placement.
+                self._kick_enrich(wine_id, update.effective_chat.id, api, result.get("name", ""))
 
                 # Upload label photo if available
-                with self._lock:
-                    pending_entry = self.pending_store.get(barcode, {})
-                    photo = pending_entry.get("photo_data")
-                    logger.info(f"[PHOTO] grok handler: barcode={barcode}, has_photo={photo is not None}, "
-                                f"photo_size={len(photo) if photo else 0}, "
-                                f"pending_keys={list(pending_entry.keys())}")
+                pending_entry = self._get_pending(api, barcode)
+                photo = pending_entry.get("photo_data")
+                logger.info(f"[PHOTO] grok handler: barcode={barcode}, has_photo={photo is not None}, "
+                            f"photo_size={len(photo) if photo else 0}, "
+                            f"pending_keys={list(pending_entry.keys())}")
                 if photo:
                     try:
                         api.upload_wine_image(wine_id, photo)
@@ -1760,7 +2320,7 @@ class TelegramBotHandler:
                 else:
                     logger.warning(f"[PHOTO] No photo_data found in pending_store for barcode={barcode}")
 
-                self._resolve_pending(barcode)
+                self._resolve_pending(api, barcode)
 
                 # Show storage picker
                 storages = api.list_storages()
@@ -1795,9 +2355,10 @@ class TelegramBotHandler:
                         )
                     else:
                         await query.edit_message_text(
-                            f"🍷 <b>Wine created:</b> {result['name']}\n"
+                            f"🍷 <b>Wine added:</b> {result['name']}\n"
                             f"📍 {storage_name}\n"
-                            f"📊 In stock: {stock['stock_count']}",
+                            f"📊 In stock: {stock['stock_count']}\n\n"
+                            f"⏳ <i>Looking up ratings and price — these will arrive in a follow-up message in a few seconds.</i>",
                             parse_mode="HTML",
                         )
                 else:
@@ -1822,7 +2383,7 @@ class TelegramBotHandler:
         # --- Retry with a new photo ---
         elif action == "retry":
             barcode = data["barcode"]
-            if not self._is_pending(barcode):
+            if not self._is_pending(api, barcode):
                 await query.edit_message_text("This barcode was already handled or expired.")
                 return
             await query.edit_message_text(
@@ -1946,7 +2507,9 @@ class TelegramBotHandler:
                     await query.edit_message_text(f"Error loading fridge: {e}")
                     return
                 if not wines:
-                    await query.edit_message_text("\U0001F377 The fridge is empty!")
+                    await query.edit_message_text(
+                        empty_cellar()[0], reply_markup=empty_cellar()[1], parse_mode="HTML",
+                    )
                     return
                 text, keyboard = self._build_fridge_page(wines, page=page)
                 await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
@@ -1988,7 +2551,9 @@ class TelegramBotHandler:
                 else:
                     wines = api.wines_in_stock()
                     if not wines:
-                        await query.edit_message_text("\U0001F377 The fridge is empty!")
+                        await query.edit_message_text(
+                            empty_cellar()[0], reply_markup=empty_cellar()[1], parse_mode="HTML",
+                        )
                         return
                     total_pages = max(1, (len(wines) + self.FRIDGE_PAGE_SIZE - 1) // self.FRIDGE_PAGE_SIZE)
                     page = min(page, total_pages - 1)
@@ -2122,16 +2687,20 @@ class TelegramBotHandler:
                 wine_name = wine["name"] if wine else f"Wine #{wine_id}"
 
                 images = []
+                fetch_error = None
                 try:
                     images = api.get_wine_images(wine_id)
-                except Exception:
-                    pass
+                    logger.info(f"[PHOTO] get_wine_images({wine_id}) returned {len(images)} image(s)")
+                except Exception as e:
+                    logger.error(f"[PHOTO] Failed to fetch image list for wine #{wine_id}: {e}")
+                    fetch_error = e
 
                 if images:
                     image_id = images[0].get("id")
                     if image_id:
                         try:
                             photo_bytes = api.get_image_file(image_id)
+                            logger.info(f"[PHOTO] Downloaded image #{image_id}: {len(photo_bytes)} bytes")
                             # Store original message ID so "back" can restore it
                             orig_msg_id = query.message.message_id
                             keyboard = [[
@@ -2151,14 +2720,18 @@ class TelegramBotHandler:
                             )
                             return
                         except Exception as e:
-                            logger.warning(f"[PHOTO] Failed to send wine image: {e}")
+                            logger.error(f"[PHOTO] Failed to send wine image #{image_id}: {e}")
 
                 keyboard = [
                     [InlineKeyboardButton("📸 Upload label photo", callback_data=_cb("ed", wine_id=wine_id))],
                     [InlineKeyboardButton("⬅️ Back", callback_data=_cb("det", wine_id=wine_id))],
                 ]
+                if fetch_error:
+                    msg = f"📸 <b>{wine_name}</b>\n\nCould not load photo — try again later."
+                else:
+                    msg = f"📸 <b>{wine_name}</b>\n\nNo photo yet."
                 await query.edit_message_text(
-                    f"📸 <b>{wine_name}</b>\n\nNo photo yet.",
+                    msg,
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(keyboard),
                 )
@@ -2347,7 +2920,9 @@ class TelegramBotHandler:
                 else:
                     wines = api.wines_in_stock()
                     if not wines:
-                        await query.edit_message_text("\U0001F377 The fridge is empty!")
+                        await query.edit_message_text(
+                            empty_cellar()[0], reply_markup=empty_cellar()[1], parse_mode="HTML",
+                        )
                         return
                     total_pages = max(1, (len(wines) + self.FRIDGE_PAGE_SIZE - 1) // self.FRIDGE_PAGE_SIZE)
                     page = min(page, total_pages - 1)
@@ -2355,6 +2930,89 @@ class TelegramBotHandler:
                     await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
             except Exception as e:
                 await query.answer(f"Error: {e}", show_alert=True)
+
+        # --- Refresh references (re-ask Grok for critic / Vivino / market price) ---
+        elif action == "rr":
+            wine_id = data["wine_id"]
+            await query.answer()  # acknowledge the tap; further feedback comes via message edits
+
+            # Show in-flight status by editing the existing card message
+            original_text = query.message.text_html if query.message else ""
+            original_markup = query.message.reply_markup if query.message else None
+            try:
+                await query.edit_message_text(
+                    f"🔄 <i>Asking Grok for references…</i>\n\n{original_text}",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+            loop = asyncio.get_running_loop()
+            try:
+                result = await loop.run_in_executor(
+                    None, functools.partial(api.refresh_references, wine_id),
+                )
+            except Exception as e:
+                logger.error(f"[rr] refresh_references failed: {e}")
+                # Restore the card and show the error as a popup-style status line
+                try:
+                    await query.edit_message_text(
+                        f"⚠️ <b>Error refreshing references:</b> {e}\n\n{original_text}",
+                        reply_markup=original_markup,
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+                return
+
+            if not result.get("updated"):
+                msg = result.get("message") or "Grok couldn't confidently identify the wine."
+                confidence = result.get("confidence", "low")
+                # Restore the card with a status banner so the user sees what happened
+                try:
+                    await query.edit_message_text(
+                        f"⚠️ <b>No update</b> (confidence: {confidence})\n<i>{msg}</i>\n\n{original_text}",
+                        reply_markup=original_markup,
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+                return
+
+            # Updated — reload the wine detail card with the fresh data
+            try:
+                wine = api.get_wine_detail(wine_id)
+                if wine:
+                    text, keyboard = self._build_detail_card(wine)
+                    confidence = result.get("confidence", "")
+                    text = f"✅ <b>References updated</b> (confidence: {confidence})\n\n{text}"
+                    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+                    return
+            except Exception as e:
+                logger.warning(f"[rr] reload failed: {e}")
+
+            # Fallback if reload failed — show a one-liner with the new values
+            confidence = result.get("confidence", "")
+            critic = result.get("critic_score")
+            vivino = result.get("vivino_rating")
+            market = result.get("market_price")
+            currency = result.get("market_price_currency", "")
+            parts = []
+            if critic is not None:
+                parts.append(f"⭐ {critic}/100")
+            if vivino is not None:
+                parts.append(f"🍇 {vivino}/5")
+            if market is not None:
+                parts.append(f"💰 ~{market:.0f} {currency}")
+            summary = " · ".join(parts) if parts else "(no values returned)"
+            try:
+                await query.edit_message_text(
+                    f"✅ <b>References updated</b> ({confidence}): {summary}\n\n{original_text}",
+                    reply_markup=original_markup,
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
 
         # --- Fridge: edit wine details ---
         elif action == "ed":
@@ -2413,6 +3071,116 @@ class TelegramBotHandler:
             except Exception as e:
                 await query.edit_message_text(f"Error updating wine: {e}")
 
+        elif action == "link":
+            # Show list of existing wines to link a barcode to
+            barcode = data.get("barcode", "")
+            page = data.get("page", 0)
+            if not barcode:
+                await query.edit_message_text("Error: no barcode to link.")
+                return
+            try:
+                wines = api.wines_in_stock()
+            except Exception as e:
+                await query.edit_message_text(f"Error loading wines: {e}")
+                return
+            if not wines:
+                await query.edit_message_text(
+                    "No wines in your cellar yet — nothing to link to.\n"
+                    "Add a wine first, then scan the barcode.",
+                )
+                return
+
+            # Check OFF data for a suggested match
+            suggested_id = None
+            off_data = self._get_pending(api, barcode).get("off_data")
+            if off_data and off_data.get("name"):
+                off_name = off_data["name"].lower().strip()
+                skip_words = {"wine", "the", "de", "du", "le", "la", "les", "di", "del", "das", "der"}
+                off_words = {w for w in off_name.split() if w not in skip_words and len(w) > 2}
+                for wine in wines:
+                    existing = wine["name"].lower().strip()
+                    if off_name in existing or existing in off_name:
+                        suggested_id = wine["id"]
+                        break
+                if not suggested_id and off_words:
+                    best_score = 0
+                    for wine in wines:
+                        existing_words = {w for w in wine["name"].lower().split() if w not in skip_words and len(w) > 2}
+                        overlap = len(off_words & existing_words)
+                        if overlap > best_score and overlap >= 2:
+                            best_score = overlap
+                            suggested_id = wine["id"]
+
+            # Build paginated list
+            page_size = 6
+            start = page * page_size
+            page_wines = wines[start:start + page_size]
+
+            keyboard = []
+            # Show suggested match first (on page 0)
+            if page == 0 and suggested_id:
+                suggested = next((w for w in wines if w["id"] == suggested_id), None)
+                if suggested:
+                    label = f"⭐ {suggested['name']} ({suggested['stock_count']}x)"
+                    keyboard.append([InlineKeyboardButton(
+                        label, callback_data=_cb("lnk", wine_id=suggested["id"], barcode=barcode),
+                    )])
+
+            for wine in page_wines:
+                if wine["id"] == suggested_id and page == 0:
+                    continue  # already shown as suggestion
+                vintage = wine.get("vintage", "")
+                label = f"{wine['name']} {vintage} ({wine['stock_count']}x)".strip()
+                keyboard.append([InlineKeyboardButton(
+                    label, callback_data=_cb("lnk", wine_id=wine["id"], barcode=barcode),
+                )])
+
+            # Pagination buttons
+            nav = []
+            if page > 0:
+                nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=_cb("link", barcode=barcode, page=page - 1)))
+            if start + page_size < len(wines):
+                nav.append(InlineKeyboardButton("Next ➡️", callback_data=_cb("link", barcode=barcode, page=page + 1)))
+            if nav:
+                keyboard.append(nav)
+
+            keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data=_cb("skip", barcode=barcode))])
+
+            off_hint = ""
+            if page == 0 and suggested_id and off_data:
+                off_hint = f"\n⭐ Suggested match from OFF: <b>{off_data['name']}</b>\n"
+
+            await query.edit_message_text(
+                f"🔗 <b>Link barcode <code>{barcode}</code> to which wine?</b>\n"
+                f"{off_hint}"
+                f"\nPage {page + 1}/{(len(wines) + page_size - 1) // page_size}",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+
+        elif action == "lnk":
+            # Actually link the barcode to the chosen wine
+            wine_id = data.get("wine_id")
+            barcode = data.get("barcode", "")
+            if not wine_id or not barcode:
+                await query.edit_message_text("Error: missing wine or barcode.")
+                return
+            try:
+                result = api.update_wine(wine_id, {"barcode": barcode})
+                wine_name = result.get("name", f"Wine #{wine_id}")
+                # Also add stock
+                stock = api.add_stock(wine_id)
+                self._resolve_pending(api, barcode)
+                await query.edit_message_text(
+                    f"✅ <b>Linked & added!</b>\n\n"
+                    f"🍷 {wine_name}\n"
+                    f"Barcode: <code>{barcode}</code>\n"
+                    f"📊 In stock: {stock['stock_count']}",
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                await query.edit_message_text(f"Error linking barcode: {e}")
+
     # --- Photo handler ---
 
     async def _download_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bytes:
@@ -2446,6 +3214,7 @@ class TelegramBotHandler:
         3. No reply, no pending -> try to read barcode from the photo
         """
         api = self._get_api(update)
+        self._sweep()  # photos are the biggest entries; evict before adding more
         logger.info(f"[PHOTO] Received photo from chat {update.message.chat_id}")
 
         if not self._photo_callback and not self._triage_callback:
@@ -2471,7 +3240,7 @@ class TelegramBotHandler:
         barcode = None
         if reply:
             barcode = _extract_barcode_from_message(reply)
-            if barcode and not self._is_pending(barcode):
+            if barcode and not self._is_pending(api, barcode):
                 await update.message.reply_text(
                     f"Barcode <code>{barcode}</code> was already handled or expired.\n"
                     f"Scan a new barcode to try again.",
@@ -2481,7 +3250,7 @@ class TelegramBotHandler:
 
         if not barcode:
             with self._lock:
-                active = _active_pendings(self.pending_store)
+                active = _active_pendings(self.pending_store, self._hid(api))
             if len(active) == 1:
                 barcode = next(iter(active))
             elif len(active) > 1:
@@ -2533,7 +3302,7 @@ class TelegramBotHandler:
                 f"📷 Barcode detected: <code>{detected}</code>\nLooking up...",
                 parse_mode="HTML",
             )
-            await self._handle_barcode_result(status_msg, detected)
+            await self._handle_barcode_result(status_msg, detected, update=update)
             return
 
         # Step 2: pyzbar didn't find anything — ask Grok to triage
@@ -2547,9 +3316,11 @@ class TelegramBotHandler:
 
         logger.info("[PHOTO] Step 2: sending to Grok triage...")
         status_msg = await update.message.reply_text("📷 Analysing photo...")
+        currency = self._currency_for(update.effective_chat.id)
+        country = self._country_for(update.effective_chat.id)
         try:
             result = await loop.run_in_executor(
-                None, functools.partial(self._triage_callback, photo_data),
+                None, functools.partial(self._triage_callback, photo_data, currency, country),
             )
         except Exception as e:
             logger.error(f"[PHOTO] Grok triage exception: {e}")
@@ -2573,7 +3344,7 @@ class TelegramBotHandler:
                     f"📷 Barcode detected: <code>{barcode_digits}</code>\nLooking up...",
                     parse_mode="HTML",
                 )
-                await self._handle_barcode_result(status_msg, barcode_digits)
+                await self._handle_barcode_result(status_msg, barcode_digits, update=update)
                 return
             logger.warning("[PHOTO] Grok detected barcode but digits invalid")
             await status_msg.edit_text("Detected a barcode but couldn't read the number. Try a clearer photo.")
@@ -2582,7 +3353,7 @@ class TelegramBotHandler:
         # --- Grok says it's a wine label ---
         if photo_type == "label":
             logger.info(f"[PHOTO] Grok label analysis: {result.get('name', '?')}")
-            await self._handle_triage_label(status_msg, result, photo_data)
+            await self._handle_triage_label(status_msg, result, photo_data, update=update)
             return
 
         # --- Neither ---
@@ -2592,9 +3363,10 @@ class TelegramBotHandler:
             "Send a photo of a barcode to scan, or a wine label for details."
         )
 
-    async def _handle_barcode_result(self, status_msg, barcode: str):
+    async def _handle_barcode_result(self, status_msg, barcode: str, update=None):
         """Handle a barcode that was read from a photo (pyzbar or Grok).
         Looks up in DB and shows appropriate response."""
+        api = self._get_api(update)
         logger.info(f"[BARCODE] Looking up barcode={barcode} in Wine Cellar DB...")
         try:
             wines = api.lookup_barcode(barcode)
@@ -2618,7 +3390,7 @@ class TelegramBotHandler:
                     logger.info("[BARCODE] OFF returned no results")
             except Exception as e:
                 logger.warning(f"[BARCODE] OFF lookup failed: {e}")
-            self._create_pending(barcode, off_data=off_data)
+            self._create_pending(api, barcode, off_data=off_data)
 
             text = f"❓ <b>Unknown barcode: <code>{barcode}</code></b>\n\n"
             if off_data and off_data.get("name"):
@@ -2631,6 +3403,7 @@ class TelegramBotHandler:
                 "and I'll extract the full details + tasting notes."
             )
             keyboard = [
+                [InlineKeyboardButton("🔗 Link to existing wine", callback_data=_cb("link", barcode=barcode))],
                 [InlineKeyboardButton("✏️ Add manually", callback_data=_cb("man", barcode=barcode))],
                 [InlineKeyboardButton("❌ Skip", callback_data=_cb("skip", barcode=barcode))],
             ]
@@ -2669,13 +3442,14 @@ class TelegramBotHandler:
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
 
-    def _find_matching_wine(self, grok_data: dict) -> dict | None:
+    def _find_matching_wine(self, grok_data: dict, update=None) -> dict | None:
         """Check if a Grok-analysed wine already exists in stock.
         Returns the matching wine dict or None."""
         grok_name = (grok_data.get("name") or "").lower().strip()
         if not grok_name:
             return None
 
+        api = self._get_api(update)
         try:
             wines = api.list_all_wines()
         except Exception:
@@ -2711,24 +3485,25 @@ class TelegramBotHandler:
             logger.info(f"[MATCH] Grok '{grok_name}' fuzzy-matched '{best_match['name']}' (id={best_match['id']}, score={best_score})")
         return best_match
 
-    async def _handle_triage_label(self, status_msg, grok_data: dict, photo_data: bytes = b""):
+    async def _handle_triage_label(self, status_msg, grok_data: dict, photo_data: bytes = b"", update=None):
         """Handle a photo that Grok identified as a wine label.
         Grok already did the full analysis in the triage call.
         Checks for existing wines before creating a new one."""
-        # Check if there's a single pending barcode to attach
+        api = self._get_api(update)
+        # Check if there's a single pending barcode to attach — scoped to this
+        # household, so one tenant's photo can't land on another's scan.
         barcode = ""
         with self._lock:
-            active = _active_pendings(self.pending_store)
+            active = _active_pendings(self.pending_store, self._hid(api))
             if len(active) == 1:
                 barcode = next(iter(active))
 
         if barcode:
             # Store Grok data for confirmation, linked to the pending barcode
-            with self._lock:
-                if barcode in self.pending_store:
-                    self.pending_store[barcode]["grok_merged"] = grok_data
-                    if photo_data:
-                        self.pending_store[barcode]["photo_data"] = photo_data
+            fields = {"grok_merged": grok_data}
+            if photo_data:
+                fields["photo_data"] = photo_data
+            self._update_pending(api, barcode, **fields)
 
             text = "🔍 <b>Label analysis complete!</b>\n\n"
             text += _grok_summary(grok_data)
@@ -2747,10 +3522,10 @@ class TelegramBotHandler:
             return
 
         # No pending barcode — check if this wine already exists
-        existing = self._find_matching_wine(grok_data)
+        existing = self._find_matching_wine(grok_data, update=update)
 
         # Store Grok data under a temp key for the confirm buttons
-        temp_key = f"_label_{id(grok_data)}"
+        temp_key = self._next_label_key()
         with self._lock:
             entry = {
                 "grok_merged": grok_data,
@@ -2805,16 +3580,22 @@ class TelegramBotHandler:
     async def _handle_label_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE,
                                    barcode: str, photo_data: bytes):
         """Process a label photo for a new wine (reply to barcode message)."""
+        api = self._get_api(update)
         status_msg = await update.message.reply_text(
             f"📸 Analysing label for <code>{barcode}</code>...",
             parse_mode="HTML",
         )
 
         loop = asyncio.get_running_loop()
+        currency = self._currency_for(update.effective_chat.id)
+        country = self._country_for(update.effective_chat.id)
         try:
             grok_data = await loop.run_in_executor(
                 None,
-                functools.partial(self._photo_callback, barcode, photo_data),
+                functools.partial(
+                    self._photo_callback, barcode, photo_data, currency, country,
+                    self._get_pending(api, barcode).get("off_data"),
+                ),
             )
         except Exception as e:
             await status_msg.edit_text(f"Error processing photo: {e}")
@@ -2826,8 +3607,7 @@ class TelegramBotHandler:
                 [InlineKeyboardButton("✏️ Add manually", callback_data=_cb("man", barcode=barcode))],
                 [InlineKeyboardButton("❌ Skip", callback_data=_cb("skip", barcode=barcode))],
             ]
-            with self._lock:
-                off_data = self.pending_store.get(barcode, {}).get("off_data")
+            off_data = self._get_pending(api, barcode).get("off_data")
             if off_data and off_data.get("name"):
                 keyboard.insert(1, [InlineKeyboardButton(
                     "✅ Add with OFF data instead",
@@ -2842,10 +3622,7 @@ class TelegramBotHandler:
             return
 
         # Store Grok data and photo for confirmation
-        with self._lock:
-            if barcode in self.pending_store:
-                self.pending_store[barcode]["grok_merged"] = grok_data
-                self.pending_store[barcode]["photo_data"] = photo_data
+        self._update_pending(api, barcode, grok_merged=grok_data, photo_data=photo_data)
 
         text = "🔍 <b>Label analysis complete!</b>\n\n"
         text += _grok_summary(grok_data)
@@ -2873,11 +3650,13 @@ class TelegramBotHandler:
         )
 
         loop = asyncio.get_running_loop()
+        currency = self._currency_for(update.effective_chat.id)
+        country = self._country_for(update.effective_chat.id)
         try:
             # Use the photo callback with a dummy barcode — we just need Grok's analysis
             grok_data = await loop.run_in_executor(
                 None,
-                functools.partial(self._photo_callback, "", photo_data),
+                functools.partial(self._photo_callback, "", photo_data, currency, country, None),
             )
         except Exception as e:
             await status_msg.edit_text(f"Error processing photo: {e}")

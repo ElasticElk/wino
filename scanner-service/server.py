@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 from integrations.grok_vision import GrokVisionAPI, merge_wine_data, read_barcode_local
 from integrations.open_food_facts import OpenFoodFactsAPI
-from integrations.telegram_bot import TelegramBotHandler, TelegramNotifier
+from integrations.telegram_bot import TelegramBotHandler, TelegramNotifier, pending_key
 from integrations.wine_cellar_api import WineCellarAPI
 
 logging.basicConfig(
@@ -55,6 +55,8 @@ pending_lock = threading.Lock()
 scanner_registry: dict[str, dict] = {}  # api_key -> scanner config
 api_clients: dict[str, WineCellarAPI] = {}  # unique key -> WineCellarAPI instance
 chat_id_to_api: dict[str, WineCellarAPI] = {}  # chat_id -> WineCellarAPI for that user's default household
+chat_id_to_currency: dict[str, str] = {}  # chat_id -> ISO currency code (passed to Grok)
+chat_id_to_country: dict[str, str] = {}  # chat_id -> ISO 2-letter country code (price-context grounding)
 notifiers: dict[str, TelegramNotifier] = {}  # api_token -> TelegramNotifier
 off: OpenFoodFactsAPI = None  # type: ignore
 grok: GrokVisionAPI | None = None
@@ -97,13 +99,16 @@ def _get_scanner_context(api_key: str) -> tuple[WineCellarAPI, TelegramNotifier 
 
 
 def _make_photo_handler(grok_api, off_api, store):
-    def handle_photo(barcode: str, photo_bytes: bytes) -> dict | None:
-        logger.info(f"Analysing label photo for {barcode}...")
-        grok_data = grok_api.analyse_label(photo_bytes)
+    def handle_photo(barcode: str, photo_bytes: bytes, target_currency: str = "USD",
+                     target_country: str = "", off_data: dict | None = None) -> dict | None:
+        # off_data is supplied by the caller. Reading it out of `store` by bare
+        # barcode is no longer possible now that entries are keyed per household,
+        # and the caller already holds the entry anyway.
+        logger.info(f"Analysing label photo for {barcode} (currency={target_currency}, country={target_country or '-'})...")
+        grok_data = grok_api.analyse_label(photo_bytes, target_currency=target_currency, target_country=target_country)
         if not grok_data:
             logger.warning(f"Grok extraction failed for {barcode}")
             return None
-        off_data = store.get(barcode, {}).get("off_data")
         merged = merge_wine_data(off_data, grok_data)
         logger.info(f"Grok extracted: {merged.get('name', 'Unknown')}")
         return merged
@@ -119,7 +124,7 @@ def _build_notifier(bot_token: str, chat_ids: list[str]) -> TelegramNotifier | N
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global off, grok, bot_handler, db_config, file_config
-    global scanner_registry, api_clients, notifiers, chat_id_to_api
+    global scanner_registry, api_clients, notifiers, chat_id_to_api, chat_id_to_currency, chat_id_to_country
 
     file_config = load_config()
     base_url = file_config["wine_cellar"]["base_url"]
@@ -150,6 +155,7 @@ async def lifespan(app: FastAPI):
 
     # Build per-user/household API clients from telegram_users
     all_chat_ids = []
+    admin_chat_ids = []  # staff only — receives operational notices, not broadcasts
     token_to_chat_ids: dict[str, list[str]] = {}
 
     for tu in db_config.get("telegram_users", []):
@@ -157,6 +163,8 @@ async def lifespan(app: FastAPI):
         chat_id = tu["chat_id"]
         household_id = tu.get("household_id")
         all_chat_ids.append(chat_id)
+        if tu.get("is_staff"):
+            admin_chat_ids.append(chat_id)
 
         # Build a household-specific API client for this user
         client_key = f"{api_token}:{household_id}" if household_id else api_token
@@ -174,6 +182,10 @@ async def lifespan(app: FastAPI):
 
         # Map chat_id -> API client for Telegram bot routing
         chat_id_to_api[chat_id] = api_clients[client_key]
+
+        # Track chat_id -> currency / country for Grok price/rating prompts
+        chat_id_to_currency[str(chat_id)] = tu.get("currency") or "USD"
+        chat_id_to_country[str(chat_id)] = tu.get("country") or ""
 
         token_to_chat_ids.setdefault(api_token, []).append(chat_id)
 
@@ -217,6 +229,9 @@ async def lifespan(app: FastAPI):
         if bot_token and yaml_chat_ids:
             notifiers[fallback_token] = TelegramNotifier(bot_token, yaml_chat_ids)
             all_chat_ids = yaml_chat_ids
+            # No DB to tell us who is staff; in fallback mode the yaml chat_ids
+            # are the operator's own, so they're the right audience for notices.
+            admin_chat_ids = list(yaml_chat_ids)
             for cid in yaml_chat_ids:
                 chat_id_to_api[str(cid)] = api_clients[fallback_token]
         # Register a synthetic scanner so the fallback works
@@ -239,6 +254,10 @@ async def lifespan(app: FastAPI):
             chat_id_to_api=chat_id_to_api,
         )
         bot_handler.set_local_barcode_reader(read_barcode_local)
+        for cid, ccy in chat_id_to_currency.items():
+            bot_handler.set_currency(cid, ccy)
+        for cid, cc in chat_id_to_country.items():
+            bot_handler.set_country(cid, cc)
 
         def _api_factory(chat_id: str, household_id: int):
             """Build a new WineCellarAPI for a freshly added user."""
@@ -259,6 +278,13 @@ async def lifespan(app: FastAPI):
             client_key = f"{tu_info['api_token']}:{household_id}"
             api_clients[client_key] = client
             chat_id_to_api[str(chat_id)] = client
+            currency = tu_info.get("currency") or "USD"
+            country = tu_info.get("country") or ""
+            chat_id_to_currency[str(chat_id)] = currency
+            chat_id_to_country[str(chat_id)] = country
+            if bot_handler:
+                bot_handler.set_currency(str(chat_id), currency)
+                bot_handler.set_country(str(chat_id), country)
             return client
 
         bot_handler.set_api_factory(_api_factory)
@@ -270,9 +296,12 @@ async def lifespan(app: FastAPI):
         bot_handler.run_in_thread()
         logger.info(f"Telegram bot: ACTIVE ({len(all_chat_ids)} user(s))")
 
-        # Notify all users
-        broadcast = TelegramNotifier(bot_token, all_chat_ids)
-        broadcast.send("\U0001F7E2 <b>Wine Scanner Server started</b>")
+        # Operational notice — staff only. Household members don't need to know
+        # the service bounced; they only care when a scan or photo fails.
+        if admin_chat_ids:
+            TelegramNotifier(bot_token, admin_chat_ids).send(
+                "\U0001F7E2 <b>Wine Scanner Server started</b>"
+            )
     else:
         logger.info("Telegram bot: DISABLED (no token/chat_ids)")
 
@@ -283,11 +312,12 @@ async def lifespan(app: FastAPI):
     )
     yield
 
-    # Shutdown
-    if bot_token and all_chat_ids:
+    # Shutdown — staff only, same reasoning as the startup notice.
+    if bot_token and admin_chat_ids:
         try:
-            broadcast = TelegramNotifier(bot_token, all_chat_ids)
-            broadcast.send("\U0001F534 <b>Wine Scanner Server stopped</b>")
+            TelegramNotifier(bot_token, admin_chat_ids).send(
+                "\U0001F534 <b>Wine Scanner Server stopped</b>"
+            )
         except Exception:
             pass
     logger.info("Wine Scanner Server stopped")
@@ -411,9 +441,13 @@ def _handle_ambiguous(wines: list[dict], barcode: str, mode: str,
 
 def _handle_unknown(barcode: str, api: WineCellarAPI,
                     notifier: TelegramNotifier | None) -> ScanResponse:
+    # The store is shared with the bot and spans every household, so entries
+    # must be namespaced the same way on both sides.
+    key = pending_key(getattr(api, "household_id", None), barcode)
+
     # Check if already pending
     with pending_lock:
-        existing = pending_store.get(barcode)
+        existing = pending_store.get(key)
         if existing and not existing.get("resolved"):
             age = time.time() - existing.get("time", 0)
             if age < 600:
@@ -434,7 +468,12 @@ def _handle_unknown(barcode: str, api: WineCellarAPI,
         logger.info(f"OFF found: {off_data['name']}")
 
     with pending_lock:
-        pending_store[barcode] = {"off_data": off_data, "time": time.time()}
+        pending_store[key] = {
+            "off_data": off_data,
+            "time": time.time(),
+            "barcode": barcode,
+            "household_id": getattr(api, "household_id", None),
+        }
 
     if notifier:
         notifier.send_new_wine_prompt(barcode, off_data)

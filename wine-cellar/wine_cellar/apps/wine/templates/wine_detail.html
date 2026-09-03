@@ -143,7 +143,94 @@
                             {% endif %}
                         </td>
                     </tr>
+                    {% if wine.critic_score or wine.vivino_rating or wine.market_price %}
+                        <tr>
+                            <th colspan="2" style="padding-top:1em;">
+                                {% translate "References" %}
+                                {% if wine.reference_confidence %}
+                                    <small style="font-weight:normal; color:#888;">
+                                        ({% translate "confidence" %}: {{ wine.reference_confidence }}{% if wine.reference_updated %}, {{ wine.reference_updated|date:"Y-m-d" }}{% endif %})
+                                    </small>
+                                {% endif %}
+                            </th>
+                        </tr>
+                        {% if wine.critic_score %}
+                            <tr>
+                                <th>{% translate "Critic score" %}</th>
+                                <td>{{ wine.critic_score }} / 100</td>
+                            </tr>
+                        {% endif %}
+                        {% if wine.vivino_rating %}
+                            <tr>
+                                <th>{% translate "Vivino rating" %}</th>
+                                <td>{{ wine.vivino_rating }} / 5</td>
+                            </tr>
+                        {% endif %}
+                        {% if wine.category_rating %}
+                            <tr>
+                                <th>{% translate "Category" %}</th>
+                                <td>{{ wine.category_label }} <small style="color:#888;">({{ wine.category_rating }}/100)</small></td>
+                            </tr>
+                        {% endif %}
+                        {% if market_price_display %}
+                            <tr>
+                                <th>{% translate "Market price" %}</th>
+                                <td>~ {{ market_price_display }}{% if wine.market_price_currency != viewer_currency %} <small style="color:#888;">({{ wine.market_price }} {{ wine.market_price_currency }})</small>{% endif %}</td>
+                            </tr>
+                        {% endif %}
+                    {% endif %}
                 </table>
+                <div style="margin-top:0.75em;">
+                    <button type="button"
+                            id="refresh-refs-btn"
+                            class="pure-button"
+                            data-wine-id="{{ wine.pk }}"
+                            data-url="{% url 'api-wine-refresh-references' wine.pk %}">
+                        <i class="fa-regular fa-arrows-rotate"></i>
+                        {% if wine.critic_score or wine.vivino_rating or wine.market_price %}
+                            {% translate "Refresh references" %}
+                        {% else %}
+                            {% translate "Fetch references" %}
+                        {% endif %}
+                    </button>
+                    <span id="refresh-refs-status" style="margin-left:0.5em; color:#888;"></span>
+                </div>
+                <script>
+                (function() {
+                    const btn = document.getElementById("refresh-refs-btn");
+                    const status = document.getElementById("refresh-refs-status");
+                    if (!btn) return;
+                    btn.addEventListener("click", async () => {
+                        btn.disabled = true;
+                        status.textContent = "{% translate 'Asking Grok...' %}";
+                        const csrf = document.cookie.match(/csrftoken=([^;]+)/);
+                        try {
+                            const resp = await fetch(btn.dataset.url, {
+                                method: "POST",
+                                headers: {
+                                    "X-CSRFToken": csrf ? csrf[1] : "",
+                                    "Content-Type": "application/json",
+                                },
+                                credentials: "same-origin",
+                            });
+                            const data = await resp.json();
+                            if (resp.ok && data.updated) {
+                                status.textContent = "{% translate 'Updated. Reloading...' %}";
+                                setTimeout(() => location.reload(), 600);
+                            } else if (resp.ok) {
+                                status.textContent = data.message || "{% translate 'Low confidence — no update.' %}";
+                                btn.disabled = false;
+                            } else {
+                                status.textContent = data.error || "{% translate 'Request failed.' %}";
+                                btn.disabled = false;
+                            }
+                        } catch (e) {
+                            status.textContent = "{% translate 'Network error.' %}";
+                            btn.disabled = false;
+                        }
+                    });
+                })();
+                </script>
             </div>
             {% if wine.location %}
                 <div class="pure-u-1 pure-u-md-2-3 m-auto wine-detail__map">{% react_detail_map wine %}</div>

@@ -213,6 +213,102 @@ class Wine(UserContentModel):
     source = models.ManyToManyField(Source)
     price = models.DecimalField(max_digits=6, decimal_places=2, null=True)
 
+    # External quality/price reference data — populated by Grok at scan time
+    # or via /api/wines/<pk>/refresh-references/. Distinct from `rating` (personal)
+    # and `price` (purchase price).
+    critic_score = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text=_("Average critic score 0-100 (Parker/WS scale)"),
+    )
+    vivino_rating = models.DecimalField(
+        max_digits=3,
+        decimal_places=1,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(0), MaxValueValidator(5)],
+        help_text=_("Vivino community rating 0.0-5.0"),
+    )
+    category_rating = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text=_("Weighted blend: 70% critic_score + 30% (vivino_rating x 20)"),
+    )
+    market_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text=_("Estimated replacement / market price"),
+    )
+    market_price_currency = models.CharField(
+        max_length=3,
+        null=True,
+        blank=True,
+        choices=settings.CURRENCIES,
+    )
+    reference_updated = models.DateTimeField(null=True, blank=True)
+    reference_confidence = models.CharField(
+        max_length=6,
+        null=True,
+        blank=True,
+        choices=[("high", "High"), ("medium", "Medium"), ("low", "Low")],
+    )
+
+    def save(self, *args, **kwargs):
+        # Computed category_rating from whatever signals are available:
+        #   both → 70/30 weighted blend
+        #   critic only → critic directly
+        #   Vivino only → Vivino normalised (×20)
+        #   neither → cleared (so refreshes that lose both sources don't keep stale)
+        if self.critic_score is not None and self.vivino_rating is not None:
+            vivino_norm = float(self.vivino_rating) * 20.0
+            self.category_rating = round(self.critic_score * 0.7 + vivino_norm * 0.3)
+        elif self.critic_score is not None:
+            self.category_rating = int(self.critic_score)
+        elif self.vivino_rating is not None:
+            self.category_rating = round(float(self.vivino_rating) * 20.0)
+        else:
+            self.category_rating = None
+        super().save(*args, **kwargs)
+
+    @property
+    def category_label(self) -> str:
+        """Word label for category_rating (Outstanding / Excellent / Very Good / Good / Average).
+
+        Bands recalibrated for the 70/30 critic+Vivino composite, which tops out
+        ~5 points below pure critic scores because Vivino rarely exceeds 4.3-4.5.
+        """
+        score = self.category_rating
+        if score is None:
+            return ""
+        if score >= 95:
+            return "Outstanding"
+        if score >= 85:
+            return "Excellent"
+        if score >= 80:
+            return "Very Good"
+        if score >= 75:
+            return "Good"
+        return "Average"
+
+    def market_price_display(self, target_currency: str) -> str:
+        """Return a human-readable market price converted to `target_currency`,
+        or empty string if no market_price set."""
+        from wine_cellar.apps.wine.utils import convert_price
+
+        if self.market_price is None or not self.market_price_currency:
+            return ""
+        amount = convert_price(
+            self.market_price, self.market_price_currency, target_currency,
+        )
+        if amount is None:
+            return ""
+        symbol = settings.CURRENCY_SYMBOLS.get(target_currency, target_currency)
+        return f"{symbol}{amount:,.0f}"
+
     def get_absolute_url(self):
         return reverse("wine-detail", kwargs={"pk": self.pk})
 

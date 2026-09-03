@@ -109,6 +109,26 @@ class WineCellarAPI:
             pass
         return wine
 
+    def refresh_references(self, wine_id: int) -> dict:
+        """Re-ask Grok for critic_score / vivino_rating / market_price for this wine.
+
+        Returns dict like {"updated": bool, "confidence": str, ...}
+        """
+        resp = self.session.post(
+            f"{self.base_url}/api/wines/{wine_id}/refresh-references/",
+            timeout=60,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def search_wines(self, query: str) -> list[dict]:
+        """Search wines by name within this household."""
+        resp = self.session.get(
+            f"{self.base_url}/api/wines/search/", params={"q": query}, timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()["wines"]
+
     def list_all_wines(self) -> list[dict]:
         resp = self.session.get(
             f"{self.base_url}/api/wines/all/", timeout=10,

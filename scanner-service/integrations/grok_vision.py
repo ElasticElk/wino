@@ -10,6 +10,8 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+GROK_MODEL = "grok-4.3"
+
 # pyzbar is optional — used for fast local barcode reading before falling back to Grok
 try:
     from PIL import Image
@@ -36,11 +38,58 @@ def read_barcode_local(photo_bytes: bytes) -> str | None:
         logger.warning(f"pyzbar failed: {e}")
     return None
 
-LABEL_PROMPT = """You are a sommelier and wine label expert. Analyse this wine bottle label photo and extract as much detail as possible.
+REFERENCE_INSTRUCTIONS = """REFERENCE FIELDS — fill each INDEPENDENTLY. You may know one and not the others; that is fine.
+
+For each of critic_score / vivino_rating / market_price, return three values:
+  <field>             — the value, or null
+  <field>_confidence  — "high", "medium", or "low"
+  <field>_reasoning   — one short sentence justifying the value (REQUIRED whenever the value is not null)
+
+Confidence rubric (apply per field, independently):
+  high   — you can name a specific source (e.g. "Wine Spectator 92pts for the 2019", "Vivino avg 4.2 with ~3000 ratings", "Wine-Searcher avg £45 across major UK retailers")
+  medium — you don't have an exact source but have strong contextual knowledge (producer, region, vintage quality, comparable bottlings) to give an educated estimate
+  low    — you cannot anchor an estimate at all; in this case set the value to null
+
+Examples of GOOD reasoning:
+  "Wine Spectator 91pts for the 2018 vintage; James Suckling 92pts"
+  "Producer's flagship cuvée in Stellenbosch; comparable Syrahs from same maker fetch ~R450 retail"
+  "Vivino community averages 4.1 across most vintages of this label"
+
+Examples of BAD reasoning (do NOT use these — return null instead):
+  "based on the grape variety"
+  "typical for this style"
+  "estimated from general wine knowledge"
+  "Syrah from a warm climate usually scores around 90"
+
+For market_price_currency: the ISO code you used for market_price (normally {currency}).
+
+ABSOLUTE RULES:
+  - Never invent specific critic names or scores you don't actually know.
+  - If your reasoning would be generic (any of the BAD examples above), the value MUST be null.
+  - Each field is independent: returning null for critic_score does NOT mean the others must also be null."""
+
+
+def _location_phrase(country: str) -> str:
+    """Render an 'in {country}' clause from an ISO 2-letter code, or empty if unknown."""
+    if not country:
+        return ""
+    try:
+        import pycountry
+        c = pycountry.countries.get(alpha_2=country.upper())
+        if c:
+            return f" in {c.name}"
+    except Exception:
+        pass
+    return f" in {country}"
+
+
+def build_label_prompt(target_currency: str = "USD", target_country: str = "") -> str:
+    location = _location_phrase(target_country)
+    return f"""You are a sommelier and wine label expert. Analyse this wine bottle label photo and extract as much detail as possible.
 
 Return a JSON object with these fields (use null for anything you can't determine):
 
-{
+{{
   "name": "The wine name as it appears on the label (required)",
   "producer": "Winery / producer / domaine name",
   "vintage": 2020,
@@ -53,13 +102,21 @@ Return a JSON object with these fields (use null for anything you can't determin
   "vineyard": "Vineyard / estate name if different from producer",
   "abv": 13.5,
   "size": 0.75,
-  "price": null,
-  "rating": null,
   "drink_by": "YYYY-MM-DD or null — estimated peak drinking window end date based on wine style",
   "food_pairings": ["Grilled lamb", "Hard cheese", "Dark chocolate"],
   "attributes": ["Old vine", "Organic", "Barrel-aged", "Single vineyard"],
-  "description": "Tasting notes — describe the expected flavour profile, aromas, body, and character of this wine based on the grape, region, and style. 2-3 sentences."
-}
+  "description": "Tasting notes — describe the expected flavour profile, aromas, body, and character of this wine based on the grape, region, and style. 2-3 sentences.",
+  "critic_score": null,
+  "critic_score_confidence": "low",
+  "critic_score_reasoning": null,
+  "vivino_rating": null,
+  "vivino_rating_confidence": "low",
+  "vivino_rating_reasoning": null,
+  "market_price": null,
+  "market_price_currency": "{target_currency}",
+  "market_price_confidence": "low",
+  "market_price_reasoning": null
+}}
 
 Wine type codes: RE=Red, WH=White, RO=Rose, SP=Sparkling, DE=Dessert, FO=Fortified, OR=Orange.
 Category codes: DR=Dry, SD=Semi-Dry, MS=Medium Sweet, SW=Sweet. Most wines are DR unless stated otherwise.
@@ -69,27 +126,57 @@ For food_pairings: suggest 2-4 food pairings based on your wine knowledge.
 For attributes: list notable wine attributes visible on the label or inferable from the wine style (e.g. organic, biodynamic, old vine, reserve, barrel-aged, single vineyard, natural, unfiltered).
 For drink_by: estimate based on wine type, vintage, grape, and region. Simple whites/roses: 2-3 years. Quality reds: 5-15 years. Fine wines: 10-30 years.
 For size: bottle size in litres (standard=0.75, magnum=1.5, half=0.375).
+{REFERENCE_INSTRUCTIONS.format(currency=target_currency, location=location)}
 
 Return ONLY the JSON object, no markdown, no explanation."""
 
 
-TRIAGE_PROMPT = """Look at this photo and determine what it shows. Respond with a JSON object:
+def build_triage_prompt(target_currency: str = "USD", target_country: str = "") -> str:
+    location = _location_phrase(target_country)
+    return f"""Look at this photo and determine what it shows. Respond with a JSON object:
 
 1. If it shows a BARCODE (black and white bars with numbers), return:
-   {"type": "barcode", "barcode": "the numeric EAN/UPC digits"}
+   {{"type": "barcode", "barcode": "the numeric EAN/UPC digits"}}
 
 2. If it shows a WINE LABEL or wine bottle, return a full analysis:
-   {"type": "label", "name": "Wine name", "producer": "Winery name", "vintage": 2020, "wine_type": "RE/WH/RO/SP/DE/FO/OR", "category": "DR/SD/MS/SW", "country": "Two-letter ISO code", "region": "Wine region", "appellation": "Official appellation", "grape_variety": "Primary grape", "vineyard": "Estate/vineyard name", "abv": 13.5, "size": 0.75, "price": null, "rating": null, "drink_by": "YYYY-MM-DD or null", "food_pairings": ["Food 1", "Food 2"], "attributes": ["Attribute 1"], "description": "Tasting notes. 2-3 sentences."}
+   {{"type": "label", "name": "Wine name", "producer": "Winery name", "vintage": 2020, "wine_type": "RE/WH/RO/SP/DE/FO/OR", "category": "DR/SD/MS/SW", "country": "Two-letter ISO code", "region": "Wine region", "appellation": "Official appellation", "grape_variety": "Primary grape", "vineyard": "Estate/vineyard name", "abv": 13.5, "size": 0.75, "drink_by": "YYYY-MM-DD or null", "food_pairings": ["Food 1", "Food 2"], "attributes": ["Attribute 1"], "description": "Tasting notes. 2-3 sentences.", "critic_score": null, "critic_score_confidence": "low", "critic_score_reasoning": null, "vivino_rating": null, "vivino_rating_confidence": "low", "vivino_rating_reasoning": null, "market_price": null, "market_price_currency": "{target_currency}", "market_price_confidence": "low", "market_price_reasoning": null}}
 
    Wine type codes: RE=Red, WH=White, RO=Rose, SP=Sparkling, DE=Dessert, FO=Fortified, OR=Orange.
    Category: DR=Dry, SD=Semi-Dry, MS=Medium Sweet, SW=Sweet.
    For description: use wine knowledge for tasting notes. For food_pairings: 2-4 suggestions. For attributes: notable traits (organic, old vine, reserve, barrel-aged, etc). For drink_by: estimate peak drinking date. For size: litres (0.75 standard).
+   {REFERENCE_INSTRUCTIONS.format(currency=target_currency, location=location)}
    Use null for fields you can't determine.
 
 3. If it's NEITHER a barcode nor a wine label, return:
-   {"type": "other"}
+   {{"type": "other"}}
 
 Return ONLY the JSON object, no markdown, no explanation."""
+
+
+def build_text_reference_prompt(name: str, producer: str, vintage, target_currency: str, target_country: str = "") -> str:
+    """Prompt for refreshing reference data on a known wine — no image."""
+    vintage_str = f" {vintage}" if vintage else ""
+    producer_str = f" by {producer}" if producer else ""
+    location = _location_phrase(target_country)
+    return f"""You are a sommelier. For the following wine, return a JSON object with reference data:
+
+Wine: {name}{producer_str}{vintage_str}
+
+Return ONLY this JSON, no markdown:
+{{
+  "critic_score": null,
+  "critic_score_confidence": "low",
+  "critic_score_reasoning": null,
+  "vivino_rating": null,
+  "vivino_rating_confidence": "low",
+  "vivino_rating_reasoning": null,
+  "market_price": null,
+  "market_price_currency": "{target_currency}",
+  "market_price_confidence": "low",
+  "market_price_reasoning": null
+}}
+
+{REFERENCE_INSTRUCTIONS.format(currency=target_currency, location=location)}"""
 
 
 class GrokVisionAPI:
@@ -99,7 +186,7 @@ class GrokVisionAPI:
         self.api_key = api_key
         self.base_url = "https://api.x.ai/v1"
 
-    def analyse_label(self, photo_bytes: bytes) -> dict | None:
+    def analyse_label(self, photo_bytes: bytes, target_currency: str = "USD", target_country: str = "") -> dict | None:
         """Send a label photo to Grok vision and extract wine data.
 
         Returns a dict of wine fields, or None on failure.
@@ -107,7 +194,7 @@ class GrokVisionAPI:
         b64_image = base64.b64encode(photo_bytes).decode("utf-8")
 
         payload = {
-            "model": "grok-4-1-fast-non-reasoning",
+            "model": GROK_MODEL,
             "messages": [
                 {
                     "role": "user",
@@ -120,13 +207,13 @@ class GrokVisionAPI:
                         },
                         {
                             "type": "text",
-                            "text": LABEL_PROMPT,
+                            "text": build_label_prompt(target_currency, target_country),
                         },
                     ],
                 }
             ],
             "max_tokens": 1024,
-            "temperature": 0.1,
+            "temperature": 0.0,
         }
 
         try:
@@ -162,7 +249,7 @@ class GrokVisionAPI:
             return None
 
 
-    def triage_photo(self, photo_bytes: bytes) -> dict | None:
+    def triage_photo(self, photo_bytes: bytes, target_currency: str = "USD", target_country: str = "") -> dict | None:
         """Classify a photo and extract data in one call.
 
         Returns a dict with "type" key:
@@ -174,7 +261,7 @@ class GrokVisionAPI:
         b64_image = base64.b64encode(photo_bytes).decode("utf-8")
 
         payload = {
-            "model": "grok-4-1-fast-non-reasoning",
+            "model": GROK_MODEL,
             "messages": [
                 {
                     "role": "user",
@@ -187,13 +274,13 @@ class GrokVisionAPI:
                         },
                         {
                             "type": "text",
-                            "text": TRIAGE_PROMPT,
+                            "text": build_triage_prompt(target_currency, target_country),
                         },
                     ],
                 }
             ],
             "max_tokens": 1024,
-            "temperature": 0.1,
+            "temperature": 0.0,
         }
 
         try:
@@ -238,8 +325,84 @@ class GrokVisionAPI:
             return None
 
 
+    def fetch_references(
+        self,
+        name: str,
+        producer: str = "",
+        vintage=None,
+        target_currency: str = "USD",
+        target_country: str = "",
+    ) -> dict | None:
+        """Text-only call: fetch critic_score, vivino_rating, market_price for a known wine.
+
+        Returns dict with keys critic_score, vivino_rating, market_price,
+        market_price_currency, reference_confidence; or None on failure.
+        """
+        prompt = build_text_reference_prompt(name, producer, vintage, target_currency, target_country)
+        payload = {
+            "model": GROK_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 512,
+            "temperature": 0.0,
+        }
+
+        try:
+            resp = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"].strip()
+            if content.startswith("```"):
+                content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            data = json.loads(content)
+            logger.info(f"Grok references for {name}: confidence={data.get('reference_confidence')}")
+            return data
+        except requests.RequestException as e:
+            logger.error(f"Grok references request failed: {e}")
+            return None
+        except (json.JSONDecodeError, KeyError, IndexError) as e:
+            logger.error(f"Failed to parse Grok references response: {e}")
+            return None
+
+
 VALID_WINE_TYPES = {"RE", "WH", "RO", "SP", "DE", "FO", "OR"}
 VALID_CATEGORIES = {"DR", "SD", "MS", "SW"}
+
+GENERIC_REASONING_MARKERS = (
+    "based on the grape", "based on grape",
+    "typical for this style", "typical for the style",
+    "general wine knowledge", "general knowledge",
+    "estimated from general",
+    "typically score", "usually scores",
+    "i don't have specific", "no specific knowledge",
+    "without specific",
+)
+
+
+def _is_valid_reasoning(text) -> bool:
+    """True iff reasoning is non-empty, long enough, and not generic boilerplate."""
+    if not isinstance(text, str):
+        return False
+    t = text.strip()
+    if len(t) < 15:
+        return False
+    lowered = t.lower()
+    return not any(marker in lowered for marker in GENERIC_REASONING_MARKERS)
+
+
+def _validate_ref(value, confidence, reasoning) -> bool:
+    """Per-field guard: persist only when value is set, confidence >= medium, reasoning passes."""
+    if value is None:
+        return False
+    if (confidence or "").lower() not in ("medium", "high"):
+        return False
+    return _is_valid_reasoning(reasoning)
 
 
 def merge_wine_data(off_data: dict | None, grok_data: dict | None) -> dict:
@@ -285,20 +448,54 @@ def merge_wine_data(off_data: dict | None, grok_data: dict | None) -> dict:
         except (ValueError, TypeError):
             pass
 
-    # Price and rating: only if Grok found them on the label (rare)
-    price = pick("price", grok)
-    if price:
+    # Per-field reference data: each field is validated and persisted independently.
+    # critic_score / vivino_rating / market_price each have their own _confidence
+    # and _reasoning. Aggregate confidence = highest of any persisted field.
+    rank = {"high": 3, "medium": 2, "low": 1}
+    persisted_confidences = []
+
+    if _validate_ref(
+        grok.get("critic_score"),
+        grok.get("critic_score_confidence"),
+        grok.get("critic_score_reasoning"),
+    ):
         try:
-            merged["price"] = float(price)
+            score = int(grok["critic_score"])
+            if 0 <= score <= 100:
+                merged["critic_score"] = score
+                persisted_confidences.append(grok.get("critic_score_confidence", "").lower())
         except (ValueError, TypeError):
             pass
 
-    rating = pick("rating", grok)
-    if rating:
+    if _validate_ref(
+        grok.get("vivino_rating"),
+        grok.get("vivino_rating_confidence"),
+        grok.get("vivino_rating_reasoning"),
+    ):
         try:
-            merged["rating"] = int(rating)
+            rating = float(grok["vivino_rating"])
+            if 0.0 <= rating <= 5.0:
+                merged["vivino_rating"] = round(rating, 1)
+                persisted_confidences.append(grok.get("vivino_rating_confidence", "").lower())
         except (ValueError, TypeError):
             pass
+
+    if _validate_ref(
+        grok.get("market_price"),
+        grok.get("market_price_confidence"),
+        grok.get("market_price_reasoning"),
+    ):
+        try:
+            merged["market_price"] = float(grok["market_price"])
+            currency_field = grok.get("market_price_currency")
+            if isinstance(currency_field, str):
+                merged["market_price_currency"] = currency_field.upper()[:3]
+            persisted_confidences.append(grok.get("market_price_confidence", "").lower())
+        except (ValueError, TypeError):
+            pass
+
+    if persisted_confidences:
+        merged["reference_confidence"] = max(persisted_confidences, key=lambda c: rank.get(c, 0))
 
     # Size in litres
     size = pick("size", grok)

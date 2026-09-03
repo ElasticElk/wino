@@ -1,8 +1,9 @@
 from django.contrib.auth.decorators import login_not_required
+from django.db.models import Count, Q
 from django.http import FileResponse
 from django.utils.decorators import method_decorator
 from rest_framework import status
-from rest_framework.authentication import TokenAuthentication
+from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -21,6 +22,27 @@ from .serializers import (
     WineCreateSerializer,
     WineSerializer,
 )
+
+
+def wine_queryset(household):
+    """Wines for a household, shaped so WineSerializer costs a constant number
+    of queries instead of one per wine per relation.
+
+    WineSerializer touches total_stock, grapes, region, appellation, size,
+    food_pairings, attributes and vineyard. Unprefetched that measured 383
+    queries for 49 wines; the bot pays it on every detail card and every label
+    photo, so it dominates perceived latency.
+    """
+    return (
+        Wine.objects.filter(household=household)
+        .select_related("region", "appellation", "size")
+        .prefetch_related("grapes", "food_pairings", "attributes", "vineyard")
+        .annotate(
+            stock_count_annotated=Count(
+                "storageitem", filter=Q(storageitem__deleted=False), distinct=True,
+            ),
+        )
+    )
 
 
 @method_decorator(login_not_required, name="dispatch")
@@ -72,7 +94,7 @@ class ScannerAPIView(APIView):
 class WineByBarcodeView(ScannerAPIView):
     def get(self, request, ean):
         household = self.get_household(request)
-        wines = Wine.objects.filter(barcode=ean, household=household)
+        wines = wine_queryset(household).filter(barcode=ean)
         serializer = WineSerializer(wines, many=True)
         return Response({"count": wines.count(), "wines": serializer.data})
 
@@ -433,6 +455,131 @@ class WineUpdateView(ScannerAPIView):
         )
 
 
+class WineRefreshReferencesView(ScannerAPIView):
+    """Refresh critic_score, vivino_rating, market_price by re-asking Grok.
+
+    Text-only call (no photo). Currency comes from the requesting user's settings.
+    Only writes fields when Grok returns reference_confidence >= "medium".
+    """
+
+    # Allow web (session) and API (token) callers — the refresh button on the
+    # wine detail page calls this directly from the user's session.
+    authentication_classes = [SessionAuthentication, TokenAuthentication]
+
+    def post(self, request, pk):
+        from django.utils import timezone
+
+        from wine_cellar.apps.wine.grok_references import fetch_references, validate_reference_field
+
+        household = self.get_household(request)
+        try:
+            wine = Wine.objects.get(id=pk, household=household)
+        except Wine.DoesNotExist:
+            return Response({"error": "Wine not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        currency = "USD"
+        country = ""
+        if hasattr(request.user, "user_settings"):
+            currency = request.user.user_settings.currency or "USD"
+            country = request.user.user_settings.country or ""
+
+        # Producer hint extracted from comment ("Producer: X | ...") or first vineyard
+        producer = ""
+        if wine.comment and wine.comment.startswith("Producer: "):
+            producer = wine.comment.split(" | ", 1)[0][len("Producer: "):]
+        elif wine.vineyard.exists():
+            producer = wine.vineyard.first().name
+
+        data = fetch_references(
+            name=wine.name,
+            producer=producer,
+            vintage=wine.vintage,
+            target_currency=currency,
+            target_country=country,
+            country=wine.country or "",
+            region=wine.region.name if wine.region else "",
+            appellation=wine.appellation.name if wine.appellation else "",
+            grape=", ".join(g.name for g in wine.grapes.all()),
+            vineyard=", ".join(v.name for v in wine.vineyard.all()),
+        )
+        if data is None:
+            return Response(
+                {"error": "Grok request failed"}, status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        # Per-field preservation: each field keeps its prior value unless THIS
+        # refresh produces a valid replacement for that specific field. A bad
+        # search day for one field doesn't destroy good prior data.
+        rank = {"high": 3, "medium": 2, "low": 1}
+        persisted_confidences = []
+        details = {"critic_score": None, "vivino_rating": None, "market_price": None}
+
+        critic = data.get("critic_score")
+        if validate_reference_field(critic, data.get("critic_score_confidence"), data.get("critic_score_reasoning")):
+            if isinstance(critic, (int, float)) and 0 <= critic <= 100:
+                wine.critic_score = int(critic)
+                conf = data.get("critic_score_confidence", "").lower()
+                persisted_confidences.append(conf)
+                details["critic_score"] = {"value": int(critic), "confidence": conf}
+
+        vivino = data.get("vivino_rating")
+        if validate_reference_field(vivino, data.get("vivino_rating_confidence"), data.get("vivino_rating_reasoning")):
+            if isinstance(vivino, (int, float)) and 0 <= vivino <= 5:
+                wine.vivino_rating = round(float(vivino), 1)
+                conf = data.get("vivino_rating_confidence", "").lower()
+                persisted_confidences.append(conf)
+                details["vivino_rating"] = {"value": round(float(vivino), 1), "confidence": conf}
+
+        price = data.get("market_price")
+        if validate_reference_field(price, data.get("market_price_confidence"), data.get("market_price_reasoning")):
+            if isinstance(price, (int, float)) and price >= 0:
+                wine.market_price = price
+                currency_returned = data.get("market_price_currency") or currency
+                if isinstance(currency_returned, str):
+                    wine.market_price_currency = currency_returned.upper()[:3]
+                conf = data.get("market_price_confidence", "").lower()
+                persisted_confidences.append(conf)
+                details["market_price"] = {
+                    "value": float(price), "currency": wine.market_price_currency,
+                    "confidence": conf,
+                }
+
+        if not persisted_confidences:
+            # Nothing landed this run — wine fields are untouched (per-field
+            # preservation), so just report that no update happened.
+            kept_any = any(getattr(wine, f) is not None for f in (
+                "critic_score", "vivino_rating", "market_price",
+            ))
+            return Response({
+                "updated": False,
+                "confidence": "low",
+                "message": "Grok's live search did not find usable references for this wine. Existing values (if any) were kept.",
+                "details": details,
+                "kept_prior": kept_any,
+            })
+
+        # Aggregate confidence: highest of THIS run's new fields and any prior
+        # confidence that still applies to kept fields. Avoids regressing the
+        # aggregate when a high-confidence prior field is still in place.
+        candidates = list(persisted_confidences)
+        if wine.reference_confidence:
+            candidates.append(wine.reference_confidence.lower())
+        wine.reference_confidence = max(candidates, key=lambda c: rank.get(c, 0))
+        wine.reference_updated = timezone.now()
+        wine.save()
+
+        return Response({
+            "updated": True,
+            "confidence": wine.reference_confidence,
+            "critic_score": wine.critic_score,
+            "vivino_rating": float(wine.vivino_rating) if wine.vivino_rating is not None else None,
+            "category_rating": wine.category_rating,
+            "market_price": float(wine.market_price) if wine.market_price is not None else None,
+            "market_price_currency": wine.market_price_currency,
+            "details": details,
+        })
+
+
 class WineSearchView(ScannerAPIView):
     """Search all wines by name (case-insensitive substring match)."""
 
@@ -442,9 +589,7 @@ class WineSearchView(ScannerAPIView):
         if not q:
             return Response({"count": 0, "wines": []})
 
-        wines = Wine.objects.filter(
-            household=household, name__icontains=q
-        ).order_by("name")[:20]
+        wines = wine_queryset(household).filter(name__icontains=q).order_by("name")[:20]
 
         serializer = WineSerializer(wines, many=True)
         return Response({"count": len(serializer.data), "wines": serializer.data})
@@ -455,7 +600,7 @@ class WineListAllView(ScannerAPIView):
 
     def get(self, request):
         household = self.get_household(request)
-        wines = Wine.objects.filter(household=household).order_by("name")
+        wines = wine_queryset(household).order_by("name")
         serializer = WineSerializer(wines, many=True)
         return Response({"count": len(serializer.data), "wines": serializer.data})
 

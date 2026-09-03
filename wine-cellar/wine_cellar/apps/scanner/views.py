@@ -53,6 +53,13 @@ class ScannerConfigView(APIView):
                     .values_list("household_id", "household__name", "is_default")
                 )
 
+                # User's currency + country (used by Grok for price estimates)
+                currency = "USD"
+                country = ""
+                if hasattr(tu.user, "user_settings"):
+                    currency = tu.user.user_settings.currency or "USD"
+                    country = tu.user.user_settings.country or ""
+
                 telegram_users.append(
                     {
                         "chat_id": tu.chat_id,
@@ -60,8 +67,13 @@ class ScannerConfigView(APIView):
                         "api_token": token.key,
                         "user_id": tu.user.id,
                         "username": tu.user.username,
+                        # Operational notices (service up/down) go to staff only,
+                        # not broadcast to every household member.
+                        "is_staff": tu.user.is_staff,
                         "household_id": household_id,
                         "household_name": household_name,
+                        "currency": currency,
+                        "country": country,
                         "households": [
                             {"id": h[0], "name": h[1], "is_default": h[2]}
                             for h in all_households
@@ -74,6 +86,11 @@ class ScannerConfigView(APIView):
         for sc in Scanner.objects.filter(is_active=True).select_related("user", "household"):
             token = Token.objects.filter(user=sc.user).first()
             if token:
+                sc_currency = "USD"
+                sc_country = ""
+                if hasattr(sc.user, "user_settings"):
+                    sc_currency = sc.user.user_settings.currency or "USD"
+                    sc_country = sc.user.user_settings.country or ""
                 scanners.append(
                     {
                         "name": sc.name,
@@ -83,6 +100,8 @@ class ScannerConfigView(APIView):
                         "household_id": sc.household.id if sc.household else None,
                         "household_name": sc.household.name if sc.household else None,
                         "default_storage": sc.default_storage,
+                        "currency": sc_currency,
+                        "country": sc_country,
                         "notify_chat_ids": list(
                             sc.notify_users.values_list("chat_id", flat=True)
                         ),

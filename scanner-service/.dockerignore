@@ -9,3 +9,7 @@ docker-compose.yml
 config.yaml
 config.yaml.sample
 *.md
+.pytest_cache/
+tests/
+requirements-dev.txt
+pytest.ini

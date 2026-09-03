@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from django.conf import settings
@@ -8,6 +9,22 @@ from PIL import ExifTags, Image
 
 if TYPE_CHECKING:
     from wine_cellar.apps.wine.models import Wine
+
+
+def convert_price(amount, from_code: str, to_code: str) -> Decimal | None:
+    """Convert `amount` from `from_code` to `to_code` using static settings rates.
+
+    Returns None if either currency is unknown or `amount` is None.
+    """
+    if amount is None or from_code is None or to_code is None:
+        return None
+    rates = settings.CURRENCY_RATES_TO_USD
+    if from_code not in rates or to_code not in rates:
+        return None
+    if from_code == to_code:
+        return Decimal(amount).quantize(Decimal("0.01"))
+    usd = Decimal(amount) * Decimal(str(rates[from_code]))
+    return (usd / Decimal(str(rates[to_code]))).quantize(Decimal("0.01"))
 
 
 def user_directory_path(instance, filename):

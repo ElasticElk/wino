@@ -14,7 +14,7 @@ from wine_cellar.apps.wine.models import (
 
 
 class WineSerializer(serializers.ModelSerializer):
-    stock_count = serializers.IntegerField(source="total_stock", read_only=True)
+    stock_count = serializers.SerializerMethodField()
     grape_variety = serializers.CharField(source="get_grapes", read_only=True)
     region_name = serializers.CharField(source="region.name", read_only=True, default="")
     appellation_name = serializers.CharField(
@@ -48,8 +48,24 @@ class WineSerializer(serializers.ModelSerializer):
             "size_ml",
             "drink_by",
             "stock_count",
+            "critic_score",
+            "vivino_rating",
+            "category_rating",
+            "market_price",
+            "market_price_currency",
+            "reference_confidence",
+            "reference_updated",
         ]
         read_only_fields = ["id"]
+
+    def get_stock_count(self, obj):
+        """Prefer the annotation from wine_queryset(); fall back to the property.
+
+        Wine.total_stock issues its own COUNT per wine, which is the single
+        biggest contributor to the N+1 on list endpoints.
+        """
+        annotated = getattr(obj, "stock_count_annotated", None)
+        return obj.total_stock if annotated is None else annotated
 
     def get_food_pairings(self, obj):
         return [fp.name for fp in obj.food_pairings.all()]
@@ -94,6 +110,30 @@ class WineCreateSerializer(serializers.Serializer):
         child=serializers.CharField(max_length=100),
         required=False, default=list,
     )
+    # Grok reference fields — each has its own confidence + reasoning so they
+    # can be persisted independently (e.g. price known but no critic score).
+    critic_score = serializers.IntegerField(
+        required=False, allow_null=True, min_value=0, max_value=100,
+    )
+    critic_score_confidence = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    critic_score_reasoning = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    vivino_rating = serializers.DecimalField(
+        max_digits=3, decimal_places=1, required=False, allow_null=True,
+        min_value=0, max_value=5,
+    )
+    vivino_rating_confidence = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    vivino_rating_reasoning = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    market_price = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False, allow_null=True,
+    )
+    market_price_currency = serializers.CharField(
+        max_length=3, required=False, allow_null=True, allow_blank=True,
+    )
+    market_price_confidence = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    market_price_reasoning = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    # Aggregate confidence (set by the scanner merger) — kept for compatibility
+    # but per-field _confidence values are what gate persistence in create().
+    reference_confidence = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
     def create(self, validated_data):
         user = self.context["request"].user
@@ -126,6 +166,57 @@ class WineCreateSerializer(serializers.Serializer):
                 name=size_litres, user=user
             )
 
+        # Per-field reference persistence — each of critic/vivino/market_price has
+        # its own confidence + reasoning and is validated/persisted independently.
+        from wine_cellar.apps.wine.grok_references import validate_reference_field
+
+        ref_pulls = {}
+        for f in (
+            "critic_score", "critic_score_confidence", "critic_score_reasoning",
+            "vivino_rating", "vivino_rating_confidence", "vivino_rating_reasoning",
+            "market_price", "market_price_currency",
+            "market_price_confidence", "market_price_reasoning",
+            "reference_confidence",
+        ):
+            ref_pulls[f] = validated_data.pop(f, None)
+
+        rank = {"high": 3, "medium": 2, "low": 1}
+        persisted_confidences = []
+        reference_kwargs = {}
+
+        if validate_reference_field(
+            ref_pulls["critic_score"],
+            ref_pulls["critic_score_confidence"],
+            ref_pulls["critic_score_reasoning"],
+        ):
+            reference_kwargs["critic_score"] = ref_pulls["critic_score"]
+            persisted_confidences.append((ref_pulls["critic_score_confidence"] or "").lower())
+
+        if validate_reference_field(
+            ref_pulls["vivino_rating"],
+            ref_pulls["vivino_rating_confidence"],
+            ref_pulls["vivino_rating_reasoning"],
+        ):
+            reference_kwargs["vivino_rating"] = ref_pulls["vivino_rating"]
+            persisted_confidences.append((ref_pulls["vivino_rating_confidence"] or "").lower())
+
+        if validate_reference_field(
+            ref_pulls["market_price"],
+            ref_pulls["market_price_confidence"],
+            ref_pulls["market_price_reasoning"],
+        ):
+            reference_kwargs["market_price"] = ref_pulls["market_price"]
+            if ref_pulls["market_price_currency"]:
+                reference_kwargs["market_price_currency"] = ref_pulls["market_price_currency"]
+            persisted_confidences.append((ref_pulls["market_price_confidence"] or "").lower())
+
+        if reference_kwargs:
+            from django.utils import timezone
+            reference_kwargs["reference_confidence"] = max(
+                persisted_confidences, key=lambda c: rank.get(c, 0),
+            )
+            reference_kwargs["reference_updated"] = timezone.now()
+
         wine = Wine.objects.create(
             user=user,
             household=household,
@@ -141,6 +232,7 @@ class WineCreateSerializer(serializers.Serializer):
             comment=comment,
             size=size_obj,
             drink_by=drink_by,
+            **reference_kwargs,
         )
 
         if grape_name:

@@ -42,6 +42,11 @@ urlpatterns = [
         name="api-wine-update",
     ),
     path(
+        "wines/<int:pk>/refresh-references/",
+        views.WineRefreshReferencesView.as_view(),
+        name="api-wine-refresh-references",
+    ),
+    path(
         "images/<int:pk>/file/",
         views.WineImageFileView.as_view(),
         name="api-image-file",

@@ -262,6 +262,16 @@ class WineDetailView(DetailView):
         qs = super().get_queryset()
         return qs.filter(user=self.request.user)
 
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        currency = "USD"
+        if hasattr(self.request.user, "user_settings"):
+            currency = self.request.user.user_settings.currency or "USD"
+        wine = ctx["wine"]
+        ctx["viewer_currency"] = currency
+        ctx["market_price_display"] = wine.market_price_display(currency)
+        return ctx
+
 
 class WineListView(FilterView):
     model = Wine

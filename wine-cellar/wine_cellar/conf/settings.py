@@ -162,12 +162,33 @@ LANGUAGES = [
 # LOCALE_PATHS = [BASE_DIR / "locale"]
 
 CURRENCIES = [
+    ("USD", _("US Dollar")),
     ("EUR", _("Euro")),
-    ("USD", _("Dollar")),
     ("GBP", _("Pound Sterling")),
+    ("ZAR", _("South African Rand")),
+    ("AUD", _("Australian Dollar")),
+    ("HKD", _("Hong Kong Dollar")),
 ]
 
-CURRENCY_SYMBOLS = {"EUR": "€", "USD": "$", "GBP": "£"}
+CURRENCY_SYMBOLS = {
+    "USD": "$",
+    "EUR": "€",
+    "GBP": "£",
+    "ZAR": "R",
+    "AUD": "A$",
+    "HKD": "HK$",
+}
+
+# Static reference rates: 1 unit of <code> = N USD.
+# Manually maintained — no live FX feed. Update occasionally if rates drift materially.
+CURRENCY_RATES_TO_USD = {
+    "USD": 1.000,
+    "EUR": 1.080,
+    "GBP": 1.270,
+    "ZAR": 0.054,
+    "AUD": 0.660,
+    "HKD": 0.128,
+}
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.0/howto/static-files/

@@ -7,8 +7,12 @@ services:
       sh -c "npm run watch & exec python manage.py runserver 0.0.0.0:8000"
     volumes:
       - .:/usr/src/app
+      # The bind mount above masks whatever the image built at these paths.
+      # Without this, node_modules disappears, `npm run watch` dies instantly,
+      # and every page using a bundled asset 500s (e.g. /wine/add/).
+      - /usr/src/app/node_modules
     ports:
-      - 127.0.0.1:8000:8000
+      - 0.0.0.0:8000:8000
     env_file:
       - ./.env.dev
     environment:
@@ -16,6 +20,7 @@ services:
     depends_on:
       - db
       - redis
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health/"]
       interval: 10s
@@ -27,13 +32,15 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data/
     ports:
-      - 127.0.0.1:5433:5432
+      - 0.0.0.0:5434:5432
     environment:
       - POSTGRES_USER=wino
       - POSTGRES_PASSWORD=wino_dev
       - POSTGRES_DB=wino_dev
+    restart: unless-stopped
   redis:
     image: redis:alpine
+    restart: unless-stopped
   celery:
     build: .
     command: celery -A wine_cellar.conf worker -l info
@@ -44,6 +51,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+    restart: unless-stopped
   celery-beat:
     build: .
     command: celery -A wine_cellar.conf beat -l info
@@ -54,6 +62,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+    restart: unless-stopped
 
 volumes:
   postgres_data:

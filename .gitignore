@@ -33,7 +33,13 @@ scanner-service/*.log
 wine-cellar/mediafiles/
 
 # Secrets files
-*.txt
+# NB: was a bare `*.txt`, which silently swallowed every new requirements
+# file. The tracked ones only survived because they predate the rule.
+*secret*.txt
+*secrets*.txt
+*token*.txt
+*password*.txt
+*credentials*.txt
 
 # Claude Code
 .claude/
