@@ -293,6 +293,7 @@ async def lifespan(app: FastAPI):
                 _make_photo_handler(grok, off, pending_store)
             )
             bot_handler.set_triage_callback(grok.triage_photo)
+            bot_handler.set_winelist_callback(grok.analyse_wine_list)
         bot_handler.run_in_thread()
         logger.info(f"Telegram bot: ACTIVE ({len(all_chat_ids)} user(s))")
 

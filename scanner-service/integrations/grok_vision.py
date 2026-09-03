@@ -147,10 +147,67 @@ def build_triage_prompt(target_currency: str = "USD", target_country: str = "") 
    {REFERENCE_INSTRUCTIONS.format(currency=target_currency, location=location)}
    Use null for fields you can't determine.
 
-3. If it's NEITHER a barcode nor a wine label, return:
+3. If it shows a WINE LIST — a restaurant list, a shelf display, a printed
+   menu, several bottles photographed together — return:
+   {{"type": "winelist"}}
+   Do not try to read the wines here; a separate call handles that.
+
+4. If it's NONE of these, return:
    {{"type": "other"}}
 
 Return ONLY the JSON object, no markdown, no explanation."""
+
+
+def build_winelist_prompt(cellar_summary: str, target_currency: str = "USD",
+                          target_country: str = "") -> str:
+    """Read a wine list and recommend from it, in one call.
+
+    Deliberately no per-wine web search: twenty wines with a live lookup each
+    would take minutes, and this gets used while standing in a shop or holding
+    a menu. Model knowledge gives serviceable one-liners and ballpark prices
+    instantly; the accurate lookup stays reserved for wines actually added.
+    """
+    location = _location_phrase(target_country)
+    cellar = cellar_summary or "(their cellar is empty — no preferences to go on yet)"
+    return f"""You are a sommelier reading a wine list for a friend.
+
+Read every wine you can make out in this photo. For each, give a ONE LINE
+tasting note (aromas and style, no more than about 12 words) and your best
+estimate of what it costs.
+
+Here is what they already drink at home:
+{cellar}
+
+Recommend ONE wine from the list they would most enjoy, and say why in one
+sentence that refers to their taste. Then name up to three others worth a look.
+Flag any wine on the list they already own — they can drink that at home.
+
+Prices in {target_currency}, for a typical venue{location}. Give both the price
+you would expect to see charged on this list, and the typical retail price, when
+you can tell them apart. Use null when you genuinely cannot estimate.
+
+Return ONLY this JSON, no markdown:
+{{
+  "type": "winelist",
+  "wines": [
+    {{
+      "name": "Wine name as printed",
+      "producer": "Producer if shown",
+      "vintage": 2022,
+      "wine_type": "RE/WH/RO/SP/DE/FO/OR",
+      "note": "One line, twelve words or fewer",
+      "list_price": 38,
+      "retail_price": 16,
+      "already_owned": false
+    }}
+  ],
+  "recommendation": {{"name": "Exact name from the list", "why": "One sentence referring to their taste"}},
+  "alternates": ["Exact name", "Exact name"],
+  "currency": "{target_currency}"
+}}
+
+If the photo is too blurred or cropped to read any wine, return
+{{"type": "winelist", "wines": [], "recommendation": null, "alternates": []}}."""
 
 
 def build_text_reference_prompt(name: str, producer: str, vintage, target_currency: str, target_country: str = "") -> str:
@@ -324,6 +381,52 @@ class GrokVisionAPI:
             logger.error(f"Failed to parse Grok triage response: {e}")
             return None
 
+
+    def analyse_wine_list(self, photo_bytes: bytes, cellar_summary: str = "",
+                          target_currency: str = "USD",
+                          target_country: str = "") -> dict | None:
+        """Read a wine list photo and recommend from it against their cellar."""
+        b64_image = base64.b64encode(photo_bytes).decode("utf-8")
+        payload = {
+            "model": GROK_MODEL,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url",
+                     "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}},
+                    {"type": "text",
+                     "text": build_winelist_prompt(
+                         cellar_summary, target_currency, target_country,
+                     )},
+                ],
+            }],
+            # A long list needs room; a bottle label does not.
+            "max_tokens": 4096,
+            "temperature": 0.0,
+        }
+        try:
+            resp = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=90,  # reading 20 wines takes longer than one label
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"].strip()
+            if content.startswith("```"):
+                content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            data = json.loads(content)
+            logger.info(f"Grok read {len(data.get('wines') or [])} wines from a list")
+            return data
+        except requests.RequestException as e:
+            logger.error(f"Grok wine-list request failed: {e}")
+            return None
+        except (json.JSONDecodeError, KeyError, IndexError) as e:
+            logger.error(f"Failed to parse Grok wine-list response: {e}")
+            return None
 
     def fetch_references(
         self,

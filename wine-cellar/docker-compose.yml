@@ -11,6 +11,8 @@ services:
       # Without this, node_modules disappears, `npm run watch` dies instantly,
       # and every page using a bundled asset 500s (e.g. /wine/add/).
       - /usr/src/app/node_modules
+    # Stays on 0.0.0.0: the bot's links point at the Tailscale address
+    # (web_url in scanner config.yaml), and Tailscale is not 127.0.0.1.
     ports:
       - 0.0.0.0:8000:8000
     env_file:
@@ -31,8 +33,11 @@ services:
     image: postgres:16
     volumes:
       - postgres_data:/var/lib/postgresql/data/
-    ports:
-      - 0.0.0.0:5434:5432
+    # Not published. Nothing outside the compose network talks to Postgres —
+    # the scanner reaches the app over the shared docker network, not the DB.
+    # Re-add `ports: ["127.0.0.1:5434:5432"]` if you want a local DB client.
+    expose:
+      - 5432
     environment:
       - POSTGRES_USER=wino
       - POSTGRES_PASSWORD=wino_dev

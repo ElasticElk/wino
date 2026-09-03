@@ -171,6 +171,15 @@ Available to authorized users via the bot:
 - `/adduser <chat_id> <name> [household]` — Add user to household
 - `/removeuser <chat_id> [household]` — Remove user from household
 
+### Photo modes
+
+Triage (`GrokVisionAPI.triage_photo`) classifies every photo as `barcode`, `label`, `winelist` or `other`, so there is no command to discover — sending a photo is the whole interface.
+
+- **barcode / label** → the add-to-cellar flow. A label with no match offers *Add to cellar* or *Just looking*, so a shop lookup costs nothing.
+- **winelist** → `analyse_wine_list()` reads the whole list in one vision call and recommends from it, with the user's cellar profile (`build_cellar_summary`) in the prompt. Deliberately **no per-wine web search** — 20 live lookups would take minutes, and this gets used standing in a shop. Accurate pricing stays reserved for wines actually added.
+- Wines already owned are matched **locally** (`mark_owned_wines`), not by the model: only a slice of the cellar fits in a prompt, and grape words are excluded from matching so two unrelated Chenins don't collide.
+- Read lists are cached per message for `WINELIST_TTL` (30 min) to back the *Show all* / pagination buttons.
+
 Users can also send **photos** to the bot — it will attempt barcode detection (pyzbar) or wine label analysis (Grok Vision).
 
 ### Onboarding (unprovisioned users)

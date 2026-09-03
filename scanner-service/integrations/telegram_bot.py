@@ -43,6 +43,7 @@ BROWSE_DIMENSIONS = {
 
 BROWSE_PAGE_SIZE = 8
 BROWSE_SESSION_TTL = 600  # 10 minutes
+WINELIST_TTL = 1800  # 30 minutes — you may sit with a menu a while
 
 # Telegram limits callback_data to 64 bytes. We use short keys to stay under.
 # Format: "a:action,w:wine_id,b:barcode,o:original_action"
@@ -312,6 +313,218 @@ def empty_cellar(context_line: str = "") -> tuple[str, InlineKeyboardMarkup]:
         InlineKeyboardButton("\u2139\uFE0F How it works", callback_data=_cb("howto")),
     ]])
     return text, keyboard
+
+
+def build_cellar_summary(wines: list[dict], limit: int = 40) -> str:
+    """A compact description of someone's taste, for the wine-list prompt.
+
+    Counts rather than a wine list: what they actually buy says more about what
+    they'd enjoy than any single bottle, and it keeps the prompt short.
+    """
+    if not wines:
+        return ""
+
+    def tally(field):
+        counts = {}
+        for w in wines:
+            value = (w.get(field) or "").strip()
+            if value:
+                counts[value] = counts.get(value, 0) + 1
+        return sorted(counts.items(), key=lambda kv: -kv[1])
+
+    lines = []
+
+    types = tally("wine_type")
+    if types:
+        named = [f"{WINE_TYPES.get(code, code)} ({n})" for code, n in types[:5]]
+        lines.append(f"Styles: {', '.join(named)}")
+
+    for field, label in (("grape", "Grapes"), ("country", "Countries"),
+                         ("producer", "Producers")):
+        counts = tally(field)
+        if counts:
+            named = [f"{value} ({n})" if n > 1 else value for value, n in counts[:6]]
+            lines.append(f"{label}: {', '.join(named)}")
+
+    # Naming actual bottles lets the model spot a wine they already own.
+    names = [w.get("name", "") for w in wines[:limit] if w.get("name")]
+    if names:
+        lines.append(f"Bottles at home: {'; '.join(names)}")
+
+    return "\n".join(lines)
+
+
+def _wine_label(w: dict) -> str:
+    """Name plus vintage, without doubling it up.
+
+    Wine-list entries are usually printed "Producer Cuvee 2022", so appending
+    the parsed vintage again gives "... 2022 2022".
+    """
+    name = (w.get("name") or "").strip()
+    vintage = w.get("vintage")
+    if vintage and str(vintage) not in name:
+        return f"{name} {vintage}"
+    return name
+
+
+# Grape and style words describe a wine rather than identify it. Left in, any
+# two South African Chenins matched each other, because "chenin" + "blanc" is
+# two shared words on its own.
+_DESCRIPTIVE_WORDS = {
+    "chenin", "blanc", "blancs", "noir", "noirs", "gris", "grigio",
+    "cabernet", "sauvignon", "merlot", "shiraz", "syrah", "pinot",
+    "chardonnay", "riesling", "malbec", "tempranillo", "sangiovese",
+    "nebbiolo", "zinfandel", "viognier", "semillon", "mourvedre",
+    "grenache", "carignan", "cinsault", "pinotage", "verdelho", "muscat",
+    "rose", "rosé", "brut", "blend", "cuvee", "cuvée", "red", "white",
+    "sparkling", "dry", "sweet", "organic", "old", "vine", "vines",
+}
+
+
+def _norm_words(text: str) -> set:
+    """Significant lowercase words, for loose title matching."""
+    skip = {"the", "de", "du", "le", "la", "les", "di", "del", "das", "der",
+            "wine", "wines", "estate", "reserve", "reserva", "vineyards",
+            "cellar", "cellars", "domaine", "chateau", "vintage", "nv"}
+    skip |= _DESCRIPTIVE_WORDS
+    return {
+        w for w in "".join(c if c.isalnum() else " " for c in text.lower()).split()
+        if w not in skip and len(w) > 2 and not w.isdigit()
+    }
+
+
+def mark_owned_wines(data: dict, cellar: list[dict]) -> int:
+    """Flag list entries already in the cellar, locally rather than via the model.
+
+    Asking the model to spot these meant relying on whichever slice of the
+    cellar fitted in the prompt — and it missed a bottle that was plainly
+    there. Matching here is deterministic and sees everything.
+    """
+    if not cellar:
+        return 0
+
+    owned = []
+    for w in cellar:
+        words = _norm_words(f"{w.get('name', '')} {w.get('producer', '')}")
+        if words:
+            owned.append(words)
+
+    hits = 0
+    for entry in data.get("wines") or []:
+        entry_words = _norm_words(f"{entry.get('name', '')} {entry.get('producer', '')}")
+        if not entry_words:
+            continue
+        # Two shared significant words is a confident match ("ken forrester",
+        # "alheit cartology") without firing on a lone shared grape name.
+        if any(len(entry_words & mine) >= 2 for mine in owned):
+            entry["already_owned"] = True
+            hits += 1
+        else:
+            entry.setdefault("already_owned", False)
+    return hits
+
+
+def _price_str(list_price, retail_price, currency: str) -> str:
+    """Render whichever prices we got, or nothing at all."""
+    parts = []
+    if isinstance(list_price, (int, float)):
+        parts.append(f"~{currency}{list_price:,.0f} on the list")
+    if isinstance(retail_price, (int, float)):
+        parts.append(f"~{currency}{retail_price:,.0f} retail")
+    return " · ".join(parts)
+
+
+CURRENCY_GLYPH = {"GBP": "\u00a3", "USD": "$", "EUR": "\u20ac", "ZAR": "R",
+                  "AUD": "A$", "HKD": "HK$"}
+
+
+def build_winelist_view(data: dict, page: int = 0, per_page: int = 6,
+                        show_all: bool = False) -> tuple[str, InlineKeyboardMarkup]:
+    """Render a read wine list: the pick first, then the wines.
+
+    Leads with a single recommendation because "what should I drink" is the
+    actual question, and because a full list with notes overruns Telegram's
+    4096-character limit long before it becomes useful.
+    """
+    wines = data.get("wines") or []
+    currency = CURRENCY_GLYPH.get(data.get("currency", ""), data.get("currency", ""))
+
+    if not wines:
+        return (
+            "\U0001F4CB I couldn't read any wines off that.\n\n"
+            "Try a straighter shot with the names in focus — or send one bottle "
+            "at a time and I'll go into more detail.",
+            InlineKeyboardMarkup([]),
+        )
+
+    by_name = {(w.get("name") or "").lower(): w for w in wines}
+    lines = [f"\U0001F4CB <b>Read {len(wines)} wine{'s' if len(wines) != 1 else ''}</b>"]
+
+    if not show_all:
+        pick = data.get("recommendation") or {}
+        pick_name = pick.get("name") or ""
+        chosen = by_name.get(pick_name.lower())
+        if chosen:
+            emoji = WINE_TYPE_EMOJI.get(chosen.get("wine_type", ""), "\U0001F377")
+            lines.append(f"\n\u2B50 <b>I'd go for: {_wine_label(chosen)}</b>")
+            if pick.get("why"):
+                lines.append(f"   <i>{pick['why']}</i>")
+            if chosen.get("note"):
+                lines.append(f"   {emoji} {chosen['note']}")
+            price = _price_str(chosen.get("list_price"), chosen.get("retail_price"), currency)
+            if price:
+                lines.append(f"   \U0001F4B7 {price}")
+
+        alternates = [by_name.get((n or "").lower()) for n in (data.get("alternates") or [])]
+        alternates = [w for w in alternates if w and w is not chosen][:3]
+        if alternates:
+            lines.append("\n<b>Also worth it:</b>")
+            for w in alternates:
+                emoji = WINE_TYPE_EMOJI.get(w.get("wine_type", ""), "\U0001F377")
+                price = _price_str(w.get("list_price"), w.get("retail_price"), currency)
+                tail = f" · {price}" if price else ""
+                lines.append(f"{emoji} <b>{w.get('name')}</b> — {w.get('note', '')}{tail}")
+
+        owned = [w.get("name") for w in wines if w.get("already_owned")]
+        if owned:
+            lines.append(
+                f"\n\U0001F3E0 You already own {', '.join(owned[:3])} — "
+                f"maybe branch out."
+            )
+
+        keyboard = [[InlineKeyboardButton(
+            f"\U0001F4CB Show all {len(wines)}", callback_data=_cb("wl", page=0),
+        )]]
+        return "\n".join(lines), InlineKeyboardMarkup(keyboard)
+
+    # Full list, paginated.
+    total_pages = max(1, (len(wines) + per_page - 1) // per_page)
+    page = max(0, min(page, total_pages - 1))
+    start = page * per_page
+    lines.append("")
+    for idx, w in enumerate(wines[start:start + per_page], start=start + 1):
+        emoji = WINE_TYPE_EMOJI.get(w.get("wine_type", ""), "\U0001F377")
+        owned = " \U0001F3E0" if w.get("already_owned") else ""
+        lines.append(f"{idx}. {emoji} <b>{_wine_label(w)}</b>{owned}")
+        if w.get("note"):
+            lines.append(f"    <i>{w['note']}</i>")
+        price = _price_str(w.get("list_price"), w.get("retail_price"), currency)
+        if price:
+            lines.append(f"    {price}")
+
+    keyboard = []
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("\u2B05\uFE0F", callback_data=_cb("wl", page=page - 1)))
+    nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data=_cb("x")))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("\u27A1\uFE0F", callback_data=_cb("wl", page=page + 1)))
+    if len(nav) > 1:
+        keyboard.append(nav)
+    keyboard.append([InlineKeyboardButton(
+        "\u2B50 Back to the pick", callback_data=_cb("wlp"),
+    )])
+    return "\n".join(lines), InlineKeyboardMarkup(keyboard)
 
 
 class BrowseSession:
@@ -785,12 +998,14 @@ class TelegramBotHandler:
         self._photo_callback = None
         self._api_factory = None
         self._triage_callback = None
+        self._winelist_callback = None
         self._local_barcode_reader = None
         self._browse_sessions: dict[str, BrowseSession] = {}
         self._chat_id_to_currency: dict[str, str] = {}
         self._chat_id_to_country: dict[str, str] = {}
         self._enriching_wine_ids: set[int] = set()
         self._label_seq = 0
+        self._winelists: dict[str, dict] = {}
 
     def _get_api(self, update_or_id=None):
         """Get the household-specific API client for a chat_id, or fallback.
@@ -825,6 +1040,11 @@ class TelegramBotHandler:
         Should return a dict of extracted wine data (from Grok), or None on failure.
         """
         self._photo_callback = callback
+
+    def set_winelist_callback(self, callback: Callable):
+        """Set the callback that reads a wine list photo.
+        Called with (photo_bytes, cellar_summary, currency, country)."""
+        self._winelist_callback = callback
 
     def set_triage_callback(self, callback: Callable):
         """Set callback for classifying + processing an unknown photo.
@@ -1959,6 +2179,22 @@ class TelegramBotHandler:
             elif cmd == "status":
                 await query.edit_message_text("\U0001f4ca Loading status...")
                 await self._cmd_status(update, context)
+            return
+
+        if action in ("wl", "wlp"):
+            key = f"{query.message.chat_id}:{query.message.message_id}"
+            entry = self._winelists.get(key)
+            if not entry:
+                await query.edit_message_text(
+                    "\U0001F4CB That list has expired — send the photo again."
+                )
+                return
+            text, keyboard = build_winelist_view(
+                entry["data"],
+                page=data.get("page", 0),
+                show_all=(action == "wl"),
+            )
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
             return
 
         if action == "howto":
@@ -3338,12 +3574,82 @@ class TelegramBotHandler:
             await self._handle_triage_label(status_msg, result, photo_data, update=update)
             return
 
+        # --- Grok says it's a wine list ---
+        if photo_type == "winelist":
+            if not self._winelist_callback:
+                await status_msg.edit_text(
+                    "\U0001F4CB That looks like a wine list, but list reading "
+                    "isn't configured here."
+                )
+                return
+            logger.info("[PHOTO] Grok says: wine list")
+            await self._handle_wine_list(status_msg, photo_data, update=update)
+            return
+
         # --- Neither ---
         logger.info(f"[PHOTO] Grok says: not a barcode or label (type={photo_type})")
         await status_msg.edit_text(
-            "That doesn't look like a barcode or wine label.\n\n"
-            "Send a photo of a barcode to scan, or a wine label for details."
+            "That doesn't look like a wine to me.\n\n"
+            "Send a <b>bottle</b> or its <b>barcode</b> to add it, or a "
+            "<b>wine list</b> and I'll tell you what to order.",
+            parse_mode="HTML",
         )
+
+    async def _handle_wine_list(self, status_msg, photo_data: bytes, update=None):
+        """Read a wine list photo and recommend from it against their cellar."""
+        api = self._get_api(update)
+        chat_id = update.effective_chat.id if update else None
+        currency = self._currency_for(chat_id)
+        country = self._country_for(chat_id)
+
+        await status_msg.edit_text(
+            "\U0001F4CB Reading the list\u2026 this one takes a few seconds."
+        )
+
+        loop = asyncio.get_running_loop()
+        try:
+            wines = await loop.run_in_executor(None, api.list_all_wines)
+        except Exception as e:
+            logger.warning(f"[winelist] could not load cellar for context: {e}")
+            wines = []
+        summary = build_cellar_summary(wines)
+
+        try:
+            data = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    self._winelist_callback, photo_data, summary, currency, country,
+                ),
+            )
+        except Exception as e:
+            logger.error(f"[winelist] analysis failed: {e}")
+            await status_msg.edit_text(f"Error reading the list: {e}")
+            return
+
+        if not data:
+            await status_msg.edit_text(
+                "\U0001F4CB I couldn't read that list. Try a straighter shot "
+                "with the names in focus."
+            )
+            return
+
+        owned_hits = mark_owned_wines(data, wines)
+        if owned_hits:
+            logger.info(f"[winelist] {owned_hits} wine(s) on the list already owned")
+
+        key = f"{status_msg.chat_id}:{status_msg.message_id}"
+        self._winelists[key] = {"data": data, "time": time.time()}
+        self._sweep_winelists()
+
+        text, keyboard = build_winelist_view(data)
+        await status_msg.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+
+    def _sweep_winelists(self):
+        """Drop read lists past their TTL — they hold a full parsed menu."""
+        now = time.time()
+        for key in [k for k, v in self._winelists.items()
+                    if now - v.get("time", 0) > WINELIST_TTL]:
+            self._winelists.pop(key, None)
 
     async def _handle_barcode_result(self, status_msg, barcode: str, update=None):
         """Handle a barcode that was read from a photo (pyzbar or Grok).
@@ -3548,10 +3854,11 @@ class TelegramBotHandler:
             ]
         else:
             # No match — offer to create new
-            text += "\n(No barcode attached — wine will be created without one)"
+            # Standing in a shop is a first-class case: you may want the notes
+            # and the price and no intention of owning the bottle.
             keyboard = [
                 [InlineKeyboardButton("✅ Add to cellar", callback_data=_cb("grok", barcode=temp_key))],
-                [InlineKeyboardButton("❌ Cancel", callback_data=_cb("x"))],
+                [InlineKeyboardButton("👀 Just looking", callback_data=_cb("x"))],
             ]
 
         await status_msg.edit_text(

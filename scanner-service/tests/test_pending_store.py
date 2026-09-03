@@ -132,3 +132,108 @@ def test_edit_keys_are_not_prefixed(handler, hh1):
     handler.pending_store[edit_key] = {"wine_id": 42, "time": time.time()}
     assert handler._is_pending(hh1, edit_key) is True
     assert pending_key(7, edit_key) == edit_key
+
+
+# --- wine list reading -------------------------------------------------------
+
+from integrations.telegram_bot import (  # noqa: E402
+    _wine_label,
+    build_cellar_summary,
+    build_winelist_view,
+    mark_owned_wines,
+)
+
+LIST_DATA = {
+    "type": "winelist",
+    "currency": "GBP",
+    "wines": [
+        {"name": "Ken Forrester Old Vine Reserve 2021", "vintage": 2021,
+         "wine_type": "WH", "note": "Rich, honeyed Chenin.",
+         "list_price": 38, "retail_price": 15},
+        {"name": "Produttori del Barbaresco 2019", "vintage": 2019,
+         "wine_type": "RE", "note": "Tar, roses, firm tannins.",
+         "list_price": 78, "retail_price": 30},
+        {"name": "Ruinart Blanc de Blancs NV", "wine_type": "SP",
+         "note": "Brioche and chalk.", "list_price": 120, "retail_price": None},
+    ],
+    "recommendation": {"name": "Produttori del Barbaresco 2019",
+                       "why": "You lean Italian and this is the classic."},
+    "alternates": ["Ruinart Blanc de Blancs NV"],
+}
+
+CELLAR = [
+    {"name": "Old Vine Reserve Chenin Blanc", "producer": "Ken Forrester Wines"},
+    {"name": "Barolo", "producer": "Terre del Barolo"},
+]
+
+
+def test_vintage_is_not_printed_twice():
+    """List entries usually already carry the vintage in the printed name."""
+    assert _wine_label({"name": "Alheit Cartology 2022", "vintage": 2022}) == "Alheit Cartology 2022"
+    assert _wine_label({"name": "Alheit Cartology", "vintage": 2022}) == "Alheit Cartology 2022"
+    assert _wine_label({"name": "Ruinart Blanc de Blancs NV"}) == "Ruinart Blanc de Blancs NV"
+
+
+def test_owned_wines_are_matched_locally():
+    """The model missed this one because only a slice of the cellar fit the prompt."""
+    data = {k: (list(v) if isinstance(v, list) else v) for k, v in LIST_DATA.items()}
+    data["wines"] = [dict(w) for w in LIST_DATA["wines"]]
+
+    hits = mark_owned_wines(data, CELLAR)
+
+    assert hits == 1
+    owned = [w["name"] for w in data["wines"] if w["already_owned"]]
+    assert owned == ["Ken Forrester Old Vine Reserve 2021"]
+
+
+def test_owned_matching_needs_two_words_not_one():
+    """A shared grape or region alone must not count as a match."""
+    data = {"wines": [{"name": "Some Other Chenin Blanc", "producer": "Nobody"}]}
+    assert mark_owned_wines(data, CELLAR) == 0
+
+    # ...but the real producer still matches on its own name.
+    same = {"wines": [{"name": "Old Vine Reserve", "producer": "Ken Forrester"}]}
+    assert mark_owned_wines(same, CELLAR) == 1
+
+
+def test_owned_matching_is_a_noop_for_an_empty_cellar():
+    data = {"wines": [dict(w) for w in LIST_DATA["wines"]]}
+    assert mark_owned_wines(data, []) == 0
+
+
+def test_pick_view_leads_with_the_recommendation_and_fits_telegram():
+    text, keyboard = build_winelist_view(LIST_DATA)
+    assert "I'd go for" in text
+    assert "Produttori del Barbaresco 2019" in text
+    assert "You lean Italian" in text
+    assert len(text) < 4096
+    assert keyboard.inline_keyboard  # offers the full list
+
+
+def test_full_view_paginates():
+    text, keyboard = build_winelist_view(LIST_DATA, page=0, per_page=2, show_all=True)
+    assert "Ken Forrester" in text
+    assert "Ruinart" not in text  # page 2
+    labels = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert any("1/2" in x for x in labels)
+
+
+def test_unreadable_list_says_so_rather_than_showing_nothing():
+    text, keyboard = build_winelist_view({"wines": [], "recommendation": None})
+    assert "couldn't read" in text.lower()
+    assert not keyboard.inline_keyboard
+
+
+def test_cellar_summary_describes_taste_not_just_names():
+    summary = build_cellar_summary([
+        {"name": "A", "wine_type": "RE", "country": "ZA", "grape": "Cabernet", "producer": "X"},
+        {"name": "B", "wine_type": "RE", "country": "ZA", "grape": "Cabernet", "producer": "Y"},
+        {"name": "C", "wine_type": "WH", "country": "FR", "grape": "Chenin", "producer": "Z"},
+    ])
+    assert "Red (2)" in summary
+    assert "ZA (2)" in summary
+    assert "Cabernet (2)" in summary
+
+
+def test_cellar_summary_is_empty_for_an_empty_cellar():
+    assert build_cellar_summary([]) == ""
