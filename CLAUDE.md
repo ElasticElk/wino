@@ -190,6 +190,19 @@ Users can also send **photos** to the bot — it will attempt barcode detection 
 
 Empty states (`/stock`, `/fridge`, `/storages` with no wines) all render one shared card inviting a label photo, via `empty_cellar()` in `telegram_bot.py`.
 
+### Bot presence (description, command menu, icon)
+
+The bot's description, short description and `/` command menu live on Telegram's
+servers, not in this repo. `python manage.py set_bot_presence` pushes them from
+`scanner/management/commands/set_bot_presence.py`, which is the only record of
+what they say — edit there, then run it (`--dry-run` to preview).
+
+The **description** is the text shown on the empty chat screen *before* someone
+taps Start, so it's the first thing an unprovisioned person ever reads.
+
+The **profile picture has no Bot API method** — it can only be set via @BotFather
+with `/setuserpic`.
+
 ## Scanner Service Config Bootstrap
 
 At startup (`server.py`):
