@@ -147,10 +147,11 @@ def build_triage_prompt(target_currency: str = "USD", target_country: str = "") 
    {REFERENCE_INSTRUCTIONS.format(currency=target_currency, location=location)}
    Use null for fields you can't determine.
 
-3. If it shows a WINE LIST — a restaurant list, a shelf display, a printed
-   menu, several bottles photographed together — return:
+3. If it shows MORE THAN ONE WINE — a restaurant list, a shop shelf, a printed
+   menu, or several bottles/labels photographed together — return:
    {{"type": "winelist"}}
-   Do not try to read the wines here; a separate call handles that.
+   Do not try to read the wines here; a separate call handles that. This
+   is the multi-wine path, not "it must be a priced wine list".
 
 4. If it's NONE of these, return:
    {{"type": "other"}}
@@ -160,35 +161,54 @@ Return ONLY the JSON object, no markdown, no explanation."""
 
 def build_winelist_prompt(cellar_summary: str, target_currency: str = "USD",
                           target_country: str = "") -> str:
-    """Read a wine list and recommend from it, in one call.
+    """Read every wine in a multi-wine photo and recommend from it.
+
+    Covers restaurant lists, shop shelves, and several labels in one shot.
+    Those are different scenes: only a menu or a shelf tag has an offered
+    price. Inventing a "list price" for unlabeled bottles is the failure
+    mode this prompt is built to prevent.
 
     Deliberately no per-wine web search: twenty wines with a live lookup each
     would take minutes, and this gets used while standing in a shop or holding
-    a menu. Model knowledge gives serviceable one-liners and ballpark prices
+    a menu. Model knowledge gives serviceable one-liners and ballpark retail
     instantly; the accurate lookup stays reserved for wines actually added.
     """
     location = _location_phrase(target_country)
     cellar = cellar_summary or "(their cellar is empty — no preferences to go on yet)"
-    return f"""You are a sommelier reading a wine list for a friend.
+    return f"""You are a sommelier looking at a photo of wines for a friend.
 
-Read every wine you can make out in this photo. For each, give a ONE LINE
-tasting note (aromas and style, no more than about 12 words) and your best
-estimate of what it costs.
+Read every wine you can make out. For each, give a ONE LINE tasting note
+(aromas and style, no more than about 12 words).
+
+First classify the SCENE — this is required:
+  "menu"    — a restaurant wine list, printed menu, or screenshot of a list
+              to order from
+  "shelf"   — a shop shelf / fridge where bottles sit with price tags
+  "bottles" — several bottle labels photographed together, with no menu and
+              no price tags (a table, a tasting lineup, supermarket labels
+              without readable prices). This is NOT a wine list.
 
 Here is what they already drink at home:
 {cellar}
 
-Recommend ONE wine from the list they would most enjoy, and say why in one
+Recommend ONE wine from the photo they would most enjoy, and say why in one
 sentence that refers to their taste. Then name up to three others worth a look.
-Flag any wine on the list they already own — they can drink that at home.
+Flag any wine they already own.
 
-Prices in {target_currency}, for a typical venue{location}. Give both the price
-you would expect to see charged on this list, and the typical retail price, when
-you can tell them apart. Use null when you genuinely cannot estimate.
+Prices in {target_currency}{location}:
+  list_price   — ONLY a number actually printed in the photo next to that
+                 wine (menu price or shelf tag). If you cannot see a price
+                 in the photo, this MUST be null. Do not estimate a
+                 restaurant markup. Do not invent a list price for unlabeled
+                 bottles. Scene "bottles" always has list_price null.
+  retail_price — your ballpark typical shop price, or null if you cannot
+                 estimate. This may be estimated from knowledge; list_price
+                 may not.
 
 Return ONLY this JSON, no markdown:
 {{
   "type": "winelist",
+  "scene": "bottles",
   "wines": [
     {{
       "name": "Wine name as printed",
@@ -196,18 +216,18 @@ Return ONLY this JSON, no markdown:
       "vintage": 2022,
       "wine_type": "RE/WH/RO/SP/DE/FO/OR",
       "note": "One line, twelve words or fewer",
-      "list_price": 38,
+      "list_price": null,
       "retail_price": 16,
       "already_owned": false
     }}
   ],
-  "recommendation": {{"name": "Exact name from the list", "why": "One sentence referring to their taste"}},
+  "recommendation": {{"name": "Exact name from the photo", "why": "One sentence referring to their taste"}},
   "alternates": ["Exact name", "Exact name"],
   "currency": "{target_currency}"
 }}
 
 If the photo is too blurred or cropped to read any wine, return
-{{"type": "winelist", "wines": [], "recommendation": null, "alternates": []}}."""
+{{"type": "winelist", "scene": "bottles", "wines": [], "recommendation": null, "alternates": []}}."""
 
 
 def build_text_reference_prompt(name: str, producer: str, vintage, target_currency: str, target_country: str = "") -> str:
@@ -419,7 +439,11 @@ class GrokVisionAPI:
             if content.startswith("```"):
                 content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
             data = json.loads(content)
-            logger.info(f"Grok read {len(data.get('wines') or [])} wines from a list")
+            scene = data.get("scene") or "menu"
+            logger.info(
+                f"Grok read {len(data.get('wines') or [])} wines "
+                f"(scene={scene})"
+            )
             return data
         except requests.RequestException as e:
             logger.error(f"Grok wine-list request failed: {e}")

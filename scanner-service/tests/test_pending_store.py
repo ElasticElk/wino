@@ -206,6 +206,7 @@ def test_pick_view_leads_with_the_recommendation_and_fits_telegram():
     assert "I'd go for" in text
     assert "Produttori del Barbaresco 2019" in text
     assert "You lean Italian" in text
+    assert "on the list" in text
     assert len(text) < 4096
     assert keyboard.inline_keyboard  # offers the full list
 
@@ -222,6 +223,52 @@ def test_unreadable_list_says_so_rather_than_showing_nothing():
     text, keyboard = build_winelist_view({"wines": [], "recommendation": None})
     assert "couldn't read" in text.lower()
     assert not keyboard.inline_keyboard
+
+
+def test_bottle_group_does_not_invent_a_list_price():
+    """A photo of labels is not a wine list — even if the model still emits one."""
+    data = {
+        **LIST_DATA,
+        "scene": "bottles",
+        "wines": [dict(w) for w in LIST_DATA["wines"]],
+    }
+    text, _ = build_winelist_view(data)
+    assert "on the list" not in text
+    assert "Spotted 3 wines" in text
+    assert "retail" in text  # ballpark shop price is still useful
+    full, _ = build_winelist_view(data, show_all=True)
+    assert "on the list" not in full
+
+
+def test_shelf_photo_labels_the_tag_not_the_list():
+    data = {
+        **LIST_DATA,
+        "scene": "shelf",
+        "wines": [dict(w) for w in LIST_DATA["wines"]],
+    }
+    text, _ = build_winelist_view(data)
+    assert "on the list" not in text
+    assert "on the shelf" in text
+
+
+def test_menu_scene_still_says_on_the_list():
+    data = {**LIST_DATA, "scene": "menu"}
+    text, _ = build_winelist_view(data)
+    assert "on the list" in text
+    assert "Read 3 wines" in text
+
+
+def test_winelist_prompt_forbids_invented_list_prices():
+    from integrations.grok_vision import build_winelist_prompt, build_triage_prompt
+
+    prompt = build_winelist_prompt("they drink Chenin", "GBP", "GB")
+    assert '"scene": "bottles"' in prompt
+    assert "MUST be null" in prompt
+    assert "This is NOT a wine list" in prompt
+
+    triage = build_triage_prompt("GBP", "GB")
+    assert "MORE THAN ONE WINE" in triage
+    assert 'not "it must be a priced wine list"' in triage
 
 
 def test_cellar_summary_describes_taste_not_just_names():

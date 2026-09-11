@@ -424,14 +424,38 @@ def mark_owned_wines(data: dict, cellar: list[dict]) -> int:
     return hits
 
 
-def _price_str(list_price, retail_price, currency: str) -> str:
-    """Render whichever prices we got, or nothing at all."""
+WINELIST_SCENES = ("menu", "shelf", "bottles")
+
+
+def _scene(data: dict) -> str:
+    """menu / shelf / bottles. Unknown values fall back to menu."""
+    scene = (data.get("scene") or "menu").lower()
+    return scene if scene in WINELIST_SCENES else "menu"
+
+
+def _price_str(list_price, retail_price, currency: str, scene: str = "menu") -> str:
+    """Render prices that belong to this scene.
+
+    list_price is an offered price printed in the photo (menu or shelf tag).
+    Bottle-group photos have no such price, so we never label one "on the
+    list" even if the model still emits a number.
+    """
     parts = []
-    if isinstance(list_price, (int, float)):
-        parts.append(f"~{currency}{list_price:,.0f} on the list")
+    if scene in ("menu", "shelf") and isinstance(list_price, (int, float)):
+        label = "on the shelf" if scene == "shelf" else "on the list"
+        parts.append(f"~{currency}{list_price:,.0f} {label}")
     if isinstance(retail_price, (int, float)):
         parts.append(f"~{currency}{retail_price:,.0f} retail")
     return " · ".join(parts)
+
+
+def _winelist_title(n: int, scene: str) -> str:
+    plural = "s" if n != 1 else ""
+    if scene == "shelf":
+        return f"\U0001F6D2 <b>Spotted {n} wine{plural} on the shelf</b>"
+    if scene == "bottles":
+        return f"\U0001F377 <b>Spotted {n} wine{plural}</b>"
+    return f"\U0001F4CB <b>Read {n} wine{plural}</b>"
 
 
 CURRENCY_GLYPH = {"GBP": "\u00a3", "USD": "$", "EUR": "\u20ac", "ZAR": "R",
@@ -440,7 +464,7 @@ CURRENCY_GLYPH = {"GBP": "\u00a3", "USD": "$", "EUR": "\u20ac", "ZAR": "R",
 
 def build_winelist_view(data: dict, page: int = 0, per_page: int = 6,
                         show_all: bool = False) -> tuple[str, InlineKeyboardMarkup]:
-    """Render a read wine list: the pick first, then the wines.
+    """Render a multi-wine photo: the pick first, then the wines.
 
     Leads with a single recommendation because "what should I drink" is the
     actual question, and because a full list with notes overruns Telegram's
@@ -448,6 +472,7 @@ def build_winelist_view(data: dict, page: int = 0, per_page: int = 6,
     """
     wines = data.get("wines") or []
     currency = CURRENCY_GLYPH.get(data.get("currency", ""), data.get("currency", ""))
+    scene = _scene(data)
 
     if not wines:
         return (
@@ -458,7 +483,7 @@ def build_winelist_view(data: dict, page: int = 0, per_page: int = 6,
         )
 
     by_name = {(w.get("name") or "").lower(): w for w in wines}
-    lines = [f"\U0001F4CB <b>Read {len(wines)} wine{'s' if len(wines) != 1 else ''}</b>"]
+    lines = [_winelist_title(len(wines), scene)]
 
     if not show_all:
         pick = data.get("recommendation") or {}
@@ -471,7 +496,9 @@ def build_winelist_view(data: dict, page: int = 0, per_page: int = 6,
                 lines.append(f"   <i>{pick['why']}</i>")
             if chosen.get("note"):
                 lines.append(f"   {emoji} {chosen['note']}")
-            price = _price_str(chosen.get("list_price"), chosen.get("retail_price"), currency)
+            price = _price_str(
+                chosen.get("list_price"), chosen.get("retail_price"), currency, scene,
+            )
             if price:
                 lines.append(f"   \U0001F4B7 {price}")
 
@@ -481,7 +508,9 @@ def build_winelist_view(data: dict, page: int = 0, per_page: int = 6,
             lines.append("\n<b>Also worth it:</b>")
             for w in alternates:
                 emoji = WINE_TYPE_EMOJI.get(w.get("wine_type", ""), "\U0001F377")
-                price = _price_str(w.get("list_price"), w.get("retail_price"), currency)
+                price = _price_str(
+                    w.get("list_price"), w.get("retail_price"), currency, scene,
+                )
                 tail = f" · {price}" if price else ""
                 lines.append(f"{emoji} <b>{w.get('name')}</b> — {w.get('note', '')}{tail}")
 
@@ -508,7 +537,9 @@ def build_winelist_view(data: dict, page: int = 0, per_page: int = 6,
         lines.append(f"{idx}. {emoji} <b>{_wine_label(w)}</b>{owned}")
         if w.get("note"):
             lines.append(f"    <i>{w['note']}</i>")
-        price = _price_str(w.get("list_price"), w.get("retail_price"), currency)
+        price = _price_str(
+            w.get("list_price"), w.get("retail_price"), currency, scene,
+        )
         if price:
             lines.append(f"    {price}")
 
@@ -3594,7 +3625,7 @@ class TelegramBotHandler:
                     "isn't configured here."
                 )
                 return
-            logger.info("[PHOTO] Grok says: wine list")
+            logger.info("[PHOTO] Grok says: multi-wine photo")
             await self._handle_wine_list(status_msg, photo_data, update=update)
             return
 
@@ -3608,14 +3639,14 @@ class TelegramBotHandler:
         )
 
     async def _handle_wine_list(self, status_msg, photo_data: bytes, update=None):
-        """Read a wine list photo and recommend from it against their cellar."""
+        """Read a multi-wine photo and recommend from it against their cellar."""
         api = self._get_api(update)
         chat_id = update.effective_chat.id if update else None
         currency = self._currency_for(chat_id)
         country = self._country_for(chat_id)
 
         await status_msg.edit_text(
-            "\U0001F4CB Reading the list\u2026 this one takes a few seconds."
+            "\U0001F4CB Reading the wines\u2026 this one takes a few seconds."
         )
 
         loop = asyncio.get_running_loop()
@@ -3635,19 +3666,20 @@ class TelegramBotHandler:
             )
         except Exception as e:
             logger.error(f"[winelist] analysis failed: {e}")
-            await status_msg.edit_text(f"Error reading the list: {e}")
+            await status_msg.edit_text(f"Error reading the wines: {e}")
             return
 
         if not data:
             await status_msg.edit_text(
-                "\U0001F4CB I couldn't read that list. Try a straighter shot "
+                "\U0001F4CB I couldn't read those wines. Try a straighter shot "
                 "with the names in focus."
             )
             return
 
         owned_hits = mark_owned_wines(data, wines)
         if owned_hits:
-            logger.info(f"[winelist] {owned_hits} wine(s) on the list already owned")
+            logger.info(f"[winelist] {owned_hits} wine(s) already owned")
+        logger.info(f"[winelist] scene={_scene(data)}")
 
         key = f"{status_msg.chat_id}:{status_msg.message_id}"
         self._winelists[key] = {"data": data, "time": time.time()}
