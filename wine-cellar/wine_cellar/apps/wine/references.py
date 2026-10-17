@@ -11,7 +11,9 @@ Written as a plain function so it can be tested without a broker.
 """
 
 import logging
+from datetime import timedelta
 
+from django.conf import settings
 from django.utils import timezone
 
 from wine_cellar.apps.wine.grok_references import fetch_references, validate_reference_field
@@ -31,26 +33,204 @@ def _producer_hint(wine) -> str:
     return ""
 
 
-def perform_reference_refresh(wine_id, user_id=None) -> dict:
+def _currency_code(returned, fallback: str) -> str:
+    """An ISO code for whatever Grok put in market_price_currency.
+
+    It sometimes answers with a symbol ("£") or a word ("euro"); truncating
+    those gave codes like "EUR" by luck and "£" or "POU" otherwise, which
+    then never convert.
+    """
+    if not isinstance(returned, str) or not returned.strip():
+        return fallback
+    raw = returned.strip()
+    by_symbol = {sym: code for code, sym in settings.CURRENCY_SYMBOLS.items()}
+    if raw in by_symbol:
+        return by_symbol[raw]
+    word = raw.upper()
+    aliases = {"EURO": "EUR", "EUROS": "EUR", "POUND": "GBP", "POUNDS": "GBP",
+               "RAND": "ZAR", "DOLLAR": "USD", "DOLLARS": "USD"}
+    if word in aliases:
+        return aliases[word]
+    if len(word) == 3 and word.isalpha():
+        return word
+    return fallback
+
+
+def validated_fields(data: dict, fallback_currency: str) -> tuple[dict, list, dict]:
+    """Pull the reference fields of a Grok response that are good enough to keep.
+
+    Returns (values, confidences, details): `values` maps model field names to
+    the values that passed validation, `confidences` lists their confidence
+    words, `details` is the per-field breakdown reported back to the caller.
+    Shared by the cellar refresh and the wine-less lookup so a label read in a
+    shop is held to exactly the same standard as one already on the shelf.
+    """
+    values: dict = {}
+    confidences: list = []
+    details = {"critic_score": None, "vivino_rating": None, "market_price": None}
+
+    critic = data.get("critic_score")
+    if validate_reference_field(
+        critic, data.get("critic_score_confidence"), data.get("critic_score_reasoning"),
+    ) and isinstance(critic, (int, float)) and 0 <= critic <= 100:
+        conf = (data.get("critic_score_confidence") or "").lower()
+        values["critic_score"] = int(critic)
+        confidences.append(conf)
+        details["critic_score"] = {"value": int(critic), "confidence": conf}
+
+    vivino = data.get("vivino_rating")
+    if validate_reference_field(
+        vivino, data.get("vivino_rating_confidence"), data.get("vivino_rating_reasoning"),
+    ) and isinstance(vivino, (int, float)) and 0 <= vivino <= 5:
+        conf = (data.get("vivino_rating_confidence") or "").lower()
+        values["vivino_rating"] = round(float(vivino), 1)
+        confidences.append(conf)
+        details["vivino_rating"] = {"value": round(float(vivino), 1), "confidence": conf}
+
+    price = data.get("market_price")
+    if validate_reference_field(
+        price, data.get("market_price_confidence"), data.get("market_price_reasoning"),
+    ) and isinstance(price, (int, float)) and price >= 0:
+        conf = (data.get("market_price_confidence") or "").lower()
+        values["market_price"] = price
+        values["market_price_currency"] = _currency_code(
+            data.get("market_price_currency"), fallback_currency,
+        )
+        confidences.append(conf)
+        details["market_price"] = {
+            "value": float(price),
+            "currency": values.get("market_price_currency"),
+            "confidence": conf,
+        }
+
+    return values, confidences, details
+
+
+def blended_category(critic, vivino):
+    """The 70/30 critic+Vivino composite, mirroring Wine.save()."""
+    if critic is not None and vivino is not None:
+        return round(critic * 0.7 + float(vivino) * 20.0 * 0.3)
+    if critic is not None:
+        return int(critic)
+    if vivino is not None:
+        return round(float(vivino) * 20.0)
+    return None
+
+
+def _currency_country_for(user_id):
+    """The user's preferred currency and country, for price grounding."""
+    from django.contrib.auth import get_user_model
+
+    if user_id is None:
+        return "EUR", ""
+    user = get_user_model().objects.filter(pk=user_id).first()
+    if user is not None and hasattr(user, "user_settings"):
+        return user.user_settings.currency or "EUR", user.user_settings.country or ""
+    return "EUR", ""
+
+
+def perform_reference_lookup(
+    name,
+    producer="",
+    vintage=None,
+    user_id=None,
+    country="",
+    region="",
+    appellation="",
+    grape="",
+    vineyard="",
+) -> dict:
+    """Look up references for a wine that has no row in the cellar.
+
+    Same live search as perform_reference_refresh, minus the Wine: a label
+    photographed in a shop is exactly where the critic score, the Vivino rating
+    and the going price matter most, and there is nothing yet to persist them
+    to. Nothing is written; the caller just renders what comes back.
+    """
+    if not name:
+        return {"updated": False, "error": "Name is required"}
+
+    currency, target_country = _currency_country_for(user_id)
+
+    data = fetch_references(
+        name=name,
+        producer=producer or "",
+        vintage=vintage,
+        target_currency=currency,
+        target_country=target_country,
+        country=country or "",
+        region=region or "",
+        appellation=appellation or "",
+        grape=grape or "",
+        vineyard=vineyard or "",
+    )
+    if data is None:
+        return {"updated": False, "error": "Grok request failed"}
+
+    values, found, details = validated_fields(data, currency)
+    if not found:
+        return {
+            "updated": False,
+            "confidence": "low",
+            "message": (
+                "Grok's live search did not find usable references for this wine."
+            ),
+            "details": details,
+        }
+
+    critic = values.get("critic_score")
+    vivino = values.get("vivino_rating")
+    price = values.get("market_price")
+    return {
+        "updated": True,
+        "confidence": max(found, key=lambda c: CONFIDENCE_RANK.get(c, 0)),
+        "critic_score": critic,
+        "vivino_rating": float(vivino) if vivino is not None else None,
+        "category_rating": blended_category(critic, vivino),
+        "market_price": float(price) if price is not None else None,
+        "market_price_currency": values.get("market_price_currency") or currency,
+        "details": details,
+    }
+
+
+def _stored_references(wine) -> dict:
+    return {
+        "confidence": wine.reference_confidence,
+        "critic_score": wine.critic_score,
+        "vivino_rating": (
+            float(wine.vivino_rating) if wine.vivino_rating is not None else None
+        ),
+        "category_rating": wine.category_rating,
+        "market_price": (
+            float(wine.market_price) if wine.market_price is not None else None
+        ),
+        "market_price_currency": wine.market_price_currency,
+    }
+
+
+def perform_reference_refresh(wine_id, user_id=None, force=False) -> dict:
     """Look up references for one wine and persist whatever passes validation.
 
     Per-field preservation: each field keeps its prior value unless *this* run
     produces a valid replacement for that specific field, so a bad search day
     for one field doesn't destroy good prior data.
-    """
-    from django.contrib.auth import get_user_model
 
+    A lookup that landed in the last week is kept unless the caller forces a
+    new search — the label card already paid for one.
+    """
     try:
         wine = Wine.objects.get(id=wine_id)
     except Wine.DoesNotExist:
         return {"updated": False, "error": "Wine not found"}
 
-    currency, country = "USD", ""
-    if user_id is not None:
-        user = get_user_model().objects.filter(pk=user_id).first()
-        if user is not None and hasattr(user, "user_settings"):
-            currency = user.user_settings.currency or "USD"
-            country = user.user_settings.country or ""
+    if (
+        not force
+        and wine.reference_updated is not None
+        and timezone.now() - wine.reference_updated < timedelta(days=7)
+    ):
+        return {"updated": False, "skipped": True, **_stored_references(wine)}
+
+    currency, country = _currency_country_for(user_id)
 
     data = fetch_references(
         name=wine.name,
@@ -67,42 +247,9 @@ def perform_reference_refresh(wine_id, user_id=None) -> dict:
     if data is None:
         return {"updated": False, "error": "Grok request failed"}
 
-    persisted = []
-    details = {"critic_score": None, "vivino_rating": None, "market_price": None}
-
-    critic = data.get("critic_score")
-    if validate_reference_field(
-        critic, data.get("critic_score_confidence"), data.get("critic_score_reasoning"),
-    ) and isinstance(critic, (int, float)) and 0 <= critic <= 100:
-        wine.critic_score = int(critic)
-        conf = (data.get("critic_score_confidence") or "").lower()
-        persisted.append(conf)
-        details["critic_score"] = {"value": int(critic), "confidence": conf}
-
-    vivino = data.get("vivino_rating")
-    if validate_reference_field(
-        vivino, data.get("vivino_rating_confidence"), data.get("vivino_rating_reasoning"),
-    ) and isinstance(vivino, (int, float)) and 0 <= vivino <= 5:
-        wine.vivino_rating = round(float(vivino), 1)
-        conf = (data.get("vivino_rating_confidence") or "").lower()
-        persisted.append(conf)
-        details["vivino_rating"] = {"value": round(float(vivino), 1), "confidence": conf}
-
-    price = data.get("market_price")
-    if validate_reference_field(
-        price, data.get("market_price_confidence"), data.get("market_price_reasoning"),
-    ) and isinstance(price, (int, float)) and price >= 0:
-        wine.market_price = price
-        returned = data.get("market_price_currency") or currency
-        if isinstance(returned, str):
-            wine.market_price_currency = returned.upper()[:3]
-        conf = (data.get("market_price_confidence") or "").lower()
-        persisted.append(conf)
-        details["market_price"] = {
-            "value": float(price),
-            "currency": wine.market_price_currency,
-            "confidence": conf,
-        }
+    values, persisted, details = validated_fields(data, currency)
+    for field, value in values.items():
+        setattr(wine, field, value)
 
     if not persisted:
         kept_any = any(
@@ -130,13 +277,14 @@ def perform_reference_refresh(wine_id, user_id=None) -> dict:
     wine.reference_updated = timezone.now()
     wine.save()
 
+    try:
+        from wine_cellar.apps.wine.taste import rebuild_snapshot
+        rebuild_snapshot(wine.household)
+    except Exception:
+        pass
+
     return {
         "updated": True,
-        "confidence": wine.reference_confidence,
-        "critic_score": wine.critic_score,
-        "vivino_rating": float(wine.vivino_rating) if wine.vivino_rating is not None else None,
-        "category_rating": wine.category_rating,
-        "market_price": float(wine.market_price) if wine.market_price is not None else None,
-        "market_price_currency": wine.market_price_currency,
+        **_stored_references(wine),
         "details": details,
     }

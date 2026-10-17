@@ -145,7 +145,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = "en-gb"
 
-TIME_ZONE = "Europe/Berlin"
+TIME_ZONE = "Europe/London"
 
 USE_I18N = True
 
@@ -167,6 +167,7 @@ CURRENCIES = [
     ("GBP", _("Pound Sterling")),
     ("ZAR", _("South African Rand")),
     ("AUD", _("Australian Dollar")),
+    ("NZD", _("New Zealand Dollar")),
     ("HKD", _("Hong Kong Dollar")),
 ]
 
@@ -176,6 +177,7 @@ CURRENCY_SYMBOLS = {
     "GBP": "£",
     "ZAR": "R",
     "AUD": "A$",
+    "NZD": "NZ$",
     "HKD": "HK$",
 }
 
@@ -187,6 +189,7 @@ CURRENCY_RATES_TO_USD = {
     "GBP": 1.270,
     "ZAR": 0.054,
     "AUD": 0.660,
+    "NZD": 0.580,
     "HKD": 0.128,
 }
 

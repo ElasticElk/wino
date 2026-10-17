@@ -1,2 +1,4 @@
 pyyaml>=6.0
 requests>=2.31
+evdev>=1.7.0; sys_platform == "linux"
+gpiozero>=2.0; sys_platform == "linux"

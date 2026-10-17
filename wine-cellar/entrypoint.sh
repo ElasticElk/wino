@@ -15,6 +15,8 @@ if [ "$CONTAINER_ROLE" = "web" ]
 then
 
 python manage.py migrate
+# DEBUG is off in docker, so WhiteNoise needs the collected tree.
+python manage.py collectstatic --no-input
 
 cat <<EOF | python manage.py shell
 from django.contrib.auth import get_user_model

@@ -19,6 +19,7 @@ services:
       - ./.env.dev
     environment:
       - CONTAINER_ROLE=web
+      - TZ=Europe/London
     depends_on:
       - db
       - redis
@@ -57,6 +58,8 @@ services:
       - /usr/src/app/node_modules
     env_file:
       - ./.env.dev
+    environment:
+      - TZ=Europe/London
     depends_on:
       web:
         condition: service_healthy
@@ -75,6 +78,8 @@ services:
       - /usr/src/app/node_modules
     env_file:
       - ./.env.dev
+    environment:
+      - TZ=Europe/London
     depends_on:
       web:
         condition: service_healthy

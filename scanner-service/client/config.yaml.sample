@@ -1,0 +1,20 @@
+# Thin scanner client — copy to config.yaml on the Pi.
+# The API key comes from Django Admin → Scanners (Kitchen Pi for Hillside).
+
+server:
+  # NAS scanner server. On the home LAN this is the NAS hostname or Tailscale name.
+  url: "http://nas.local:8080"
+  timeout: 10
+  api_key: "<from-django-admin-scanners>"
+
+hardware:
+  # "mock" = type barcodes on stdin (dev). "evdev" = USB HID scanner on a Pi.
+  scanner_backend: "evdev"
+  scanner_device: "/dev/input/event0"
+  gpio_toggle_pin: 18
+  gpio_buzzer_pin: 23
+  gpio_led_green_pin: 27
+  gpio_led_red_pin: 22
+
+scanner:
+  debounce_seconds: 2

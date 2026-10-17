@@ -1,7 +1,9 @@
 import secrets
+from datetime import timedelta
 
 from django.contrib.auth import get_user_model
 from django.db import models
+from django.utils import timezone
 
 
 class Household(models.Model):
@@ -13,6 +15,9 @@ class Household(models.Model):
 
     name = models.CharField(max_length=100)
     created = models.DateTimeField(auto_now_add=True)
+    # On for new cellars — owners can still turn challenges off.
+    gamification_enabled = models.BooleanField(default=True)
+    empty_nudge_sent_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["name"]
@@ -83,6 +88,7 @@ class TelegramUser(models.Model):
     display_name = models.CharField(max_length=100, blank=True)
     is_active = models.BooleanField(default=True)
     created = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["display_name"]
@@ -106,6 +112,62 @@ class TelegramUser(models.Model):
 
 def generate_api_key():
     return secrets.token_hex(32)
+
+
+INVITE_CODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+INVITE_CODE_LENGTH = 8
+INVITE_TTL = timedelta(days=7)
+
+
+def generate_invite_code():
+    return "".join(secrets.choice(INVITE_CODE_ALPHABET) for _ in range(INVITE_CODE_LENGTH))
+
+
+class HouseholdInvite(models.Model):
+    """One-time Telegram deep link. Burned only after provision succeeds."""
+
+    KIND_JOIN = "join"
+    KIND_NEW = "new"
+    KIND_CHOICES = [
+        (KIND_JOIN, "Join existing"),
+        (KIND_NEW, "New cellar"),
+    ]
+
+    code = models.CharField(max_length=8, unique=True, default=generate_invite_code)
+    kind = models.CharField(max_length=8, choices=KIND_CHOICES)
+    household = models.ForeignKey(
+        Household, on_delete=models.CASCADE, related_name="invites",
+        null=True, blank=True,
+    )
+    created_by = models.ForeignKey(
+        get_user_model(), on_delete=models.CASCADE, related_name="household_invites",
+    )
+    created = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    used_by = models.ForeignKey(
+        get_user_model(), on_delete=models.SET_NULL, related_name="redeemed_invites",
+        null=True, blank=True,
+    )
+
+    class Meta:
+        ordering = ["-created"]
+
+    def __str__(self):
+        return f"{self.kind}:{self.code}"
+
+    def save(self, *args, **kwargs):
+        if not self.expires_at:
+            self.expires_at = timezone.now() + INVITE_TTL
+        super().save(*args, **kwargs)
+
+    @property
+    def is_used(self):
+        return self.used_at is not None
+
+    @property
+    def is_expired(self):
+        return timezone.now() >= self.expires_at
 
 
 class Scanner(models.Model):

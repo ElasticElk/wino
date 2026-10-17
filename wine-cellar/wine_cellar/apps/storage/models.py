@@ -40,9 +40,29 @@ class Storage(UserContentModel):
 
 
 class StorageItem(UserContentModel):
+    VOTE_DOWN = "down"
+    VOTE_MEH = "meh"
+    VOTE_UP = "up"
+    VOTE_CHOICES = [
+        (VOTE_DOWN, "Thumbs down"),
+        (VOTE_MEH, "Indifferent"),
+        (VOTE_UP, "Thumbs up"),
+    ]
+
     storage = models.ForeignKey(Storage, on_delete=models.CASCADE, related_name="items")
     wine = models.ForeignKey(Wine, on_delete=models.CASCADE)
     row = models.PositiveIntegerField(null=True, blank=True)
     column = models.PositiveIntegerField(null=True, blank=True)
     deleted = models.BooleanField(default=False)
     price = models.DecimalField(max_digits=6, decimal_places=2, null=True)
+    vote = models.CharField(
+        max_length=8, choices=VOTE_CHOICES, null=True, blank=True,
+    )
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=["wine", "deleted"],
+                name="storageitem_wine_deleted_idx",
+            ),
+        ]

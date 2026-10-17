@@ -1,4 +1,21 @@
 from abc import ABC, abstractmethod
+import glob
+import os
+
+
+def resolve_scanner_device(path: str) -> str | None:
+    """Pick a USB HID keyboard-wedge scanner.
+
+    `auto` (or a missing path) uses /dev/input/by-id/*-event-kbd, skipping
+    Consumer Control nodes that are not the gun.
+    """
+    if path and path not in ("auto", "") and os.path.exists(path):
+        return path
+    cands = [
+        p for p in sorted(glob.glob("/dev/input/by-id/*-event-kbd"))
+        if "Consumer_Control" not in os.path.basename(p)
+    ]
+    return cands[0] if cands else None
 
 
 class BarcodeReader(ABC):
@@ -27,7 +44,13 @@ class EvdevBarcodeReader(BarcodeReader):
     KEY_MAP = {
         2: "1", 3: "2", 4: "3", 5: "4", 6: "5",
         7: "6", 8: "7", 9: "8", 10: "9", 11: "0",
+        # Numeric keypad — some scanners send these instead of the top row.
+        71: "7", 72: "8", 73: "9",
+        75: "4", 76: "5", 77: "6",
+        79: "1", 80: "2", 81: "3",
+        82: "0",
     }
+    ENTER_CODES = (28, 96)  # KEY_ENTER, KEY_KPENTER
 
     def __init__(self, device_path: str):
         self.device_path = device_path
@@ -35,8 +58,12 @@ class EvdevBarcodeReader(BarcodeReader):
 
     def _connect(self):
         import evdev
-        self._device = evdev.InputDevice(self.device_path)
+        path = resolve_scanner_device(self.device_path)
+        if not path:
+            raise FileNotFoundError("no USB HID scanner under /dev/input/by-id/")
+        self._device = evdev.InputDevice(path)
         self._device.grab()
+        print(f"  Scanner: {path}")
 
     def wait_for_scan(self) -> str:
         import evdev
@@ -44,13 +71,18 @@ class EvdevBarcodeReader(BarcodeReader):
 
         while True:
             if not self._device:
-                self._connect()
+                try:
+                    self._connect()
+                except (FileNotFoundError, OSError) as e:
+                    print(f"  Waiting for USB scanner ({e})...")
+                    time.sleep(2)
+                    continue
 
             try:
                 barcode = ""
                 for event in self._device.read_loop():
                     if event.type == evdev.ecodes.EV_KEY and event.value == 1:
-                        if event.code == 28:  # Enter key = end of barcode
+                        if event.code in self.ENTER_CODES:
                             if barcode:
                                 return barcode
                             barcode = ""

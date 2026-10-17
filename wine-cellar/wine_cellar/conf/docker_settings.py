@@ -23,6 +23,16 @@ CSRF_TRUSTED_ORIGINS = os.environ.get("DJANGO_CSRF_TRUSTED_ORIGINS").split(" ")
 
 MEDIA_ROOT = "mediafiles"
 STATIC_ROOT = "staticfiles"
+# Manifest hashing dies on Tom Select's missing .map. Compression without
+# hashed names is enough for WhiteNoise on this stack.
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedStaticFilesStorage",
+    },
+}
 
 SITE_URL = os.environ.get("DJANGO_SITE_URL")
 
@@ -42,6 +52,16 @@ if EMAIL_HOST:
 
 CELERY_BROKER_URL = "redis://redis:6379"
 CELERY_RESULT_BACKEND = "redis://redis:6379"
+CELERY_RESULT_EXPIRES = 60 * 60
+
+# Shared across gunicorn workers. LocMemCache would 404 a poll that
+# landed on a different process than the POST that queued the lookup.
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": "redis://redis:6379/1",
+    }
+}
 
 if DEBUG:
     try:

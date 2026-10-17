@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY integrations/ integrations/
 COPY hardware/ hardware/
 COPY models/ models/
+COPY assets/ assets/
 COPY server.py .
 COPY scanner_service.py .
 

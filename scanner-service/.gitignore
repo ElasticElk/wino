@@ -7,3 +7,6 @@ __pycache__/
 __pycache__/
 *.pyc
 .pytest_cache/
+/data/scanner_config_cache.json
+/data/scanner_config_cache.tmp
+

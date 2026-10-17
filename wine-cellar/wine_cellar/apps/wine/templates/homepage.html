@@ -53,6 +53,55 @@
                     </a>
                 </li>
             </ul>
+            {% if gamification_enabled %}
+                <div class="challenges">
+                    <h2>{% translate "Cellar challenges" %}</h2>
+                    {% if month_tally.standings %}
+                        <h3>🏁 {{ month_tally.label }} race</h3>
+                        <p>
+                            {% if month_tally.days_left %}
+                                {{ month_tally.days_left }} days left.
+                            {% else %}
+                                {% translate "Last day of the month." %}
+                            {% endif %}
+                        </p>
+                        <ol>
+                            {% for row in month_tally.standings %}
+                                <li>{% if row.leading %}<strong>{% endif %}{{ row.name }} — {{ row.bottles }}{% if row.leading %}</strong>{% endif %}</li>
+                            {% endfor %}
+                        </ol>
+                    {% endif %}
+                    <h3>{% translate "Unlocked" %}</h3>
+                    {% if achievements %}
+                        <ul>
+                            {% for badge in achievements %}
+                                <li>{{ badge.emoji }} {{ badge.title }}</li>
+                            {% endfor %}
+                        </ul>
+                    {% else %}
+                        <p>{% translate "Add a bottle to start unlocking firsts." %}</p>
+                    {% endif %}
+                    {% if challenge_progress.tracks or challenge_progress.close %}
+                        <h3>{% translate "On the way" %}</h3>
+                        <ul>
+                            {% for row in challenge_progress.tracks %}
+                                <li>{{ row.emoji }} {{ row.title }} — {{ row.have }}/{{ row.next }}</li>
+                            {% endfor %}
+                            {% for row in challenge_progress.close %}
+                                <li>{{ row.emoji }} {{ row.title }} — {{ row.have }}/{{ row.next }}</li>
+                            {% endfor %}
+                        </ul>
+                    {% endif %}
+                    {% if challenge_progress.missing %}
+                        <h3>{% translate "Not yet" %}</h3>
+                        <ul>
+                            {% for row in challenge_progress.missing %}
+                                <li>{{ row.emoji }} {{ row.title }}</li>
+                            {% endfor %}
+                        </ul>
+                    {% endif %}
+                </div>
+            {% endif %}
         </div>
     </div>
 {% endblock content %}

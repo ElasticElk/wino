@@ -14,12 +14,12 @@ it can only be set through @BotFather with /setuserpic.
 import requests
 from django.core.management.base import BaseCommand, CommandError
 
-from wine_cellar.apps.scanner.models import ServiceConfig
+from wine_cellar.apps.scanner.models import ServiceConfig, TelegramUser
 
 DESCRIPTION = (
-    "I look after your wine cellar. Send me a photo of a bottle and I'll add it "
-    "with tasting notes and a price. Send me a photo of a wine list and I'll "
-    "tell you what to order."
+    "I look after your wine cellar. A friend can send you a link to join theirs, "
+    "or to start your own. Then send a photo of a bottle and I'll add it — "
+    "or a wine list and I'll tell you what to order."
 )
 
 SHORT_DESCRIPTION = (
@@ -28,15 +28,33 @@ SHORT_DESCRIPTION = (
 
 # Everyday commands only. /adduser, /removeuser, /pending and /flush still work
 # by typing; they'd just be noise in the menu for people who never use them.
+# Keep in sync with scanner-service/integrations/telegram_commands.py
 COMMANDS = [
     ("fridge", "What's in the cellar"),
+    ("recent", "Recent bottles"),
     ("search", "Find a wine by name"),
     ("stock", "Browse by type, country or grape"),
     ("status", "Inventory summary"),
     ("storages", "Where wine is kept"),
     ("household", "Your household and members"),
     ("switch", "Switch household"),
+    ("invite", "Invite someone to your cellar"),
     ("help", "Everything I can do"),
+]
+
+# Shown only in staff chats via BotCommandScopeChat. Telegram has no categories;
+# this is a second list appended for those chat IDs.
+ADMIN_COMMANDS = [
+    ("admin", "Staff tools"),
+    ("stats", "Every cellar at a glance"),
+    ("households", "List every household"),
+    ("members", "Members of a named household"),
+    ("whois", "Find someone by name or chat ID"),
+    ("newcellar", "Send a link to start a new cellar"),
+    ("newhousehold", "Create a household and its owner"),
+    ("adduser", "Add a member to a named household"),
+    ("removeuser", "Remove a member from a named household"),
+    ("welcome", "Resend the welcome to a chat ID"),
 ]
 
 
@@ -55,13 +73,33 @@ class Command(BaseCommand):
         except ServiceConfig.DoesNotExist:
             raise CommandError("ServiceConfig 'bot_token' is not set")
 
+        public = [{"command": c, "description": d} for c, d in COMMANDS]
+        staff = [
+            {"command": c, "description": d}
+            for c, d in COMMANDS + ADMIN_COMMANDS
+        ]
+        staff_chat_ids = list(
+            TelegramUser.objects.filter(
+                is_active=True, user__is_staff=True,
+            ).values_list("chat_id", flat=True)
+        )
         payloads = [
             ("setMyDescription", {"description": DESCRIPTION}),
             ("setMyShortDescription", {"short_description": SHORT_DESCRIPTION}),
-            ("setMyCommands", {
-                "commands": [{"command": c, "description": d} for c, d in COMMANDS],
-            }),
+            ("setMyCommands", {"commands": public}),
         ]
+        for chat_id in staff_chat_ids:
+            try:
+                scoped_id = int(chat_id)
+            except (TypeError, ValueError):
+                continue
+            payloads.append((
+                "setMyCommands",
+                {
+                    "commands": staff,
+                    "scope": {"type": "chat", "chat_id": scoped_id},
+                },
+            ))
 
         if options["dry_run"]:
             for method, payload in payloads:
@@ -74,4 +112,6 @@ class Command(BaseCommand):
             response = requests.post(f"{base}/{method}", json=payload, timeout=15)
             if not response.ok:
                 raise CommandError(f"{method} failed: {response.text[:200]}")
-            self.stdout.write(self.style.SUCCESS(f"{method} OK"))
+            scope = payload.get("scope") or {}
+            extra = f" chat {scope.get('chat_id')}" if scope else ""
+            self.stdout.write(self.style.SUCCESS(f"{method}{extra} OK"))

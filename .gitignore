@@ -20,6 +20,7 @@ wine-cellar/test_db.sqlite3
 wine-cellar/.coverage
 wine-cellar/node_modules/
 wine-cellar/static/
+wine-cellar/staticfiles/
 wine-cellar/build/
 wine-cellar/media/
 wine-cellar/*.mo

@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import re
+from datetime import datetime
 from io import BytesIO
 
 import requests
@@ -11,6 +12,38 @@ import requests
 logger = logging.getLogger(__name__)
 
 GROK_MODEL = "grok-4.3"
+
+# Italian and Australian labels are often set in capitals. A cellar entry is not.
+NAME_STYLE = (
+    "Write name and producer the way a merchant would, in ordinary title case. "
+    "Never copy the label's ALL CAPS. The name is the cuvée "
+    "(Bin 311 Chardonnay, Contino Reserva), not the grape or appellation alone "
+    "unless that is genuinely all that is printed. Producer is a proper name "
+    "(Penfolds, Terre da Vino), not PENFOLDS or TERREDAVINO."
+)
+
+
+def normalise_label_case(text: str) -> str:
+    """If a field is mostly capitals, title-case it. Leave mixed case alone."""
+    if not text or not isinstance(text, str):
+        return text
+    s = text.strip()
+    letters = [c for c in s if c.isalpha()]
+    if len(letters) < 3:
+        return s
+    if sum(c.isupper() for c in letters) / len(letters) < 0.8:
+        return s
+    return s.title()
+
+
+def polish_extracted_fields(data: dict | None) -> dict | None:
+    if not data:
+        return data
+    for field in ("name", "producer"):
+        value = data.get(field)
+        if isinstance(value, str):
+            data[field] = normalise_label_case(value)
+    return data
 
 # pyzbar is optional — used for fast local barcode reading before falling back to Grok
 try:
@@ -90,8 +123,8 @@ def build_label_prompt(target_currency: str = "USD", target_country: str = "") -
 Return a JSON object with these fields (use null for anything you can't determine):
 
 {{
-  "name": "The wine name as it appears on the label (required)",
-  "producer": "Winery / producer / domaine name",
+  "name": "Cuvée / wine name in title case (required)",
+  "producer": "Winery / producer / domaine in title case",
   "vintage": 2020,
   "wine_type": "RE/WH/RO/SP/DE/FO/OR",
   "category": "DR/SD/MS/SW",
@@ -115,17 +148,21 @@ Return a JSON object with these fields (use null for anything you can't determin
   "market_price": null,
   "market_price_currency": "{target_currency}",
   "market_price_confidence": "low",
-  "market_price_reasoning": null
+  "market_price_reasoning": null,
+  "list_price": null
 }}
 
 Wine type codes: RE=Red, WH=White, RO=Rose, SP=Sparkling, DE=Dessert, FO=Fortified, OR=Orange.
 Category codes: DR=Dry, SD=Semi-Dry, MS=Medium Sweet, SW=Sweet. Most wines are DR unless stated otherwise.
+
+For list_price: ONLY a number printed on a shelf sticker, neck tag or price gun label actually visible in the photo. If you cannot see a printed price, this MUST be null. Do not copy market_price into list_price. Do not invent a shop price.
 
 For the description field: even if tasting notes are not printed on the label, use your wine knowledge to write useful tasting notes based on the grape variety, region, and wine style.
 For food_pairings: suggest 2-4 food pairings based on your wine knowledge.
 For attributes: list notable wine attributes visible on the label or inferable from the wine style (e.g. organic, biodynamic, old vine, reserve, barrel-aged, single vineyard, natural, unfiltered).
 For drink_by: estimate based on wine type, vintage, grape, and region. Simple whites/roses: 2-3 years. Quality reds: 5-15 years. Fine wines: 10-30 years.
 For size: bottle size in litres (standard=0.75, magnum=1.5, half=0.375).
+{NAME_STYLE}
 {REFERENCE_INSTRUCTIONS.format(currency=target_currency, location=location)}
 
 Return ONLY the JSON object, no markdown, no explanation."""
@@ -139,11 +176,13 @@ def build_triage_prompt(target_currency: str = "USD", target_country: str = "") 
    {{"type": "barcode", "barcode": "the numeric EAN/UPC digits"}}
 
 2. If it shows a WINE LABEL or wine bottle, return a full analysis:
-   {{"type": "label", "name": "Wine name", "producer": "Winery name", "vintage": 2020, "wine_type": "RE/WH/RO/SP/DE/FO/OR", "category": "DR/SD/MS/SW", "country": "Two-letter ISO code", "region": "Wine region", "appellation": "Official appellation", "grape_variety": "Primary grape", "vineyard": "Estate/vineyard name", "abv": 13.5, "size": 0.75, "drink_by": "YYYY-MM-DD or null", "food_pairings": ["Food 1", "Food 2"], "attributes": ["Attribute 1"], "description": "Tasting notes. 2-3 sentences.", "critic_score": null, "critic_score_confidence": "low", "critic_score_reasoning": null, "vivino_rating": null, "vivino_rating_confidence": "low", "vivino_rating_reasoning": null, "market_price": null, "market_price_currency": "{target_currency}", "market_price_confidence": "low", "market_price_reasoning": null}}
+   {{"type": "label", "name": "Cuvée in title case", "producer": "Winery in title case", "vintage": 2020, "wine_type": "RE/WH/RO/SP/DE/FO/OR", "category": "DR/SD/MS/SW", "country": "Two-letter ISO code", "region": "Wine region", "appellation": "Official appellation", "grape_variety": "Primary grape", "vineyard": "Estate/vineyard name", "abv": 13.5, "size": 0.75, "drink_by": "YYYY-MM-DD or null", "food_pairings": ["Food 1", "Food 2"], "attributes": ["Attribute 1"], "description": "Tasting notes. 2-3 sentences.", "critic_score": null, "critic_score_confidence": "low", "critic_score_reasoning": null, "vivino_rating": null, "vivino_rating_confidence": "low", "vivino_rating_reasoning": null, "market_price": null, "market_price_currency": "{target_currency}", "market_price_confidence": "low", "market_price_reasoning": null, "list_price": null}}
+   {NAME_STYLE}
 
    Wine type codes: RE=Red, WH=White, RO=Rose, SP=Sparkling, DE=Dessert, FO=Fortified, OR=Orange.
    Category: DR=Dry, SD=Semi-Dry, MS=Medium Sweet, SW=Sweet.
    For description: use wine knowledge for tasting notes. For food_pairings: 2-4 suggestions. For attributes: notable traits (organic, old vine, reserve, barrel-aged, etc). For drink_by: estimate peak drinking date. For size: litres (0.75 standard).
+   For list_price: ONLY a number printed on a shelf sticker or price tag visible in the photo. Null if you cannot see one. Never copy market_price into list_price.
    {REFERENCE_INSTRUCTIONS.format(currency=target_currency, location=location)}
    Use null for fields you can't determine.
 
@@ -177,8 +216,11 @@ def build_winelist_prompt(cellar_summary: str, target_currency: str = "USD",
     cellar = cellar_summary or "(their cellar is empty — no preferences to go on yet)"
     return f"""You are a sommelier looking at a photo of wines for a friend.
 
-Read every wine you can make out. For each, give a ONE LINE tasting note
-(aromas and style, no more than about 12 words).
+Read every wine you can make out. For each:
+  note   — one line, about 15–20 words (aromas and style). If there are
+           many wines, keep this tighter rather than skipping wines.
+  detail — two short sentences: grape/region, and how it drinks / who it's
+           for. Omit detail on a very long list if you must; note is required.
 
 First classify the SCENE — this is required:
   "menu"    — a restaurant wine list, printed menu, or screenshot of a list
@@ -195,15 +237,19 @@ Recommend ONE wine from the photo they would most enjoy, and say why in one
 sentence that refers to their taste. Then name up to three others worth a look.
 Flag any wine they already own.
 
-Prices in {target_currency}{location}:
+Prices:
   list_price   — ONLY a number actually printed in the photo next to that
-                 wine (menu price or shelf tag). If you cannot see a price
-                 in the photo, this MUST be null. Do not estimate a
-                 restaurant markup. Do not invent a list price for unlabeled
-                 bottles. Scene "bottles" always has list_price null.
-  retail_price — your ballpark typical shop price, or null if you cannot
-                 estimate. This may be estimated from knowledge; list_price
-                 may not.
+                 wine (menu price or shelf tag), exactly as printed — do not
+                 convert it. If you cannot see a price in the photo, this
+                 MUST be null. Do not estimate a restaurant markup. Do not
+                 invent a list price for unlabeled bottles. Scene "bottles"
+                 always has list_price null.
+  currency     — ISO code of the prices printed in the photo (a Dutch menu
+                 in euros is "EUR" even if the user's currency differs). If
+                 no prices are visible, use "{target_currency}".
+  retail_price — your ballpark typical shop price in {target_currency}{location},
+                 or null if you cannot estimate. This may be estimated from
+                 knowledge; list_price may not.
 
 Return ONLY this JSON, no markdown:
 {{
@@ -215,7 +261,8 @@ Return ONLY this JSON, no markdown:
       "producer": "Producer if shown",
       "vintage": 2022,
       "wine_type": "RE/WH/RO/SP/DE/FO/OR",
-      "note": "One line, twelve words or fewer",
+      "note": "One line, 15–20 words",
+      "detail": "Two short sentences.",
       "list_price": null,
       "retail_price": 16,
       "already_owned": false
@@ -223,7 +270,8 @@ Return ONLY this JSON, no markdown:
   ],
   "recommendation": {{"name": "Exact name from the photo", "why": "One sentence referring to their taste"}},
   "alternates": ["Exact name", "Exact name"],
-  "currency": "{target_currency}"
+  "currency": "{target_currency}",
+  "retail_currency": "{target_currency}"
 }}
 
 If the photo is too blurred or cropped to read any wine, return
@@ -254,6 +302,83 @@ Return ONLY this JSON, no markdown:
 }}
 
 {REFERENCE_INSTRUCTIONS.format(currency=target_currency, location=location)}"""
+
+
+def build_identify_hint_prompt(hint: str, wrong_name: str = "",
+                               target_currency: str = "USD",
+                               target_country: str = "",
+                               context: dict | None = None) -> str:
+    """Prompt: the previous read was wrong; look up the wine the user named."""
+    location = _location_phrase(target_country)
+    context = context or {}
+    bits = []
+    for key, label in (
+        ("barcode", "barcode"),
+        ("producer", "producer"),
+        ("vintage", "vintage"),
+        ("country", "country"),
+        ("region", "region"),
+        ("appellation", "appellation"),
+        ("grape_variety", "grape"),
+        ("wine_type", "type"),
+    ):
+        value = context.get(key)
+        if value not in (None, ""):
+            bits.append(f"{label} {value}")
+    prior = "; ".join(bits)
+    prior_line = (
+        f"What we (wrongly) had: {prior}.\n" if prior else ""
+    )
+    return f"""The previous identification was WRONG. Do not reuse it unless the user
+confirmed that field.
+
+Wrong reading: {wrong_name or '(unknown)'}
+{prior_line}The user says the wine is: {hint}
+
+Look this bottle up — producer, exact cuvée name, vintage. Prefer live web
+search (Wine-Searcher, producer site, merchant listings). If the user named a
+vintage, that vintage is required.
+
+Return a FULL wine record as JSON (label-card shape), plus a short note:
+{{"type": "label", "name": "Wine name", "producer": "Winery", "vintage": 2022,
+  "wine_type": "RE/WH/RO/SP/DE/FO/OR", "category": "DR/SD/MS/SW",
+  "country": "Two-letter ISO", "region": "Region", "appellation": "Appellation",
+  "grape_variety": "Primary grape", "vineyard": "Estate or null",
+  "abv": 13.5, "size": 0.75, "description": "Tasting notes, 2-3 sentences.",
+  "food_pairings": ["Food 1", "Food 2"], "attributes": ["Attribute"],
+  "note": "One line, 15-20 words", "detail": "Two short sentences.",
+  "list_price": null, "retail_price": 16,
+  "market_price": null, "market_price_currency": "{target_currency}"}}
+
+Wine types: RE=Red WH=White RO=Rose SP=Sparkling DE=Dessert FO=Fortified OR=Orange.
+Prices in {target_currency}{location}. list_price must be null.
+Return ONLY the JSON object."""
+
+
+CURRENCY_SYMBOL_CODES = {"\u00a3": "GBP", "$": "USD", "\u20ac": "EUR", "R": "ZAR",
+                         "A$": "AUD", "HK$": "HKD"}
+CURRENCY_WORD_CODES = {"EURO": "EUR", "EUROS": "EUR", "POUND": "GBP",
+                       "POUNDS": "GBP", "RAND": "ZAR", "DOLLAR": "USD",
+                       "DOLLARS": "USD"}
+
+
+def currency_code(value) -> str | None:
+    """ISO code for a currency the model wrote as a code, symbol or word.
+
+    Truncating to three characters turned "\u00a3" into "\u00a3" and "pounds"
+    into "POU" — neither of which the cellar can convert.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    if raw in CURRENCY_SYMBOL_CODES:
+        return CURRENCY_SYMBOL_CODES[raw]
+    word = raw.upper()
+    if word in CURRENCY_WORD_CODES:
+        return CURRENCY_WORD_CODES[word]
+    if len(word) == 3 and word.isalpha():
+        return word
+    return None
 
 
 class GrokVisionAPI:
@@ -315,6 +440,7 @@ class GrokVisionAPI:
                 content = content.strip()
 
             data = json.loads(content)
+            data = polish_extracted_fields(data)
             logger.info(f"Grok extracted: {data.get('name', 'Unknown')}")
             return data
 
@@ -392,6 +518,8 @@ class GrokVisionAPI:
                 logger.warning(f"Grok barcode result not valid: {data.get('barcode')!r}")
                 return {"type": "other"}
 
+            if photo_type == "label":
+                data = polish_extracted_fields(data)
             return data
 
         except requests.RequestException as e:
@@ -450,6 +578,68 @@ class GrokVisionAPI:
             return None
         except (json.JSONDecodeError, KeyError, IndexError) as e:
             logger.error(f"Failed to parse Grok wine-list response: {e}")
+            return None
+
+    def identify_wine_from_hint(self, hint: str, wrong_name: str = "",
+                                target_currency: str = "USD",
+                                target_country: str = "",
+                                context: dict | None = None) -> dict | None:
+        """Look up one wine from a name the user typed after a misread."""
+        prompt = build_identify_hint_prompt(
+            hint, wrong_name, target_currency, target_country, context,
+        )
+        payload = {
+            "model": GROK_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 1024,
+            "temperature": 0.0,
+            "tools": [{"type": "web_search"}],
+        }
+        try:
+            resp = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=90,
+            )
+            resp.raise_for_status()
+            message = resp.json()["choices"][0]["message"]
+            content = (message.get("content") or "").strip()
+            if not content:
+                raise ValueError("empty identify response")
+            if content.startswith("```"):
+                content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            data = json.loads(content)
+            data = polish_extracted_fields(data)
+            logger.info(f"Grok re-identified from hint: {data.get('name', '?')}")
+            return data
+        except requests.RequestException as e:
+            logger.error(f"Grok identify-from-hint failed: {e}")
+            if payload.get("tools"):
+                payload.pop("tools", None)
+                try:
+                    resp = requests.post(
+                        f"{self.base_url}/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {self.api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=payload,
+                        timeout=90,
+                    )
+                    resp.raise_for_status()
+                    content = (resp.json()["choices"][0]["message"].get("content") or "").strip()
+                    if content.startswith("```"):
+                        content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+                    return polish_extracted_fields(json.loads(content))
+                except Exception as retry_err:
+                    logger.error(f"Grok identify-from-hint retry failed: {retry_err}")
+            return None
+        except (json.JSONDecodeError, KeyError, IndexError) as e:
+            logger.error(f"Failed to parse Grok identify-from-hint response: {e}")
             return None
 
     def fetch_references(
@@ -550,8 +740,8 @@ def merge_wine_data(off_data: dict | None, grok_data: dict | None) -> dict:
 
     # Grok is generally more accurate for wine-specific fields
     merged = {
-        "name": pick("name", grok, off) or "Unknown Wine",
-        "producer": pick("producer", grok, off) or "",
+        "name": normalise_label_case(pick("name", grok, off) or "Unknown Wine"),
+        "producer": normalise_label_case(pick("producer", grok, off) or ""),
         "wine_type": pick("wine_type", grok) if pick("wine_type", grok) in VALID_WINE_TYPES else "RE",
         "country": (pick("country", grok, off) or "CH")[:2],
         "region": pick("region", grok, off) or "",
@@ -614,12 +804,19 @@ def merge_wine_data(off_data: dict | None, grok_data: dict | None) -> dict:
     ):
         try:
             merged["market_price"] = float(grok["market_price"])
-            currency_field = grok.get("market_price_currency")
-            if isinstance(currency_field, str):
-                merged["market_price_currency"] = currency_field.upper()[:3]
+            code = currency_code(grok.get("market_price_currency"))
+            if code:
+                merged["market_price_currency"] = code
             persisted_confidences.append(grok.get("market_price_confidence", "").lower())
         except (ValueError, TypeError):
             pass
+
+    try:
+        tag = grok.get("list_price")
+        if tag is not None and not isinstance(tag, bool):
+            merged["list_price"] = float(tag)
+    except (ValueError, TypeError):
+        pass
 
     if persisted_confidences:
         merged["reference_confidence"] = max(persisted_confidences, key=lambda c: rank.get(c, 0))
@@ -632,10 +829,15 @@ def merge_wine_data(off_data: dict | None, grok_data: dict | None) -> dict:
         except (ValueError, TypeError):
             pass
 
-    # Drink-by date
+    # Drink-by date — only ISO, or WineCreateSerializer 400s on add-to-cellar
     drink_by = pick("drink_by", grok)
     if drink_by:
-        merged["drink_by"] = drink_by
+        raw = str(drink_by).strip()
+        try:
+            datetime.strptime(raw[:10], "%Y-%m-%d")
+            merged["drink_by"] = raw[:10]
+        except ValueError:
+            pass
 
     # List fields
     food_pairings = pick("food_pairings", grok)

@@ -18,7 +18,8 @@ from wine_cellar.apps.storage.models import StorageItem
 from wine_cellar.apps.user.views import get_user_settings
 from wine_cellar.apps.wine.filters import WineFilter
 from wine_cellar.apps.wine.forms import WineEditForm, WineForm, image_fields_map
-from wine_cellar.apps.wine.models import Wine, WineImage
+from wine_cellar.apps.wine.achievements import month_tally, progress
+from wine_cellar.apps.wine.models import CellarAchievement, Wine, WineImage
 
 
 class HomePageView(HouseholdScopedMixin, TemplateView):
@@ -67,8 +68,20 @@ class HomePageView(HouseholdScopedMixin, TemplateView):
                 "oldest": oldest,
                 "youngest": youngest,
                 "total_value": total_value,
+                "gamification_enabled": bool(
+                    getattr(self.household, "gamification_enabled", False)
+                ),
+                "achievements": [],
+                "month_tally": {"standings": []},
+                "challenge_progress": {"tracks": [], "missing": [], "close": []},
             }
         )
+        if context["gamification_enabled"] and self.household:
+            context["achievements"] = list(
+                CellarAchievement.objects.filter(household=self.household)[:8]
+            )
+            context["month_tally"] = month_tally(self.household)
+            context["challenge_progress"] = progress(self.household)
         return context
 
 

@@ -17,9 +17,19 @@ urlpatterns = [
     path("stock/remove/", views.StockRemoveView.as_view(), name="api-stock-remove"),
     path("stock/set/", views.StockSetView.as_view(), name="api-stock-set"),
     path(
+        "stock/history/",
+        views.StockHistoryView.as_view(),
+        name="api-stock-history",
+    ),
+    path(
         "stock/<int:pk>/move/",
         views.StockMoveView.as_view(),
         name="api-stock-move",
+    ),
+    path(
+        "stock/<int:pk>/vote/",
+        views.StockVoteView.as_view(),
+        name="api-stock-vote",
     ),
     path(
         "storages/",
@@ -52,9 +62,19 @@ urlpatterns = [
         name="api-wine-refresh-references",
     ),
     path(
+        "wines/<int:pk>/apply-references/",
+        views.WineApplyReferencesView.as_view(),
+        name="api-wine-apply-references",
+    ),
+    path(
         "images/<int:pk>/file/",
         views.WineImageFileView.as_view(),
         name="api-image-file",
+    ),
+    path(
+        "references/lookup/",
+        views.ReferenceLookupView.as_view(),
+        name="api-reference-lookup",
     ),
     path("wines/search/", views.WineSearchView.as_view(), name="api-wine-search"),
     path("wines/all/", views.WineListAllView.as_view(), name="api-wine-list-all"),

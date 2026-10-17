@@ -1,0 +1,18 @@
+[Unit]
+Description=Wine fridge barcode scanner client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+SupplementaryGroups=input gpio
+WorkingDirectory=/opt/wine-scanner
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/wine-scanner/venv/bin/python client/scanner_client.py --config client/config.yaml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -201,6 +201,7 @@ class Wine(UserContentModel):
         null=True,
     )
     drink_by = models.DateField(blank=True, null=True)
+    drink_by_reminded_on = models.DateField(blank=True, null=True)
     comment = models.CharField(max_length=500, blank=True)
     rating = models.PositiveIntegerField(
         null=True,
@@ -440,6 +441,12 @@ class Wine(UserContentModel):
         return pycountry.countries.get(alpha_2=self.country).flag
 
     class Meta:
+        indexes = [
+            models.Index(
+                fields=["household", "drink_by"],
+                name="wine_household_drink_by_idx",
+            ),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=[
@@ -464,3 +471,89 @@ class WineImage(models.Model):
     image_type = models.CharField(
         max_length=3, choices=ImageType, default=ImageType.FRONT
     )
+
+
+class CellarAchievement(models.Model):
+    """A badge unlocked for a household. No-ops unless gamification is on."""
+
+    household = models.ForeignKey(
+        "scanner.Household",
+        on_delete=models.CASCADE,
+        related_name="achievements",
+    )
+    user = models.ForeignKey(
+        get_user_model(), on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    slug = models.CharField(max_length=64)
+    subject = models.CharField(max_length=120, blank=True, default="")
+    emoji = models.CharField(max_length=8, default="🍷")
+    title = models.CharField(max_length=120)
+    detail = models.CharField(max_length=240, blank=True)
+    unlocked_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["household", "slug", "subject"],
+                name="unique_achievement_per_household",
+            ),
+        ]
+        ordering = ["-unlocked_at"]
+
+    def __str__(self):
+        return f"{self.household}: {self.title}"
+
+
+class HouseholdTasteSnapshot(models.Model):
+    """Derived taste of a cellar — counts, not ratings.
+
+    Rebuilt from wines in stock plus recent look/winelist intents.
+    One row per household; not a quiz and not a Vivino scoreboard.
+    """
+
+    household = models.OneToOneField(
+        "scanner.Household",
+        on_delete=models.CASCADE,
+        related_name="taste_snapshot",
+    )
+    counts = models.JSONField(default=dict, blank=True)
+    summary = models.TextField(blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Taste: {self.household}"
+
+
+class TasteIntent(models.Model):
+    """A wine they looked at or a list they photographed, without adding it."""
+
+    LOOK = "look"
+    WINELIST = "winelist"
+    KIND_CHOICES = [
+        (LOOK, "Just looking"),
+        (WINELIST, "Wine list"),
+    ]
+
+    household = models.ForeignKey(
+        "scanner.Household",
+        on_delete=models.CASCADE,
+        related_name="taste_intents",
+    )
+    user = models.ForeignKey(
+        get_user_model(), on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    kind = models.CharField(max_length=16, choices=KIND_CHOICES)
+    payload = models.JSONField(default=dict, blank=True)
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created"]
+        indexes = [
+            models.Index(
+                fields=["household", "kind", "-created"],
+                name="wine_tastei_househo_kind_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.household} {self.kind} {self.created:%Y-%m-%d}"

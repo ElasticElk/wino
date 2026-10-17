@@ -38,6 +38,12 @@ def do_stock_change(wine_id: int, mode: ScanMode, api: WineCellarAPI, gpio,
     """
     if mode == ScanMode.IN:
         result = api.add_stock(wine_id)
+        if result.get("error"):
+            print(f"  ERROR: {result['error']}")
+            gpio.beep_unknown()
+            if telegram:
+                telegram.send_error(result["error"])
+            return result
         print(f"  Added: {result['wine_name']}")
         print(f"  Now in stock: {result['stock_count']}")
         gpio.beep_in()
@@ -75,6 +81,11 @@ def handle_known_wine(wine: dict, barcode: str, mode: ScanMode, api: WineCellarA
             barcode=barcode,
             action=mode.value,
             stock_count=result["stock_count"],
+            storage=result.get("storage") or "",
+            item_id=result.get("item_id"),
+            drawers=result.get("drawers") or 0,
+            row=result.get("row"),
+            storage_id=result.get("storage_id"),
         )
 
 
@@ -166,6 +177,10 @@ def handle_unknown(barcode: str, off: OpenFoodFactsAPI, api: WineCellarAPI, gpio
             result = api.create_wine(wine_data)
             print(f"  Wine created: {result['name']} (ID: {result['id']})")
             stock = api.add_stock(result["id"])
+            if stock.get("error"):
+                print(f"  ERROR: {stock['error']}")
+                gpio.beep_unknown()
+                return
             print(f"  Added to stock. Count: {stock['stock_count']}")
             gpio.beep_in()
             with pending_lock:
@@ -196,6 +211,10 @@ def handle_unknown(barcode: str, off: OpenFoodFactsAPI, api: WineCellarAPI, gpio
     result = api.create_wine(wine_data)
     print(f"  Wine created: {result['name']} (ID: {result['id']})")
     stock = api.add_stock(result["id"])
+    if stock.get("error"):
+        print(f"  ERROR: {stock['error']}")
+        gpio.beep_unknown()
+        return
     print(f"  Added to stock. Count: {stock['stock_count']}")
     gpio.beep_in()
     pending_store.pop(barcode, None)
@@ -263,6 +282,7 @@ def main():
             wine_cellar_api=api,
             pending_store=pending_store,
             pending_lock=pending_lock,
+            admin_chat_ids=chat_ids,
         )
         bot_handler.set_local_barcode_reader(read_barcode_local)
         if grok:

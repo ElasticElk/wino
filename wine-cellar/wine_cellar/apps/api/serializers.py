@@ -274,6 +274,15 @@ class StockAddSerializer(serializers.Serializer):
     price = serializers.DecimalField(
         max_digits=6, decimal_places=2, required=False, allow_null=True
     )
+    drank = serializers.BooleanField(required=False, default=False)
+    confirm_duplicate = serializers.BooleanField(required=False, default=False)
+    # Opt-in. Only the label-photo Add/Drank card sends this; a case of six,
+    # fridge +, undo, and the kitchen scanner must not 409 a real bottle.
+    check_duplicate = serializers.BooleanField(required=False, default=False)
+
+
+class StockVoteSerializer(serializers.Serializer):
+    vote = serializers.ChoiceField(choices=["down", "meh", "up"])
 
 
 class StockRemoveSerializer(serializers.Serializer):

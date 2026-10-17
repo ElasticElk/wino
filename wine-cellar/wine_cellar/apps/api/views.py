@@ -1,7 +1,10 @@
+from datetime import timedelta
+
 from django.contrib.auth.decorators import login_not_required
-from django.db.models import Count, Q
+from django.db.models import Count, Exists, OuterRef, Q
 from django.http import FileResponse
 from django.urls import reverse
+from django.utils import timezone
 from django.utils.decorators import method_decorator
 from rest_framework import status
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
@@ -11,16 +14,36 @@ from rest_framework.views import APIView
 
 from rest_framework.parsers import MultiPartParser
 
+from wine_cellar.apps.api.task_access import remember_task, task_visible
 from wine_cellar.apps.scanner.households import get_user_household
-from wine_cellar.apps.scanner.models import Household
+from wine_cellar.apps.scanner.models import Household, TelegramUser
 from wine_cellar.apps.storage.models import Storage, StorageItem
-from wine_cellar.apps.wine.models import ImageType, Wine, WineImage
+from wine_cellar.apps.wine.achievements import (
+    award_for_add,
+    backfill,
+    month_tally,
+    serialize_achievement,
+)
+from wine_cellar.apps.wine.models import CellarAchievement, ImageType, Wine, WineImage
+from wine_cellar.apps.wine.taste import rebuild_snapshot
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def _refresh_taste(household):
+    try:
+        rebuild_snapshot(household)
+    except Exception:
+        logger.exception("taste snapshot rebuild failed")
 
 from .serializers import (
     StockAddSerializer,
     StockMoveSerializer,
     StockRemoveSerializer,
     StockSetSerializer,
+    StockVoteSerializer,
     WineCreateSerializer,
     WineSerializer,
 )
@@ -91,6 +114,16 @@ class ScannerAPIView(APIView):
             )
         return super().handle_exception(exc)
 
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        user = getattr(request, "user", None)
+        if user is None or not user.is_authenticated:
+            return
+        cutoff = timezone.now() - timedelta(minutes=5)
+        TelegramUser.objects.filter(user=user).filter(
+            Q(last_seen_at__isnull=True) | Q(last_seen_at__lt=cutoff)
+        ).update(last_seen_at=timezone.now())
+
 
 class WineByBarcodeView(ScannerAPIView):
     def get(self, request, ean):
@@ -128,22 +161,51 @@ class StockAddView(ScannerAPIView):
                     user=request.user, location="Fridge", rows=0, columns=0,
                 )
 
+        drank = serializer.validated_data.get("drank", False)
+        confirm_duplicate = serializer.validated_data.get("confirm_duplicate", False)
+        check_duplicate = serializer.validated_data.get("check_duplicate", False)
+        if check_duplicate and not confirm_duplicate:
+            cutoff = timezone.now() - timedelta(minutes=60)
+            recent = (
+                StorageItem.objects.filter(
+                    wine=wine, wine__household=household, deleted=drank,
+                    created__gte=cutoff,
+                )
+                .order_by("-created")
+                .first()
+            )
+            if recent is not None:
+                return Response(
+                    {
+                        "error": "recent_duplicate",
+                        "wine_id": wine.id,
+                        "item_id": recent.id,
+                        "wine_name": f"{wine.name} {wine.vintage or ''}".strip(),
+                        "stock_count": wine.total_stock,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
         item = StorageItem.objects.create(
-            storage=storage, wine=wine, user=request.user, price=price, row=row
+            storage=storage, wine=wine, user=request.user, price=price, row=row,
+            deleted=drank,
         )
+        _refresh_taste(household)
 
-        return Response(
-            {
-                "item_id": item.id,
-                "wine_id": wine.id,
-                "wine_name": f"{wine.name} {wine.vintage or ''}".strip(),
-                "stock_count": wine.total_stock,
-                "storage": storage.name,
-                "row": row,
-                "action": "added",
-            },
-            status=status.HTTP_201_CREATED,
-        )
+        payload = {
+            "item_id": item.id,
+            "wine_id": wine.id,
+            "wine_name": f"{wine.name} {wine.vintage or ''}".strip(),
+            "stock_count": wine.total_stock,
+            "storage": storage.name,
+            "storage_id": storage.id,
+            "row": row,
+            "drawers": storage.rows,
+            "action": "drank" if drank else "added",
+            "achievements": award_for_add(
+                wine, request.user, storage=storage, drank=drank,
+            ),
+        }
+        return Response(payload, status=status.HTTP_201_CREATED)
 
 
 class StockRemoveView(ScannerAPIView):
@@ -165,9 +227,16 @@ class StockRemoveView(ScannerAPIView):
         items = StorageItem.objects.filter(
             wine=wine, wine__household=household, deleted=False
         )
+        item = None
         if storage_name:
-            items = items.filter(storage__name=storage_name)
-        item = items.order_by("-created").first()
+            item = items.filter(storage__name=storage_name).order_by("-created").first()
+            if item is None:
+                return Response(
+                    {"error": f"No stock of this wine in {storage_name}"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+        else:
+            item = items.order_by("-created").first()
 
         if not item:
             return Response(
@@ -175,17 +244,77 @@ class StockRemoveView(ScannerAPIView):
                 status=status.HTTP_409_CONFLICT,
             )
 
+        taken_from = item.storage
+        taken_row = item.row
+        item_id = item.id
         item.deleted = True
         item.save()
+        _refresh_taste(household)
 
         return Response(
             {
+                "item_id": item_id,
                 "wine_id": wine.id,
                 "wine_name": f"{wine.name} {wine.vintage or ''}".strip(),
                 "stock_count": wine.total_stock,
+                "storage": taken_from.name,
+                "storage_id": taken_from.id,
+                "row": taken_row,
+                "drawers": taken_from.rows,
                 "action": "removed",
             }
         )
+
+
+class StockHistoryView(ScannerAPIView):
+    """Bottles tagged drank or removed, newest first.
+
+    `modified` is when the bottle left the cellar (soft-delete) or when a
+    drank-without-stock row was created. Page with ?limit=5&offset=0.
+    """
+
+    def get(self, request):
+        household = self.get_household(request)
+        try:
+            limit = int(request.query_params.get("limit", 5))
+        except (TypeError, ValueError):
+            limit = 5
+        try:
+            offset = int(request.query_params.get("offset", 0))
+        except (TypeError, ValueError):
+            offset = 0
+        limit = max(1, min(limit, 20))
+        offset = max(0, offset)
+
+        images = WineImage.objects.filter(wine_id=OuterRef("wine_id"))
+        qs = (
+            StorageItem.objects.filter(wine__household=household, deleted=True)
+            .select_related("wine", "storage")
+            .annotate(has_image=Exists(images))
+            .order_by("-modified", "-id")
+        )
+        total = qs.count()
+        items = []
+        for item in qs[offset:offset + limit]:
+            wine = item.wine
+            items.append({
+                "item_id": item.id,
+                "wine_id": wine.id,
+                "wine_name": f"{wine.name} {wine.vintage or ''}".strip(),
+                "producer": wine.producer or "",
+                "comment": wine.comment or "",
+                "wine_type": wine.wine_type,
+                "has_image": bool(item.has_image),
+                "storage": item.storage.name if item.storage_id else "",
+                "vote": item.vote or "",
+                "drank_at": item.modified,
+            })
+        return Response({
+            "count": total,
+            "offset": offset,
+            "limit": limit,
+            "items": items,
+        })
 
 
 class StockSetView(ScannerAPIView):
@@ -222,7 +351,6 @@ class StockSetView(ScannerAPIView):
                     storage=storage, wine=wine, user=request.user
                 )
         elif diff < 0:
-            # Need to remove items
             items = StorageItem.objects.filter(
                 wine=wine, wine__household=household, deleted=False
             )
@@ -233,12 +361,16 @@ class StockSetView(ScannerAPIView):
                 item.deleted = True
                 item.save()
 
+        if diff:
+            _refresh_taste(household)
+
         return Response(
             {
                 "wine_id": wine.id,
                 "wine_name": f"{wine.name} {wine.vintage or ''}".strip(),
                 "stock_count": wine.total_stock,
                 "action": "set",
+                "achievements": award_for_add(wine, request.user, storage=storage) if diff > 0 else [],
             }
         )
 
@@ -318,6 +450,10 @@ class WineInStockView(ScannerAPIView):
                     "country": wine.country or "",
                     "grape": grape,
                     "stock_count": 0,
+                    "market_price": (
+                        None if wine.market_price is None else float(wine.market_price)
+                    ),
+                    "market_price_currency": wine.market_price_currency,
                     "items": [],
                 }
             wine_map[wine.id]["stock_count"] += 1
@@ -502,7 +638,10 @@ class WineRefreshReferencesView(ScannerAPIView):
         if wine is None:
             return Response({"error": "Wine not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        async_result = refresh_wine_references.delay(wine.id, request.user.id)
+        payload = request.data if isinstance(request.data, dict) else {}
+        force = bool(payload.get("force"))
+        async_result = refresh_wine_references.delay(wine.id, request.user.id, force)
+        remember_task(async_result.id, request.user.id, self.get_household(request).id)
         return Response(
             {
                 "status": "queued",
@@ -541,6 +680,12 @@ class WineRefreshReferencesView(ScannerAPIView):
         if not task_id:
             return Response({"state": "IDLE", "current": current})
 
+        household_id = self.get_household(request).id
+        if not task_visible(task_id, request.user.id, household_id):
+            return Response(
+                {"error": "Task not found"}, status=status.HTTP_404_NOT_FOUND,
+            )
+
         result = AsyncResult(task_id)
         payload = {"state": result.state, "current": current}
         if result.successful():
@@ -549,6 +694,174 @@ class WineRefreshReferencesView(ScannerAPIView):
             # Don't leak a traceback to the client; the worker logged it.
             payload["result"] = {"updated": False, "error": "Lookup failed"}
         return Response(payload)
+
+
+class ReferenceLookupView(ScannerAPIView):
+    """Queue a reference lookup for a wine that isn't in the cellar (POST),
+    and report on it (GET).
+
+    The cellar refresh at /api/wines/<pk>/refresh-references/ needs a Wine row
+    to write to. A label photographed in a shop has none — and that is exactly
+    when the critic score, the Vivino rating and the going price decide whether
+    the bottle comes home. Same queue-and-poll shape, same live search, nothing
+    persisted.
+    """
+
+    authentication_classes = [SessionAuthentication, TokenAuthentication]
+
+    def post(self, request):
+        from wine_cellar.apps.wine.tasks import lookup_wine_references
+
+        name = (request.data.get("name") or "").strip()
+        if not name:
+            return Response(
+                {"error": "Name is required"}, status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        vintage = request.data.get("vintage")
+        try:
+            vintage = int(vintage) if vintage not in (None, "") else None
+        except (TypeError, ValueError):
+            vintage = None
+
+        hints = {
+            field: (request.data.get(field) or "")
+            for field in ("country", "region", "appellation", "grape", "vineyard")
+        }
+
+        household = self.get_household(request)
+        async_result = lookup_wine_references.delay(
+            name,
+            producer=(request.data.get("producer") or ""),
+            vintage=vintage,
+            user_id=request.user.id,
+            **hints,
+        )
+        remember_task(async_result.id, request.user.id, household.id)
+        return Response(
+            {
+                "status": "queued",
+                "task_id": async_result.id,
+                "poll": request.build_absolute_uri(
+                    reverse("api-reference-lookup"),
+                ),
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+    def get(self, request):
+        """Report on a queued lookup. ?task_id= is required — there is no
+        stored wine whose current values could stand in for it."""
+        from celery.result import AsyncResult
+
+        task_id = request.query_params.get("task_id")
+        if not task_id:
+            return Response(
+                {"error": "task_id is required"}, status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        household_id = self.get_household(request).id
+        if not task_visible(task_id, request.user.id, household_id):
+            return Response(
+                {"error": "Task not found"}, status=status.HTTP_404_NOT_FOUND,
+            )
+
+        result = AsyncResult(task_id)
+        payload = {"state": result.state}
+        if result.successful():
+            payload["result"] = result.result
+        elif result.failed():
+            # Don't leak a traceback to the client; the worker logged it.
+            payload["result"] = {"updated": False, "error": "Lookup failed"}
+        return Response(payload)
+
+
+def _qualified_reference(raw, kind):
+    """A detail block is usable when confidence is medium or high and in range."""
+    if not isinstance(raw, dict):
+        return None
+    confidence = (raw.get("confidence") or "").lower()
+    if confidence not in ("medium", "high"):
+        return None
+    value = raw.get("value")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if kind == "critic":
+        if isinstance(value, float) and not value.is_integer():
+            return None
+        number = int(value)
+        if not 0 <= number <= 100:
+            return None
+        return number, confidence
+    if kind == "vivino":
+        if not 0 <= float(value) <= 5:
+            return None
+        return round(float(value), 1), confidence
+    if kind == "price":
+        if value < 0:
+            return None
+        return value, confidence
+    return None
+
+
+class WineApplyReferencesView(ScannerAPIView):
+    """Write a lookup the bot already paid for. Does not call Grok."""
+
+    def post(self, request, pk):
+        household = self.get_household(request)
+        wine = Wine.objects.filter(id=pk, household=household).first()
+        if wine is None:
+            return Response(
+                {"error": "Wine not found"}, status=status.HTTP_404_NOT_FOUND,
+            )
+
+        body = request.data if isinstance(request.data, dict) else {}
+        details = body.get("details")
+        if not isinstance(details, dict):
+            details = {}
+
+        written = []
+        critic = _qualified_reference(details.get("critic_score"), "critic")
+        if critic is not None:
+            wine.critic_score, conf = critic
+            written.append(conf)
+        vivino = _qualified_reference(details.get("vivino_rating"), "vivino")
+        if vivino is not None:
+            wine.vivino_rating, conf = vivino
+            written.append(conf)
+        price = _qualified_reference(details.get("market_price"), "price")
+        if price is not None:
+            wine.market_price, conf = price
+            written.append(conf)
+            block = details.get("market_price")
+            currency = block.get("currency") if isinstance(block, dict) else None
+            if currency:
+                wine.market_price_currency = str(currency)[:3]
+
+        if not written:
+            return Response({"updated": False})
+
+        body_confidence = (request.data.get("confidence") or "").lower()
+        if body_confidence in ("medium", "high"):
+            wine.reference_confidence = body_confidence
+        else:
+            wine.reference_confidence = max(
+                written, key=lambda c: {"high": 3, "medium": 2}.get(c, 0),
+            )
+        wine.reference_updated = timezone.now()
+        wine.save()
+
+        vivino = wine.vivino_rating
+        price = wine.market_price
+        return Response({
+            "updated": True,
+            "confidence": wine.reference_confidence,
+            "critic_score": wine.critic_score,
+            "vivino_rating": None if vivino is None else float(vivino),
+            "category_rating": wine.category_rating,
+            "market_price": None if price is None else float(price),
+            "market_price_currency": wine.market_price_currency,
+        })
 
 
 class WineSearchView(ScannerAPIView):
@@ -634,6 +947,29 @@ class StockMoveView(ScannerAPIView):
             "wine_name": f"{item.wine.name} {item.wine.vintage or ''}".strip(),
             "storage": item.storage.name,
             "drawer": item.row,
+        })
+
+
+class StockVoteView(ScannerAPIView):
+    """Optional 👎 / — / 👍 on a bottle that already left. Deleted items are OK."""
+
+    def patch(self, request, pk):
+        household = self.get_household(request)
+        try:
+            item = StorageItem.objects.get(id=pk, wine__household=household)
+        except StorageItem.DoesNotExist:
+            return Response(
+                {"error": "Item not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        serializer = StockVoteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        item.vote = serializer.validated_data["vote"]
+        item.save(update_fields=["vote"])
+        return Response({
+            "item_id": item.id,
+            "vote": item.vote,
+            "wine_id": item.wine_id,
         })
 
 

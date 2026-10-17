@@ -5,8 +5,13 @@ services:
     build: .
     ports:
       - "8080:8080"
+    environment:
+      - TZ=Europe/London
+      - SCANNER_VERSION=2026-10-17.2
+      - REDIS_URL=redis://redis:6379/2
     volumes:
       - ./config.yaml:/app/config.yaml:ro
+      - ./data:/app/data
     restart: unless-stopped
     # Connect to wine-cellar's network so we can reach its web service.
     # In config.yaml, set base_url to http://wine-cellar-web:8000

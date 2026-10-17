@@ -86,6 +86,14 @@ def test_resolve_evicts_rather_than_flagging(handler, hh1):
     assert handler.pending_store == {}
 
 
+def test_claim_pending_blocks_a_second_tap(handler, hh1):
+    handler._create_pending(hh1, BARCODE)
+    assert handler._claim_pending(hh1, BARCODE) == ("claimed", None)
+    assert handler._claim_pending(hh1, BARCODE) == ("busy", None)
+    handler._update_pending(hh1, BARCODE, wine_id=68)
+    assert handler._claim_pending(hh1, BARCODE) == ("created", 68)
+
+
 def test_sweep_evicts_expired_including_internal_keys(handler, hh1):
     handler._create_pending(hh1, BARCODE)  # fresh, must survive
     stale = time.time() - PENDING_TIMEOUT_SECONDS - 1
@@ -138,8 +146,10 @@ def test_edit_keys_are_not_prefixed(handler, hh1):
 
 from integrations.telegram_bot import (  # noqa: E402
     _wine_label,
+    apply_winelist_correction,
     build_cellar_summary,
     build_winelist_view,
+    list_entry_from_label,
     mark_owned_wines,
 )
 
@@ -208,15 +218,30 @@ def test_pick_view_leads_with_the_recommendation_and_fits_telegram():
     assert "You lean Italian" in text
     assert "on the list" in text
     assert len(text) < 4096
-    assert keyboard.inline_keyboard  # offers the full list
+    rows = keyboard.inline_keyboard
+    labels = [b.text for row in rows for b in row]
+    assert "More on this" not in labels
+    assert not any("Show all" in x for x in labels)
+    wine_rows = [r for r in rows if len(r) == 2 and r[1].text == "Wrong"]
+    assert len(wine_rows) == 3
+    names = [r[0].text for r in wine_rows]
+    assert any("Barbaresco" in n for n in names)
+    assert any("Ken Forrester" in n for n in names)
+    assert any("Ruinart" in n for n in names)
+    assert any(n.startswith("⭐") for n in names)
 
 
 def test_full_view_paginates():
     text, keyboard = build_winelist_view(LIST_DATA, page=0, per_page=2, show_all=True)
-    assert "Ken Forrester" in text
-    assert "Ruinart" not in text  # page 2
-    labels = [b.text for row in keyboard.inline_keyboard for b in row]
+    rows = keyboard.inline_keyboard
+    labels = [b.text for row in rows for b in row]
+    wine_rows = [r for r in rows if len(r) == 2 and r[1].text == "Wrong"]
+    assert len(wine_rows) == 2
+    names = [r[0].text for r in wine_rows]
+    assert any("Ken Forrester" in n for n in names)
+    assert not any("Ruinart" in n for n in names)  # page 2
     assert any("1/2" in x for x in labels)
+    assert any("Back to the pick" in x for x in labels)
 
 
 def test_unreadable_list_says_so_rather_than_showing_nothing():
@@ -232,10 +257,14 @@ def test_bottle_group_does_not_invent_a_list_price():
         "scene": "bottles",
         "wines": [dict(w) for w in LIST_DATA["wines"]],
     }
-    text, _ = build_winelist_view(data)
+    text, keyboard = build_winelist_view(data)
     assert "on the list" not in text
     assert "Spotted 3 wines" in text
+    assert "I'd go for" in text  # bottle groups still get a pick
     assert "retail" in text  # ballpark shop price is still useful
+    labels = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert not any(x == "More on this" for x in labels)
+    assert any("Ruinart" in x for x in labels)  # named row, Wrong sits beside it
     full, _ = build_winelist_view(data, show_all=True)
     assert "on the list" not in full
 
@@ -265,10 +294,63 @@ def test_winelist_prompt_forbids_invented_list_prices():
     assert '"scene": "bottles"' in prompt
     assert "MUST be null" in prompt
     assert "This is NOT a wine list" in prompt
+    assert '"detail"' in prompt
+    assert "two short sentences" in prompt.lower()
 
     triage = build_triage_prompt("GBP", "GB")
     assert "MORE THAN ONE WINE" in triage
     assert 'not "it must be a priced wine list"' in triage
+    assert "list_price" in triage
+    assert "Never copy market_price" in triage
+
+
+def test_correction_replaces_the_misread_slot():
+    data = {
+        **LIST_DATA,
+        "wines": [dict(w) for w in LIST_DATA["wines"]],
+        "recommendation": dict(LIST_DATA["recommendation"]),
+    }
+    entry = list_entry_from_label({
+        "name": "Kanonkop Pinotage", "producer": "Kanonkop",
+        "vintage": 2021, "wine_type": "RE",
+        "description": "Dark fruit and smoke.", "market_price": 22,
+    })
+    assert apply_winelist_correction(data, 2, entry, "Ruinart Blanc de Blancs NV")
+    assert data["wines"][2]["name"] == "Kanonkop Pinotage"
+    assert data["wines"][2]["list_price"] is None
+    assert data["recommendation"]["name"] != "Kanonkop Pinotage"  # wasn't the pick
+
+
+def test_correction_retargets_the_recommendation_when_that_wine_was_wrong():
+    data = {
+        **LIST_DATA,
+        "wines": [dict(w) for w in LIST_DATA["wines"]],
+        "recommendation": dict(LIST_DATA["recommendation"]),
+    }
+    entry = {"name": "The Real Barbaresco", "note": "Tar and roses."}
+    assert apply_winelist_correction(
+        data, 1, entry, "Produttori del Barbaresco 2019",
+    )
+    assert data["recommendation"]["name"] == "The Real Barbaresco"
+
+
+def test_correction_retargets_pick_when_vintage_label_disagrees():
+    """The pick is stored as Grok named it; Wrong uses the display label."""
+    data = {
+        **LIST_DATA,
+        "wines": [dict(w) for w in LIST_DATA["wines"]],
+        "recommendation": {"name": "Produttori del Barbaresco", "why": "Classic."},
+    }
+    entry = {"name": "Dézaley Argile Grand Cru Chasselas", "note": "Alpine, tense."}
+    assert apply_winelist_correction(
+        data, 1, entry, "Produttori del Barbaresco 2019",
+    )
+    assert data["recommendation"]["name"] == "Dézaley Argile Grand Cru Chasselas"
+    text, keyboard = build_winelist_view(data)
+    assert "Dézaley" in text
+    assert "I'd go for" in text
+    names = [r[0].text for r in keyboard.inline_keyboard if len(r) == 2]
+    assert any("Dézaley" in n for n in names)
 
 
 def test_cellar_summary_describes_taste_not_just_names():
@@ -284,3 +366,54 @@ def test_cellar_summary_describes_taste_not_just_names():
 
 def test_cellar_summary_is_empty_for_an_empty_cellar():
     assert build_cellar_summary([]) == ""
+
+
+def test_long_list_does_not_put_a_wrong_button_per_wine():
+    wines = [
+        {"name": f"Wine {i}", "note": "A short tasting note.", "wine_type": "RE",
+         "list_price": None, "retail_price": 20}
+        for i in range(30)
+    ]
+    data = {
+        **LIST_DATA,
+        "wines": wines,
+        "recommendation": {"name": "Wine 0", "why": "Closest to what you drink."},
+        "alternates": ["Wine 1"],
+        "scene": "menu",
+    }
+    text, keyboard = build_winelist_view(data)
+    labels = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert "I'd go for" in text
+    assert any("Show all 30" in x for x in labels)
+    wine_rows = [
+        r for r in keyboard.inline_keyboard
+        if len(r) == 2 and r[1].text == "Wrong"
+    ]
+    assert len(wine_rows) == 1  # only the pick — not 30 Wrong buttons
+    assert "Wine 0" in wine_rows[0][0].text
+
+    full, kb2 = build_winelist_view(data, show_all=True, per_page=5)
+    labels2 = [b.text for row in kb2.inline_keyboard for b in row]
+    page_rows = [r for r in kb2.inline_keyboard if len(r) == 2 and r[1].text == "Wrong"]
+    assert len(page_rows) == 5
+    assert any("Wine 0" in r[0].text for r in page_rows)
+    assert not any("Wine 5" in r[0].text for r in page_rows)
+    assert any("1/6" in x for x in labels2)
+
+
+def test_detail_card_has_wrong_and_a_longer_note():
+    data = {
+        **LIST_DATA,
+        "wines": [
+            {**LIST_DATA["wines"][0],
+             "producer": "Ken Forrester",
+             "detail": "Stellenbosch Chenin, honeyed and rich. Drink with roast chicken."},
+            *[dict(w) for w in LIST_DATA["wines"][1:]],
+        ],
+    }
+    text, keyboard = build_winelist_view(data, detail_index=0)
+    assert "Ken Forrester" in text
+    assert "roast chicken" in text
+    labels = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert "Wrong" in labels
+    assert any("Back" in x for x in labels)

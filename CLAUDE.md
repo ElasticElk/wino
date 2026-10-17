@@ -45,10 +45,13 @@ Auth: `Authorization: Token <token>` header. Optional `X-Household: <id>` header
 - `POST /api/stock/add/` — Add stock (wine_id, storage_name, price, row)
 - `POST /api/stock/remove/` — Remove stock
 - `POST /api/stock/set/` — Set exact quantity
+- `GET /api/stock/history/` — Recently drank/removed bottles (`?limit=5&offset=0`)
 - `PATCH /api/stock/<pk>/move/` — Move bottle
 - `GET /api/wines/<pk>/stock/` — Stock details for a wine
 - `POST /api/wines/<pk>/refresh-references/` — **Queues** a Grok reference lookup, returns `202 {task_id}`
 - `GET /api/wines/<pk>/refresh-references/?task_id=<id>` — Poll that task (`PENDING`/`SUCCESS`/`FAILURE`); without `task_id`, returns the wine's stored reference values
+- `POST /api/references/lookup/` — **Queues** a Grok reference lookup for a wine that has *no* row in the cellar (body: `name` + optional `producer`, `vintage`, `country`, `region`, `appellation`, `grape`, `vineyard`), returns `202 {task_id}`. Nothing is persisted
+- `GET /api/references/lookup/?task_id=<id>` — Poll that task (`task_id` is required — there is no stored wine to fall back on)
 - `GET /api/images/<pk>/file/` — Serve wine image file
 - `GET /api/storages/` — List storages
 - `GET /api/scanner/config/` — Scanner bootstrap config (admin-only, returns telegram_users, scanners, service config)
@@ -56,6 +59,10 @@ Auth: `Authorization: Token <token>` header. Optional `X-Household: <id>` header
 - `GET /api/households/` — All user's households
 - `POST /api/household/add-member/` — Add member to household
 - `POST /api/household/remove-member/` — Remove member from household
+- `POST /api/scanner/invites/` — Mint a one-time invite (`kind=join` any member, `kind=new` staff). 7-day expiry. Staff join requires `household_id`; the bot sends it even when there is only one cellar
+- `GET /api/scanner/invites/<code>/` — Preview a code without burning it. **Staff only** — the bot calls it with its admin client (`handler.api`)
+- `POST /api/scanner/invites/redeem/` — Provision from a code (join=member, new=owner + storage named Cellar). Returns the token of the user for the posted `chat_id`, so **staff only**. A taken name is `409` with `error` "That name's taken — pick another" and a free `suggested_name` (never the taken one; names are global, so the taken name is not echoed)
+- `POST /api/scanner/invites/cancel/` — Drop the caller's newest **unexpired** unused invite. Optional `household_id` prefers that cellar, then a staff `new` invite. Returns `code`, `kind`, `household_name`
 
 ### Frontend
 - **Templates:** `wine_cellar/templates/` — Django templates with `base.html` layout
@@ -162,20 +169,22 @@ Available to authorized users via the bot:
 - `/status` — Scanner system status
 - `/stock` — View current stock (interactive, per-storage)
 - `/fridge` — Browse fridge contents
-- `/recent` — Recently added/removed wines
+- `/recent` — Recent bottles (notes + label photo, pages of 5)
 - `/help` — List available commands
 - `/pending` — Show barcodes awaiting label photos
 - `/flush` — Clear pending barcodes
 - `/switch` — Switch active household
 - `/household` — Show current household + members
-- `/adduser <chat_id> <name> [household]` — Add user to household
+- `/invite` — Mint a one-time join link for the current cellar (any member), with a *Share invite* button (`t.me/share/url`). `/invite cancel` drops the newest unexpired unused invite for this cellar and names it. `/newcellar` (staff only; same as `/invite new`, old alias `/new`) mints a new-cellar link
+- `/adduser <chat_id> <name> [household]` — Add user to household (legacy fallback)
 - `/removeuser <chat_id> [household]` — Remove user from household
 
 ### Photo modes
 
 Triage (`GrokVisionAPI.triage_photo`) classifies every photo as `barcode`, `label`, `winelist` or `other`, so there is no command to discover — sending a photo is the whole interface.
 
-- **barcode / label** → the add-to-cellar flow. A label with no match offers *Add to cellar* or *Just looking*, so a shop lookup costs nothing.
+- **barcode / label** → the add-to-cellar flow. A label with no match offers *Add to cellar* or *Just looking*, so a shop lookup costs nothing. *Just looking* **keeps the card** — it only drops the buttons; the reading is the whole point of having asked.
+- A label card fires a background `POST /api/references/lookup/` and edits the critic score, Vivino rating and price into itself when they land. The triage vision call answers from the model's own memory and under the reference rubric nearly always returns nulls, so the numbers only exist after a live web search — far too long to hold the user on a spinner. A wine already in the cellar shows its **stored** references instead, for free.
 - **winelist** → `analyse_wine_list()` reads the whole list in one vision call and recommends from it, with the user's cellar profile (`build_cellar_summary`) in the prompt. Deliberately **no per-wine web search** — 20 live lookups would take minutes, and this gets used standing in a shop. Accurate pricing stays reserved for wines actually added.
 - Wines already owned are matched **locally** (`mark_owned_wines`), not by the model: only a slice of the cellar fits in a prompt, and grape words are excluded from matching so two unrelated Chenins don't collide.
 - Read lists are cached per message for `WINELIST_TTL` (30 min) to back the *Show all* / pagination buttons.
@@ -184,7 +193,13 @@ Users can also send **photos** to the bot — it will attempt barcode detection 
 
 ### Onboarding (unprovisioned users)
 
-`/start` and a catch-all fallback are **unfiltered** — an unknown chat always gets a reply containing its own chat ID plus instructions to pass it to a household owner. This matters because Telegram's START button sends `/start`, and leaving it unanswered made the bot look broken (it was the likely cause of six of nine households never adding a wine).
+`/start` and a catch-all fallback are **unfiltered**. A stranger with no code is pointed at asking a friend for an invite (chat ID is still on `/myid`). `/start <code>` is the invite onboarding: join is one tap, new cellar is a name step (type / suburb pin / Skip) then one photo pitch. Codes are burned only after provision succeeds. The user-facing name is **Whiney** (`/start`, `/help`, invite copy).
+
+Invite state (`InviteFlow`, `telegram_invites.py`) is in memory with a **30-minute sliding TTL**. Buttons carry the code (`inv:<action>:<code>[:<name>]`), so Join and the naming buttons survive a restart by re-previewing; only a half-typed name is lost. Network/5xx failures say "couldn't reach the cellar", never "expired".
+
+Strangers are provisioned as soon as they type a name. **Someone who already has a cellar** must confirm a typed name via a button (they're usually searching), any command drops them out of naming (group `-1` handler), and in the *Stay / Start a new cellar* step text and photos go to their existing cellar — none of these ever create a second cellar silently.
+
+A duplicate name offers the API's `suggested_name` as a button whose label is exactly what it commits. User names inside HTML messages go through `esc()`.
 
 `/adduser` now messages the new member directly with a welcome. **A bot cannot open a conversation with a user** — the person must have messaged the bot at least once first. When delivery fails, `/adduser` tells the adder so, rather than reporting a false success.
 

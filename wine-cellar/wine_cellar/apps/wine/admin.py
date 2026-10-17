@@ -2,10 +2,13 @@ from django.contrib import admin
 
 from wine_cellar.apps.wine.models import (
     Attribute,
+    CellarAchievement,
     FoodPairing,
     Grape,
+    HouseholdTasteSnapshot,
     Size,
     Source,
+    TasteIntent,
     Vineyard,
     Wine,
 )
@@ -26,6 +29,24 @@ class WineAdmin(admin.ModelAdmin):
         "grapes",
         "attributes",
     ]
+
+
+@admin.register(CellarAchievement)
+class CellarAchievementAdmin(admin.ModelAdmin):
+    list_display = ["title", "household", "slug", "unlocked_at"]
+    list_filter = ["household", "slug"]
+    search_fields = ["title", "subject"]
+
+
+@admin.register(HouseholdTasteSnapshot)
+class HouseholdTasteSnapshotAdmin(admin.ModelAdmin):
+    list_display = ["household", "updated_at"]
+
+
+@admin.register(TasteIntent)
+class TasteIntentAdmin(admin.ModelAdmin):
+    list_display = ["kind", "household", "created"]
+    list_filter = ["kind", "household"]
 
 
 @admin.register(Size)

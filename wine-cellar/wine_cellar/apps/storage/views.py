@@ -1,3 +1,4 @@
+from django.contrib import messages
 from django.forms import model_to_dict
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse_lazy
@@ -8,7 +9,9 @@ from django.views.generic.list import MultipleObjectMixin
 from wine_cellar.apps.scanner.households import HouseholdScopedMixin
 from wine_cellar.apps.storage.forms import StockForm, StorageForm
 from wine_cellar.apps.storage.models import Storage, StorageItem
+from wine_cellar.apps.wine.achievements import award_for_add
 from wine_cellar.apps.wine.models import Wine
+from wine_cellar.apps.wine.taste import rebuild_snapshot
 
 
 class StorageListView(HouseholdScopedMixin, ListView):
@@ -160,6 +163,17 @@ class StorageItemAddView(HouseholdScopedMixin, FormView):
     def form_valid(self, form):
         wine = get_object_or_404(self.scoped(Wine.objects.all()), pk=self.kwargs["pk"])
         self.process_form_data(wine, self.request.user, form.cleaned_data)
+        try:
+            rebuild_snapshot(getattr(wine, "household", None))
+        except Exception:
+            pass
+        for badge in award_for_add(
+            wine, self.request.user, storage=form.cleaned_data.get("storage"),
+        ):
+            messages.success(
+                self.request,
+                f"{badge.get('emoji', '🎉')} {badge['title']} — {badge.get('detail', '')}".strip(" —"),
+            )
         self.success_url = reverse_lazy("wine-detail", kwargs={"pk": wine.pk})
         return super().form_valid(form)
 
@@ -269,6 +283,10 @@ class StorageItemDeleteView(HouseholdScopedMixin, DeleteView):
         self.object = self.get_object()
         self.object.deleted = True
         self.object.save(update_fields=["deleted"])
+        try:
+            rebuild_snapshot(getattr(self.object.wine, "household", None))
+        except Exception:
+            pass
         return redirect(self.get_success_url())
 
 

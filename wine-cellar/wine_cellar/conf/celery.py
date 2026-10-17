@@ -14,4 +14,8 @@ celery_app.conf.beat_schedule = {
         "task": "drink_by_reminder",
         "schedule": crontab(minute="30", hour="2"),
     },
+    "empty_cellar_nudge": {
+        "task": "empty_cellar_nudge",
+        "schedule": crontab(minute="0", hour="10"),
+    },
 }

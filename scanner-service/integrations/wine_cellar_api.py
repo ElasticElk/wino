@@ -36,16 +36,34 @@ class WineCellarAPI:
         return resp.json()["wines"]
 
     def add_stock(self, wine_id: int, price: float | None = None,
-                  storage_name: str | None = None, row: int | None = None) -> dict:
+                  storage_name: str | None = None, row: int | None = None,
+                  drank: bool = False, confirm_duplicate: bool = False,
+                  check_duplicate: bool = False) -> dict:
         data = {"wine_id": wine_id, "storage_name": storage_name or self.default_storage}
         if price is not None:
             data["price"] = price
         if row is not None:
             data["row"] = row
+        if drank:
+            data["drank"] = True
+        if confirm_duplicate:
+            data["confirm_duplicate"] = True
+        if check_duplicate:
+            data["check_duplicate"] = True
         resp = self.session.post(
             f"{self.base_url}/api/stock/add/", json=data, timeout=10,
         )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            body = {}
+            try:
+                body = resp.json() if resp.content else {}
+            except ValueError:
+                body = {}
+            if not isinstance(body, dict):
+                body = {}
+            body.setdefault("error", body.get("detail") or f"HTTP {resp.status_code}")
+            body["status_code"] = resp.status_code
+            return body
         return resp.json()
 
     def set_stock(self, wine_id: int, quantity: int) -> dict:
@@ -57,9 +75,12 @@ class WineCellarAPI:
         resp.raise_for_status()
         return resp.json()
 
-    def remove_stock(self, wine_id: int) -> dict:
+    def remove_stock(self, wine_id: int, storage_name: str | None = None) -> dict:
+        data = {"wine_id": wine_id}
+        if storage_name:
+            data["storage_name"] = storage_name
         resp = self.session.post(
-            f"{self.base_url}/api/stock/remove/", json={"wine_id": wine_id}, timeout=10,
+            f"{self.base_url}/api/stock/remove/", json=data, timeout=10,
         )
         if resp.status_code == 409:
             return resp.json()
@@ -104,6 +125,16 @@ class WineCellarAPI:
         )
         if resp.status_code == 404:
             return None
+        resp.raise_for_status()
+        return resp.json()
+
+    def apply_references(self, wine_id: int, payload: dict) -> dict:
+        """Persist a lookup the label card already ran. No second web search."""
+        resp = self.session.post(
+            f"{self.base_url}/api/wines/{wine_id}/apply-references/",
+            json=payload,
+            timeout=15,
+        )
         resp.raise_for_status()
         return resp.json()
 
@@ -157,6 +188,52 @@ class WineCellarAPI:
             "message": "Still looking — the values will appear on the wine shortly.",
         }
 
+    def lookup_references(self, name: str, producer: str = "", vintage=None,
+                          wait_seconds: int = 120, poll_seconds: int = 5,
+                          **hints) -> dict:
+        """Ask Grok for critic / Vivino / market price for a wine we don't own.
+
+        Same queue-and-poll shape as refresh_references, against an endpoint
+        that takes a name instead of a wine id — a label photographed in a shop
+        has no row to refresh, and that is precisely when the numbers decide
+        whether the bottle comes home. Nothing is persisted.
+
+        The wait is shorter than refresh_references': this one is edited into a
+        card the user is looking at right now, so a lookup that drags on is
+        better abandoned than waited out.
+        """
+        payload = {"name": name, "producer": producer or "", "vintage": vintage}
+        payload.update({k: v for k, v in hints.items() if v})
+
+        url = f"{self.base_url}/api/references/lookup/"
+        resp = self.session.post(url, json=payload, timeout=15)
+        resp.raise_for_status()
+        queued = resp.json()
+
+        task_id = queued.get("task_id")
+        if not task_id:
+            return queued
+
+        deadline = time.time() + wait_seconds
+        while time.time() < deadline:
+            time.sleep(poll_seconds)
+            try:
+                poll = self.session.get(url, params={"task_id": task_id}, timeout=15)
+                poll.raise_for_status()
+                body = poll.json()
+            except requests.RequestException as e:
+                logger.warning(f"[API] lookup_references poll failed: {e}")
+                continue
+
+            state = body.get("state")
+            if state == "SUCCESS":
+                return body.get("result") or {"updated": False}
+            if state == "FAILURE":
+                return body.get("result") or {"updated": False, "error": "Lookup failed"}
+
+        logger.info(f"[API] lookup_references timed out for {name!r}")
+        return {"updated": False, "message": "Lookup timed out"}
+
     def search_wines(self, query: str) -> list[dict]:
         """Search wines by name within this household."""
         resp = self.session.get(
@@ -188,6 +265,25 @@ class WineCellarAPI:
             data["row"] = row
         resp = self.session.patch(
             f"{self.base_url}/api/stock/{item_id}/move/", json=data, timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def stock_history(self, offset: int = 0, limit: int = 5) -> dict:
+        """Recently drank or removed bottles, newest first."""
+        resp = self.session.get(
+            f"{self.base_url}/api/stock/history/",
+            params={"offset": offset, "limit": limit},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def vote_item(self, item_id: int, vote: str) -> dict:
+        resp = self.session.patch(
+            f"{self.base_url}/api/stock/{item_id}/vote/",
+            json={"vote": vote},
+            timeout=10,
         )
         resp.raise_for_status()
         return resp.json()
@@ -236,9 +332,13 @@ class WineCellarAPI:
 
     # --- Household management ---
 
-    def get_household(self) -> dict:
+    def get_household(self, household_id: int | None = None) -> dict:
+        params = {}
+        if household_id is not None:
+            params["household_id"] = household_id
         resp = self.session.get(
-            f"{self.base_url}/api/scanner/household/", timeout=10,
+            f"{self.base_url}/api/scanner/household/",
+            params=params, timeout=10,
         )
         resp.raise_for_status()
         return resp.json()
@@ -276,3 +376,151 @@ class WineCellarAPI:
         )
         resp.raise_for_status()
         return resp.json().get("households", [])
+
+    def set_gamification(self, enabled: bool, household_id: int | None = None) -> dict:
+        data = {"gamification_enabled": bool(enabled)}
+        if household_id is not None:
+            data["household_id"] = household_id
+        resp = self.session.patch(
+            f"{self.base_url}/api/scanner/household/", json=data, timeout=10,
+        )
+        if resp.status_code >= 400:
+            try:
+                return resp.json()
+            except ValueError:
+                return {"error": f"HTTP {resp.status_code}"}
+        return resp.json()
+
+    def list_achievements(self) -> dict:
+        resp = self.session.get(
+            f"{self.base_url}/api/scanner/achievements/", timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_taste(self) -> dict:
+        resp = self.session.get(
+            f"{self.base_url}/api/scanner/taste/", timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def record_intent(self, kind: str, wine: dict | None = None,
+                      wines: list | None = None, scene: str = "",
+                      recommendation=None) -> dict:
+        body = {"kind": kind}
+        if wine:
+            body["wine"] = wine
+        if wines is not None:
+            body["wines"] = wines
+            body["scene"] = scene
+            body["recommendation"] = recommendation
+        try:
+            resp = self.session.post(
+                f"{self.base_url}/api/scanner/taste/", json=body, timeout=8,
+            )
+            if resp.status_code >= 400:
+                logger.warning(f"record_intent failed: {resp.status_code} {resp.text}")
+                return {}
+            return resp.json()
+        except Exception as e:
+            logger.warning(f"record_intent failed: {e}")
+            return {}
+
+    def create_household(self, name: str, chat_id: str, display_name: str) -> dict:
+        """Staff-only: create a household and provision its owner on Telegram."""
+        resp = self.session.post(
+            f"{self.base_url}/api/scanner/households/",
+            json={
+                "name": name,
+                "chat_id": chat_id,
+                "display_name": display_name,
+            },
+            timeout=15,
+        )
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {"error": resp.text or f"HTTP {resp.status_code}"}
+        if resp.status_code >= 400:
+            if "error" not in body:
+                body["error"] = body.get("detail") or f"HTTP {resp.status_code}"
+            return body
+        return body
+
+    def _invite_body(self, resp) -> dict:
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {"error": resp.text or f"HTTP {resp.status_code}"}
+        if resp.status_code >= 400:
+            if "error" not in body:
+                body["error"] = body.get("detail") or f"HTTP {resp.status_code}"
+            body["status_code"] = resp.status_code
+            return body
+        return body
+
+    def mint_invite(self, kind: str, household_id: int | None = None) -> dict:
+        data = {"kind": kind}
+        if household_id is not None:
+            data["household_id"] = household_id
+        resp = self.session.post(
+            f"{self.base_url}/api/scanner/invites/", json=data, timeout=15,
+        )
+        return self._invite_body(resp)
+
+    def preview_invite(self, code: str) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/scanner/invites/preview/",
+            json={"code": code}, timeout=10,
+        )
+        return self._invite_body(resp)
+
+    def update_settings(self, country: str = "", currency: str = "") -> dict:
+        data = {"country": country}
+        if currency:
+            data["currency"] = currency
+        resp = self.session.post(
+            f"{self.base_url}/api/scanner/settings/", json=data, timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def redeem_invite(self, code: str, chat_id: str, display_name: str,
+                      household_name: str | None = None) -> dict:
+        data = {
+            "code": code,
+            "chat_id": str(chat_id),
+            "display_name": display_name,
+        }
+        if household_name:
+            data["household_name"] = household_name
+        resp = self.session.post(
+            f"{self.base_url}/api/scanner/invites/redeem/", json=data, timeout=15,
+        )
+        return self._invite_body(resp)
+
+    def cancel_invite(self, household_id: int | None = None) -> dict:
+        data = {} if household_id is None else {"household_id": household_id}
+        resp = self.session.post(
+            f"{self.base_url}/api/scanner/invites/cancel/", json=data, timeout=10,
+        )
+        return self._invite_body(resp)
+
+    def whois(self, query: str) -> dict:
+        """Staff-only: look up a Telegram user by chat ID or name."""
+        resp = self.session.get(
+            f"{self.base_url}/api/scanner/whois/",
+            params={"q": query},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def stats(self) -> dict:
+        """Staff-only: counts across every household."""
+        resp = self.session.get(
+            f"{self.base_url}/api/scanner/stats/", timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()

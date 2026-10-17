@@ -63,7 +63,7 @@ def test_post_queues_and_returns_immediately(client, user, wine):
     assert response.status_code == 202
     assert response.json()["task_id"] == "task-123"
     assert response.json()["status"] == "queued"
-    delay.assert_called_once_with(wine.id, user.id)
+    delay.assert_called_once_with(wine.id, user.id, False)
 
 
 def test_post_404s_for_another_households_wine(client, db, django_user_model, wine):
@@ -144,7 +144,7 @@ def test_a_bad_run_keeps_prior_values(wine):
         perform_reference_refresh(wine.id)
 
     with patch("wine_cellar.apps.wine.references.fetch_references", return_value=None):
-        result = perform_reference_refresh(wine.id)
+        result = perform_reference_refresh(wine.id, force=True)
 
     assert result["updated"] is False
     wine.refresh_from_db()
@@ -153,3 +153,79 @@ def test_a_bad_run_keeps_prior_values(wine):
 
 def test_missing_wine_is_handled(db):
     assert perform_reference_refresh(999999)["updated"] is False
+
+
+def _auth(client, user):
+    token, _ = Token.objects.get_or_create(user=user)
+    client.defaults["HTTP_AUTHORIZATION"] = f"Token {token.key}"
+
+
+@pytest.mark.django_db
+def test_apply_writes_a_medium_confidence_rating(client, user, wine):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    _auth(client, user)
+    response = client.post(
+        reverse("api-wine-apply-references", kwargs={"pk": wine.pk}),
+        data={
+            "updated": True,
+            "confidence": "high",
+            "details": {
+                "vivino_rating": {"value": 4.2, "confidence": "medium"},
+                "critic_score": {"value": 99, "confidence": "low"},
+            },
+        },
+        content_type="application/json",
+    )
+    assert response.status_code == 200
+    assert response.json()["updated"] is True
+    assert response.json()["vivino_rating"] == 4.2
+    wine.refresh_from_db()
+    assert float(wine.vivino_rating) == 4.2
+    assert wine.critic_score is None
+    assert wine.reference_updated is not None
+    assert wine.reference_confidence == "high"
+    assert timezone.now() - wine.reference_updated < timedelta(minutes=1)
+
+
+@pytest.mark.django_db
+def test_apply_404s_for_another_household(client, db, django_user_model, wine):
+    other = django_user_model.objects.create_user(
+        username="outsider-apply", password="pw",
+    )
+    HouseholdMembership.objects.create(
+        user=other, household=Household.objects.create(name="Elsewhere"), role="owner",
+    )
+    _auth(client, other)
+    response = client.post(
+        reverse("api-wine-apply-references", kwargs={"pk": wine.pk}),
+        data={"details": {"vivino_rating": {"value": 4.0, "confidence": "high"}}},
+        content_type="application/json",
+    )
+    assert response.status_code == 404
+    wine.refresh_from_db()
+    assert wine.vivino_rating is None
+
+
+def test_recent_references_skip_another_search(wine):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    wine.reference_updated = timezone.now() - timedelta(days=1)
+    wine.vivino_rating = 4.0
+    wine.save()
+    with patch("wine_cellar.apps.wine.references.fetch_references") as fetch:
+        result = perform_reference_refresh(wine.id)
+    fetch.assert_not_called()
+    assert result["skipped"] is True
+    assert result["updated"] is False
+
+    with patch(
+        "wine_cellar.apps.wine.references.fetch_references", return_value=GOOD,
+    ) as fetch:
+        forced = perform_reference_refresh(wine.id, force=True)
+    fetch.assert_called_once()
+    assert forced["updated"] is True

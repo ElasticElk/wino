@@ -221,6 +221,7 @@
                             // request open for. Poll until the task settles.
                             const resp = await fetch(btn.dataset.url, {
                                 method: "POST", headers, credentials: "same-origin",
+                                body: JSON.stringify({force: true}),
                             });
                             const queued = await resp.json();
                             if (!resp.ok) { done(queued.error || "{% translate 'Request failed.' %}"); return; }
