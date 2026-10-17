@@ -1136,32 +1136,51 @@ class InviteFlow:
         country = (country or "").upper()
         if country == "SKIP":
             country = ""
-        api = self.handler._get_api(chat_id)
-        try:
-            result = api.update_settings(country=country)
-        except Exception as e:
-            logger.warning("[invite] settings: %s", e)
-            await query.edit_message_text(
-                "Couldn't save that.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton(
-                        "Try again", callback_data=invite_callback("cy", country or "skip"),
-                    ),
-                ]]),
-            )
+        store = getattr(self.handler, "_label_cards", None)
+        lock_key = f"country:{chat_id}"
+        try_claim = getattr(store, "try_claim", None)
+        if callable(try_claim) and not try_claim(lock_key):
+            tap_busy = getattr(self.handler, "_tap_busy", None)
+            if callable(tap_busy):
+                await tap_busy(query)
             return
-        ccy = (result or {}).get("currency") or "EUR"
-        set_ccy = getattr(self.handler, "set_currency", None)
-        if callable(set_ccy):
-            set_ccy(chat_id, ccy)
-        set_cty = getattr(self.handler, "set_country", None)
-        if callable(set_cty):
-            set_cty(chat_id, (result or {}).get("country") or "")
-        names = dict(COUNTRY_CHOICES)
-        asked = getattr(self.handler, "_country_asked", None)
-        if asked is None:
-            self.handler._country_asked = set()
-        self.handler._country_asked.add(chat_id)
+        try:
+            api = self.handler._get_api(chat_id)
+            try:
+                result = api.update_settings(country=country)
+            except Exception as e:
+                logger.warning("[invite] settings: %s", e)
+                await query.edit_message_text(
+                    "Couldn't save that.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "Try again", callback_data=invite_callback("cy", country or "skip"),
+                        ),
+                    ]]),
+                )
+                return
+            ccy = (result or {}).get("currency") or "EUR"
+            set_ccy = getattr(self.handler, "set_currency", None)
+            if callable(set_ccy):
+                set_ccy(chat_id, ccy)
+            set_cty = getattr(self.handler, "set_country", None)
+            if callable(set_cty):
+                set_cty(
+                    chat_id, (result or {}).get("country") or "",
+                    prompted=True,
+                )
+            names = dict(COUNTRY_CHOICES)
+            asked = getattr(self.handler, "_country_asked", None)
+            if asked is None:
+                self.handler._country_asked = set()
+            self.handler._country_asked.add(chat_id)
+        finally:
+            release = getattr(store, "release_claim", None)
+            if callable(release):
+                try:
+                    release(lock_key)
+                except Exception:
+                    pass
         if country and country in names:
             await query.edit_message_text(
                 f"{names[country]}. Send a photo of a bottle.",

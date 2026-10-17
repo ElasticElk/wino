@@ -94,6 +94,24 @@ def test_claim_pending_blocks_a_second_tap(handler, hh1):
     assert handler._claim_pending(hh1, BARCODE) == ("created", 68)
 
 
+def test_stale_in_progress_does_not_stick_on_card_store(hh1):
+    from integrations.card_store import CardStore
+    from integrations.telegram_bot import TelegramBotHandler
+
+    h = TelegramBotHandler.__new__(TelegramBotHandler)
+    h.pending_store = CardStore()
+    h._lock = threading.Lock()
+    h._label_seq = 0
+    h._create_pending(hh1, BARCODE)
+    key = h._pkey(hh1, BARCODE)
+    entry = dict(h.pending_store.get(key))
+    entry["in_progress"] = True
+    h.pending_store[key] = entry
+    assert h._claim_pending(hh1, BARCODE) == ("claimed", None)
+    h._unclaim_pending(hh1, BARCODE)
+    assert h._claim_pending(hh1, BARCODE) == ("claimed", None)
+
+
 def test_sweep_evicts_expired_including_internal_keys(handler, hh1):
     handler._create_pending(hh1, BARCODE)  # fresh, must survive
     stale = time.time() - PENDING_TIMEOUT_SECONDS - 1

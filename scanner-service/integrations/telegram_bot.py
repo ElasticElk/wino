@@ -932,6 +932,23 @@ def _stock_failed(result) -> str | None:
     return str(err)
 
 
+BUSY_TAP = "Still working on that — try again in a moment."
+
+
+def _retry_add_markup(wine_id, *, drank: bool = False, barcode: str = "") -> InlineKeyboardMarkup:
+    if drank:
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                "Try again", callback_data=_cb("dk", wine_id=wine_id, barcode=barcode),
+            ),
+        ]])
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "Try adding again", callback_data=_cb("in", wine_id=wine_id),
+        ),
+    ]])
+
+
 def _duplicate_guard_markup(wine_id, item_id, *, drank: bool) -> InlineKeyboardMarkup:
     add_action = "la" if drank else "aa"
     label = "Log another bottle?" if drank else "Add another bottle?"
@@ -2045,10 +2062,12 @@ class TelegramBotHandler:
         if chat_id and currency:
             self._chat_id_to_currency[str(chat_id)] = currency
 
-    def set_country(self, chat_id: str, country: str):
+    def set_country(self, chat_id: str, country: str, prompted: bool | None = None):
         """Register a chat_id's country (used for Grok price-context grounding)."""
         if chat_id:
             self._chat_id_to_country[str(chat_id)] = country or ""
+            if prompted or country:
+                self._country_asked.add(str(chat_id))
 
     async def _enrich_references_async(self, wine_id: int, chat_id: str, api, wine_name: str = ""):
         """Background task: run live-search refresh on a freshly-created wine.
@@ -3443,10 +3462,14 @@ class TelegramBotHandler:
             wine_id = entry.get("wine_id")
             if wine_id:
                 return "created", wine_id
-            if entry.get("in_progress"):
-                return "busy", None
             try_claim = getattr(self.pending_store, "try_claim", None)
-            if callable(try_claim) and not try_claim(key):
+            if callable(try_claim):
+                # SET NX 120s is the lock. Ignore a leftover 1h in_progress
+                # flag so a restart or a failed Drank cannot mute the card.
+                if not try_claim(key):
+                    return "busy", None
+                return "claimed", None
+            if entry.get("in_progress"):
                 return "busy", None
             entry["in_progress"] = True
             return "claimed", None
@@ -3499,6 +3522,30 @@ class TelegramBotHandler:
         self._label_cards[key] = entry
         return entry
 
+    def _remember_paid(self, message, wine_id, paid) -> None:
+        if paid is None or not wine_id:
+            return
+        self._pending_paid[wine_id] = paid
+        if message:
+            self._touch_label_card(message, paid=paid, wine_id=wine_id)
+
+    def _paid_for(self, message, wine_id):
+        card = self._card_logged_item(message)
+        if card.get("paid") is not None:
+            return card.get("paid")
+        return self._pending_paid.get(wine_id)
+
+    async def _tap_busy(self, query) -> None:
+        try:
+            await query.answer(BUSY_TAP, show_alert=True)
+            return
+        except Exception:
+            pass
+        try:
+            await query.message.reply_text(BUSY_TAP)
+        except Exception:
+            pass
+
     async def _resend_photo(self, query):
         try:
             await query.edit_message_text(RESEND_PHOTO)
@@ -3539,6 +3586,9 @@ class TelegramBotHandler:
                 parse_mode="HTML",
             )
             return
+        if paid is not None:
+            self._remember_paid(query.message, wine_id, paid)
+        paid = self._paid_for(query.message, wine_id)
         storages = api.list_storages()
         if len(storages) <= 1:
             storage = storages[0] if storages else None
@@ -3548,7 +3598,6 @@ class TelegramBotHandler:
                 wine_id, storage_name=storage_name, price=paid,
                 check_duplicate=True,
             )
-            self._pending_paid.pop(wine_id, None)
             if stock.get("error") == "recent_duplicate":
                 self._touch_label_card(
                     query.message, guard=True, wine_id=wine_id,
@@ -3565,7 +3614,11 @@ class TelegramBotHandler:
                 return
             failed = _stock_failed(stock)
             if failed:
-                await query.edit_message_text(f"⚠️ {failed}")
+                await query.edit_message_text(
+                    f"Saved <b>{name}</b> but couldn't add a bottle.\n\n⚠️ {failed}",
+                    parse_mode="HTML",
+                    reply_markup=_retry_add_markup(wine_id),
+                )
                 return
             self._touch_label_card(
                 query.message, item_id=stock.get("item_id"),
@@ -3928,7 +3981,9 @@ class TelegramBotHandler:
                 await self._reshow_drank(query, card)
                 return
             if not self._claim_card(query.message):
+                await self._tap_busy(query)
                 return
+            pending_claimed = False
             try:
                 self._touch_label_card(query.message, drunk=True, in_progress=True)
                 card = self._label_cards.get(key) if key else card
@@ -3939,8 +3994,10 @@ class TelegramBotHandler:
                         status, barcode or "-", existing_id,
                     )
                     if status == "busy":
+                        await self._tap_busy(query)
                         return
                     if status == "claimed":
+                        pending_claimed = True
                         merged = self._get_pending(api, barcode).get("grok_merged")
                         if not merged:
                             self._unclaim_pending(api, barcode)
@@ -3957,8 +4014,7 @@ class TelegramBotHandler:
                         )
                         card = self._label_cards.get(key) if key else card
                         paid = wine_data.get("price")
-                        if paid is not None:
-                            self._pending_paid[wine_id] = paid
+                        self._remember_paid(query.message, wine_id, paid)
                         photo = self._get_pending(api, barcode).get("photo_data")
                         if photo:
                             try:
@@ -4001,7 +4057,7 @@ class TelegramBotHandler:
                             parse_mode="HTML",
                         )
                         return
-                paid = self._pending_paid.pop(wine_id, None)
+                paid = self._paid_for(query.message, wine_id)
                 result = api.add_stock(
                     wine_id, drank=True, price=paid, check_duplicate=True,
                 )
@@ -4023,7 +4079,14 @@ class TelegramBotHandler:
                     return
                 failed = _stock_failed(result)
                 if failed:
-                    await query.edit_message_text(f"⚠️ {failed}")
+                    await query.edit_message_text(
+                        f"⚠️ {failed}"
+                        + (f"\n\nSaved <b>{name}</b> but didn't log the bottle." if wine_id else ""),
+                        parse_mode="HTML",
+                        reply_markup=_retry_add_markup(
+                            wine_id, drank=True, barcode=barcode,
+                        ) if wine_id else None,
+                    )
                     return
                 item_id = result.get("item_id")
                 self._touch_label_card(
@@ -4055,6 +4118,8 @@ class TelegramBotHandler:
                 await query.edit_message_text(f"Error: {e}")
             finally:
                 self._release_card(query.message)
+                if pending_claimed and barcode:
+                    self._unclaim_pending(api, barcode)
             return
 
         if action == "la" or action == "aa":
@@ -4080,10 +4145,11 @@ class TelegramBotHandler:
                     )
                 return
             if not self._claim_card(query.message):
+                await self._tap_busy(query)
                 return
             try:
                 self._touch_label_card(query.message, in_progress=True)
-                paid = self._pending_paid.pop(wine_id, None)
+                paid = self._paid_for(query.message, wine_id)
                 result = api.add_stock(
                     wine_id, drank=drank, price=paid, confirm_duplicate=True,
                 )
@@ -4222,6 +4288,9 @@ class TelegramBotHandler:
         # --- Stock add: show storage picker ---
         if action == "in":
             wine_id = data["wine_id"]
+            if not self._claim_card(query.message):
+                await self._tap_busy(query)
+                return
             try:
                 card = self._card_logged_item(query.message)
                 if card.get("item_id") and not card.get("drunk") and not card.get("guard"):
@@ -4239,7 +4308,7 @@ class TelegramBotHandler:
                     drawers = storage.get("drawers", 0) if storage else 0
                     result = api.add_stock(
                         wine_id, storage_name=storage_name,
-                        price=self._pending_paid.pop(wine_id, None),
+                        price=self._paid_for(query.message, wine_id),
                         check_duplicate=bool(self._card_logged_item(query.message)),
                     )
                     if result.get("error") == "recent_duplicate":
@@ -4323,11 +4392,16 @@ class TelegramBotHandler:
                 raise
             except Exception as e:
                 await query.edit_message_text(f"Error: {e}")
+            finally:
+                self._release_card(query.message)
 
         # --- Stock add with chosen storage ---
         elif action == "si":
             wine_id = data["wine_id"]
             storage_id = data.get("page", 0)  # reusing page field for storage_id
+            if not self._claim_card(query.message):
+                await self._tap_busy(query)
+                return
             try:
                 card = self._card_logged_item(query.message)
                 if card.get("item_id") and not card.get("drunk") and not card.get("guard"):
@@ -4345,7 +4419,7 @@ class TelegramBotHandler:
 
                 result = api.add_stock(
                     wine_id, storage_name=storage_name,
-                    price=self._pending_paid.pop(wine_id, None),
+                    price=self._paid_for(query.message, wine_id),
                     check_duplicate=bool(self._card_logged_item(query.message)),
                 )
                 if result.get("error") == "recent_duplicate":
@@ -4413,6 +4487,8 @@ class TelegramBotHandler:
                 raise
             except Exception as e:
                 await query.edit_message_text(f"Error: {e}")
+            finally:
+                self._release_card(query.message)
 
         # --- Set drawer after stock-in ---
         elif action == "sd":
@@ -4592,7 +4668,22 @@ class TelegramBotHandler:
                         put_back = api.add_stock(wine_id, storage_name=src["name"])
                         failed = _stock_failed(put_back)
                         if failed:
-                            await query.edit_message_text(f"\u26a0\ufe0f {failed}")
+                            rollback = api.add_stock(
+                                wine_id, storage_name=dest["name"],
+                            )
+                            if _stock_failed(rollback):
+                                await query.edit_message_text(
+                                    f"Couldn't finish the move. The bottle left "
+                                    f"<b>{dest['name']}</b> and isn't back yet — "
+                                    f"add it in {dest['name']} or {src['name']}.",
+                                    parse_mode="HTML",
+                                )
+                            else:
+                                await query.edit_message_text(
+                                    f"Couldn't put that back in <b>{src['name']}</b>, "
+                                    f"so it's still in {dest['name']}.",
+                                    parse_mode="HTML",
+                                )
                             return
                         stock_count = put_back.get("stock_count", result.get("stock_count"))
                     else:
@@ -4758,7 +4849,13 @@ class TelegramBotHandler:
                 stock = api.add_stock(result["id"])
                 failed = _stock_failed(stock)
                 if failed:
-                    await query.edit_message_text(f"⚠️ {failed}")
+                    self._resolve_pending(api, barcode)
+                    await query.edit_message_text(
+                        f"Saved <b>{result.get('name') or 'that wine'}</b> "
+                        f"but couldn't add a bottle.\n\n⚠️ {failed}",
+                        parse_mode="HTML",
+                        reply_markup=_retry_add_markup(result["id"]),
+                    )
                     return
                 self._resolve_pending(api, barcode)
                 await query.edit_message_text(
@@ -4826,6 +4923,7 @@ class TelegramBotHandler:
                     await query.edit_message_text(_finished_copy(barcode))
                     return
             if status == "busy":
+                await self._tap_busy(query)
                 return
             if status == "created":
                 card = self._label_cards.get(
@@ -4853,7 +4951,7 @@ class TelegramBotHandler:
                 await self._prompt_where_to_store(
                     query, api, context,
                     wine_id=existing_id, name=name or "that wine",
-                    paid=self._pending_paid.get(existing_id),
+                    paid=self._paid_for(query.message, existing_id),
                 )
                 return
 
@@ -4870,8 +4968,7 @@ class TelegramBotHandler:
                 result = api.create_wine(wine_data)
                 wine_id = result["id"]
                 paid = wine_data.get("price")
-                if paid is not None:
-                    self._pending_paid[wine_id] = paid
+                self._remember_paid(query.message, wine_id, paid)
                 self._update_pending(api, barcode, wine_id=wine_id)
                 self._touch_label_card(
                     query.message, committed=True,
@@ -4908,8 +5005,9 @@ class TelegramBotHandler:
                 raise
             except Exception as e:
                 logger.exception("grok confirm failed after create")
-                self._unclaim_pending(api, barcode)
                 await query.edit_message_text(f"Error creating wine: {e}")
+            finally:
+                self._unclaim_pending(api, barcode)
 
         # --- Retry with a new photo ---
         elif action == "retry":
@@ -6683,6 +6781,9 @@ class TelegramBotHandler:
             with self._lock:
                 card["had_pending"] = pending_key in self.pending_store
         card.setdefault("wine", _taste_wine(grok_data))
+        paid = _paid_price(grok_data)
+        if paid is not None:
+            card["paid"] = paid
         self._label_cards[key] = card
         try:
             asyncio.create_task(

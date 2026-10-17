@@ -73,13 +73,16 @@ def ensure_user_settings(user, source_user=None):
         return existing
     currency = "EUR"
     country = ""
+    country_prompted = False
     if source_user is not None:
         src = UserSettings.objects.filter(user=source_user).first()
         if src:
             currency = src.currency or "EUR"
             country = src.country or ""
+            country_prompted = bool(src.country_prompted or country)
     return UserSettings.objects.create(
         user=user, currency=currency, country=country,
+        country_prompted=country_prompted,
     )
 
 
@@ -374,9 +377,13 @@ class ScannerConfigView(APIView):
                 # User's currency + country (used by Grok for price estimates)
                 currency = "EUR"
                 country = ""
+                country_prompted = False
                 if hasattr(tu.user, "user_settings"):
                     currency = tu.user.user_settings.currency or "EUR"
                     country = tu.user.user_settings.country or ""
+                    country_prompted = bool(
+                        tu.user.user_settings.country_prompted or country,
+                    )
 
                 telegram_users.append(
                     {
@@ -392,6 +399,7 @@ class ScannerConfigView(APIView):
                         "household_name": household_name,
                         "currency": currency,
                         "country": country,
+                        "country_prompted": country_prompted,
                         "households": [
                             {"id": h[0], "name": h[1], "is_default": h[2]}
                             for h in all_households
@@ -1222,5 +1230,10 @@ class ScannerSettingsView(APIView):
         row = ensure_user_settings(request.user)
         row.country = country[:2]
         row.currency = currency
-        row.save(update_fields=["country", "currency"])
-        return Response({"currency": row.currency, "country": row.country})
+        row.country_prompted = True
+        row.save(update_fields=["country", "currency", "country_prompted"])
+        return Response({
+            "currency": row.currency,
+            "country": row.country,
+            "country_prompted": True,
+        })

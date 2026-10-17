@@ -1,29 +1,46 @@
 #!/bin/sh
 # One-shot dump of scanner (+ wine) container logs. The scheduled exporter is
 # grok-log-export (/volume1/docker/grok-ssh/export-logs.sh, every 300s).
+#
+# Never deletes containers. Appends each slice onto a rolling file so a
+# compose recreate does not wipe history already exported.
 set -eu
 OUT_DIR=${OUT_DIR:-/volume1/docker/grok-logs}
 FILTER=${LOG_FILTER:-wine}
 SINCE=${LOG_SINCE:-72h}
+MAX_BYTES=${LOG_MAX_BYTES:-25000000}
+LAST_FILE="$OUT_DIR/.last_run"
 
 mkdir -p "$OUT_DIR"
-for c in $(docker ps -a --format '{{.Names}} {{.Status}}' | awk -v f="$FILTER" 'index($1,f){print $1}'); do
-  status=$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null || echo missing)
-  case "$status" in
-    running) ;;
-    missing) ;;
-    *) docker rm -f "$c" >/dev/null 2>&1 || true ;;
-  esac
+NOW=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+if [ -f "$LAST_FILE" ]; then
+  SINCE_ARG=$(cat "$LAST_FILE")
+elif ls "$OUT_DIR"/*.log >/dev/null 2>&1; then
+  # Existing dumps already cover history — don't append a 72h replay.
+  SINCE_ARG=$NOW
+else
+  SINCE_ARG=$SINCE
+fi
+
+for c in $(docker ps -a --format '{{.Names}}' | awk -v f="$FILTER" 'index($0,f)'); do
+  dest="$OUT_DIR/$c.log"
+  tmp="$OUT_DIR/.$c.log.slice"
+  if docker logs --timestamps --since "$SINCE_ARG" "$c" > "$tmp" 2>/dev/null; then
+    if [ -s "$tmp" ]; then
+      cat "$tmp" >> "$dest"
+      chmod 644 "$dest" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$tmp"
+  if [ -f "$dest" ]; then
+    size=$(wc -c < "$dest" | tr -d ' ')
+    if [ "$size" -gt "$MAX_BYTES" ]; then
+      tail -c "$MAX_BYTES" "$dest" > "$dest.trim" && mv "$dest.trim" "$dest"
+      chmod 644 "$dest" 2>/dev/null || true
+    fi
+  fi
 done
-# Drop leftover id-prefixed files from older exporters / recreates.
-for stale in "$OUT_DIR"/*_wine-*.log; do
-  [ -e "$stale" ] || continue
-  rm -f "$stale"
-done
-for c in $(docker ps --format '{{.Names}}' | awk -v f="$FILTER" 'index($0,f)'); do
-  docker logs --timestamps --since "$SINCE" "$c" > "$OUT_DIR/.$c.log.tmp" 2>&1
-  chmod 644 "$OUT_DIR/.$c.log.tmp"
-  mv -f "$OUT_DIR/.$c.log.tmp" "$OUT_DIR/$c.log"
-done
-date -u '+%Y-%m-%dT%H:%M:%SZ' > "$OUT_DIR/last_updated.txt"
-echo "wrote $OUT_DIR (filter=$FILTER since=$SINCE)"
+
+printf '%s\n' "$NOW" > "$LAST_FILE"
+printf '%s\n' "$NOW" > "$OUT_DIR/last_updated.txt"
+echo "appended $OUT_DIR (since=$SINCE_ARG)"

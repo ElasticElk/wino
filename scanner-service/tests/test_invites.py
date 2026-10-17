@@ -749,7 +749,7 @@ async def test_country_tap_saves_aud_for_australia():
     await flow.on_callback(cb, _ctx())
     handler.api.update_settings.assert_called_once_with(country="AU")
     handler.set_currency.assert_called_with("999", "AUD")
-    handler.set_country.assert_called_with("999", "AU")
+    handler.set_country.assert_called_with("999", "AU", prompted=True)
     assert "Australia" in query.edit_message_text.call_args.args[0]
 
 

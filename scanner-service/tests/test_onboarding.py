@@ -65,6 +65,18 @@ async def test_stranger_is_pointed_at_an_invite_not_a_chat_id(handler):
 
 
 @pytest.mark.asyncio
+async def test_start_does_not_ask_after_skip_persisted(handler):
+    handler.set_country("111", "", prompted=True)
+    handler.api.get_household.return_value = {"name": "Curl Curl", "id": 12}
+    u = _update(111)
+    ctx = MagicMock()
+    ctx.args = []
+    ctx.bot.send_message = AsyncMock()
+    await handler._cmd_start(u, ctx)
+    ctx.bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_start_asks_country_when_unset(handler):
     handler._chat_id_to_country["111"] = ""
     handler.api.get_household.return_value = {"name": "Curl Curl", "id": 12}

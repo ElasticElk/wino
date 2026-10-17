@@ -7,7 +7,7 @@ services:
       - "8080:8080"
     environment:
       - TZ=Europe/London
-      - SCANNER_VERSION=2026-10-17.2
+      - SCANNER_VERSION=2026-10-17.3
       - REDIS_URL=redis://redis:6379/2
     volumes:
       - ./config.yaml:/app/config.yaml:ro

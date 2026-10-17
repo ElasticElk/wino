@@ -245,3 +245,20 @@ def test_staff_stats(staff_auth, owner_user):
     assert "wines" in body
     assert "bottles" in body
     assert "scanners" in body
+
+
+def test_skip_country_marks_prompted(staff_auth, staff_user):
+    from wine_cellar.apps.user.models import UserSettings
+
+    response = staff_auth.post(
+        reverse("api-scanner-settings"),
+        data={"country": "SKIP"},
+        content_type="application/json",
+    )
+    assert response.status_code == 200, response.content
+    body = response.json()
+    assert body["country"] == ""
+    assert body["country_prompted"] is True
+    row = UserSettings.objects.get(user=staff_user)
+    assert row.country_prompted is True
+    assert row.currency == "EUR"

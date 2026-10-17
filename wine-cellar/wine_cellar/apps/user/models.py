@@ -26,4 +26,7 @@ class UserSettings(models.Model):
         default="",
         choices={c.alpha_2: c.name for c in pycountry.countries},
     )
+    # Skip (or a real pick) must survive a scanner restart — empty country
+    # alone is also the "never asked" state.
+    country_prompted = models.BooleanField(default=False)
     notifications = models.BooleanField(default=True)

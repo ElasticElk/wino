@@ -405,6 +405,8 @@ async def test_double_tap_while_creating_does_not_create_twice():
 
     api.create_wine.assert_not_called()
     query.edit_message_text.assert_not_called()
+    texts = [c.args[0] for c in query.answer.call_args_list if c.args]
+    assert any("Still working" in str(t) for t in texts)
 
 
 @pytest.mark.asyncio
@@ -674,6 +676,85 @@ async def test_add_another_bottle_confirms_the_duplicate():
     )
     text = query.edit_message_text.call_args.args[0]
     assert "Added:" in text
+
+
+@pytest.mark.asyncio
+async def test_move_put_back_failure_rolls_the_bottle_back():
+    api = MagicMock()
+    api.household_id = 1
+    api.list_storages.return_value = [
+        {"id": 2, "name": "Kitchen"},
+        {"id": 3, "name": "Big Fridge"},
+    ]
+    api.remove_stock.return_value = {
+        "wine_name": "Chenin", "stock_count": 0, "storage": "Big Fridge",
+        "storage_id": 3, "item_id": 80,
+    }
+    api.add_stock.side_effect = [
+        {"error": "HTTP 500"},
+        {"item_id": 81, "wine_name": "Chenin", "stock_count": 1},
+    ]
+    handler = _handler(api)
+    query = AsyncMock()
+    query.data = _cb("ro", wine_id=5, page=3, original="2")
+    query.message = MagicMock()
+    query.message.chat_id = 4242
+    query.message.message_id = 7
+    update = MagicMock()
+    update.callback_query = query
+    update.effective_chat.id = 4242
+
+    await handler._handle_callback(update, MagicMock())
+
+    assert api.remove_stock.call_count == 1
+    assert api.add_stock.call_count == 2
+    text = query.edit_message_text.call_args.args[0]
+    assert "still in" in text.lower() or "Kitchen" in text
+
+
+@pytest.mark.asyncio
+async def test_off_add_failure_offers_retry_without_saying_added():
+    api = MagicMock()
+    api.household_id = 1
+    api.create_wine.return_value = {"id": 44, "name": "Bosman Chenin"}
+    api.add_stock.return_value = {"error": "HTTP 500"}
+    handler = _handler(api)
+    handler.pending_store["_x"] = {
+        "off_data": {"name": "Bosman Chenin", "producer": "Bosman", "country": "ZA"},
+        "time": time.time(),
+    }
+    query = AsyncMock()
+    query.data = _cb("off", barcode="_x")
+    query.message = MagicMock()
+    query.message.chat_id = 4242
+    query.message.message_id = 7
+    update = MagicMock()
+    update.callback_query = query
+    update.effective_chat.id = 4242
+
+    await handler._handle_callback(update, MagicMock())
+
+    text = query.edit_message_text.call_args.args[0]
+    assert "Added" not in text
+    assert "couldn't add" in text.lower() or "Saved" in text
+    labels = [
+        b.text
+        for row in query.edit_message_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    assert any("Try adding" in t for t in labels)
+
+
+@pytest.mark.asyncio
+async def test_paid_price_is_stored_on_the_card():
+    handler = _handler(MagicMock())
+    msg = MagicMock()
+    msg.chat_id = 4242
+    msg.message_id = 7
+    handler._remember_paid(msg, 89, 14.5)
+    assert handler._label_cards["4242:7"]["paid"] == 14.5
+    handler._pending_paid.clear()
+    assert handler._paid_for(msg, 89) == 14.5
 
 
 @pytest.mark.asyncio
