@@ -36,14 +36,16 @@ start.sh / stop.sh    # Service orchestration
 Auth: `Authorization: Token <token>` header. Optional `X-Household: <id>` header.
 
 - `GET /api/wines/by-barcode/<ean>/` — Barcode lookup
-- `GET /api/wines/in-stock/` — Stock list (filter by `?storage=Name`)
+- `GET /api/wines/in-stock/` — Stock list (filter by `?storage=Name`). Each wine also carries `vintage`, `region`, `grapes`, `comment`, purchase `price`, `drink_by`, `rating`, `critic_score`, `vivino_rating`, `attributes`, `food_pairings`, drunk-only `votes`, and `items[].price`. `name` still includes the vintage and `grape` is still the first grape.
 - `GET /api/wines/search/?q=<query>` — Search wines
 - `GET /api/wines/all/` — List all wines
 - `POST /api/wines/` — Create wine
 - `PATCH /api/wines/<pk>/` — Update wine
 - `POST /api/wines/<pk>/images/` — Upload image
 - `POST /api/stock/add/` — Add stock (wine_id, storage_name, price, row)
-- `POST /api/stock/remove/` — Remove stock
+- `POST /api/stock/remove/` — Remove stock. Optional `item_id` targets that bottle (fridge `-` still uses wine_id)
+- `POST /api/stock/bulk/` — Catch-up apply: `{ops: [{op: remove|move, item_id, expected_storage, expected_row, storage_name, row}]}` in one transaction. Moves first, then removes. `409 stale_item` / `duplicate_item` / `storage_not_found`. Returns `{batch_id, ops}`
+- `POST /api/stock/bulk/<uuid>/undo/` — Reverse that batch (restore removes and clear their vote, PATCH moves back). 10-minute window, same as a single-bottle undo — does not stretch `RESTORE_WINDOW`. A bottle moved again since is `409 stale_item`
 - `POST /api/stock/set/` — Set exact quantity
 - `GET /api/stock/history/` — Recently drank/removed bottles (`?limit=5&offset=0`)
 - `PATCH /api/stock/<pk>/move/` — Move bottle
@@ -63,6 +65,9 @@ Auth: `Authorization: Token <token>` header. Optional `X-Household: <id>` header
 - `GET /api/scanner/invites/<code>/` — Preview a code without burning it. **Staff only** — the bot calls it with its admin client (`handler.api`)
 - `POST /api/scanner/invites/redeem/` — Provision from a code (join=member, new=owner + storage named Cellar). Returns the token of the user for the posted `chat_id`, so **staff only**. A taken name is `409` with `error` "That name's taken — pick another" and a free `suggested_name` (never the taken one; names are global, so the taken name is not echoed)
 - `POST /api/scanner/invites/cancel/` — Drop the caller's newest **unexpired** unused invite. Optional `household_id` prefers that cellar, then a staff `new` invite. Returns `code`, `kind`, `household_name`
+- `POST /api/scanner/taste/` — Record a taste intent (`look`, `winelist`, or `ask`). `ask` requires a JSON object `payload` and does not rebuild the household snapshot. The response includes `intent_id`
+- `PATCH /api/scanner/taste/<id>/` — Merge `outcome`, `shown`, `rejected`, `place`, `model`, `latency_ms` and `fallback` into an `ask` intent. Another household, or a `look` / `winelist` row, is `404`
+- `GET /api/scanner/chat-stats/?days=30` — **Staff only.** How chat recommendations landed: taps, whether the suggested bottle was removed from stock within 48h and its vote, model mix, latency, and the five worst asks (`wine/chat_stats.py`)
 
 ### Frontend
 - **Templates:** `wine_cellar/templates/` — Django templates with `base.html` layout
@@ -99,6 +104,7 @@ Bridges physical barcode scanners to the Wine Cellar API. Runs as FastAPI server
 ### Integrations
 - `integrations/wine_cellar_api.py` — HTTP client for Wine Cellar REST API
 - `integrations/telegram_bot.py` — Telegram bot (notifications, photos, disambiguation, household switching)
+- `integrations/telegram_catchup.py` — `/fridge` Catch up drawer walk (staged Drunk/Moved, bulk apply)
 - `integrations/grok_vision.py` — xAI Grok Vision for label analysis
 - `integrations/open_food_facts.py` — Barcode → wine data lookup
 - `hardware/barcode_reader.py` — Scanner abstraction (mock/real)
@@ -165,10 +171,10 @@ The bot uses `filters.Chat(chat_id=[...])` built from users returned by `/api/sc
 ## Telegram Bot Commands
 
 Available to authorized users via the bot:
-- `/search <name>` — Find a wine by name (plain text also works — any message ≥3 chars is treated as a search)
+- `/search <name>` — Find a wine by name. Plain text of 3+ characters goes through natural-language chat when a Grok key is configured, and falls through to this search when chat does not claim it (no key, a one-word wine name, or the parser says it is a search)
 - `/status` — Scanner system status
 - `/stock` — View current stock (interactive, per-storage)
-- `/fridge` — Browse fridge contents
+- `/fridge` — Browse fridge contents. **Catch up** walks one drawer: tap Drunk / Moved (1 or both), then Apply. Empty here means those bottles moved, not drunk. One Undo. Not a new slash command. Buttons carry `wine_id` / `item_id`, never a list position (the list shrinks per tap, so an index would hit another wine). Bottles with no drawer (fridge `+` adds them so) get a *No drawer* bucket. A move may be *Not sure which drawer* (row null). Undo carries its batch id, so it still works after a new Catch up. Stale Apply keeps the changes that are still valid and drops the rest.
 - `/recent` — Recent bottles (notes + label photo, pages of 5)
 - `/help` — List available commands
 - `/pending` — Show barcodes awaiting label photos
@@ -190,6 +196,28 @@ Triage (`GrokVisionAPI.triage_photo`) classifies every photo as `barcode`, `labe
 - Read lists are cached per message for `WINELIST_TTL` (30 min) to back the *Show all* / pagination buttons.
 
 Users can also send **photos** to the bot — it will attempt barcode detection (pyzbar) or wine label analysis (Grok Vision).
+
+### Natural language chat
+
+Plain text keeps the slash commands. When `ChatModels` is wired (a Grok key at scanner startup), `_unknown_text` asks `ChatRouter` before it searches. With no key, that branch is today's search, so tests and a keyless bot are unchanged.
+
+`grok-4.20-0309-non-reasoning` parses the sentence (about 4s). Shelf questions — a drawer, a grape, a country, "list everything" — are answered in code from the in-stock rows (`cellar_facts.py`). Shiraz matches Syrah, and a blend is named as a blend. A grape the cellar does not have says so and offers a button; it does not recommend on its own.
+
+A recommendation is one `grok-4.20-0309-non-reasoning` call over the whole cellar (capped at 300 bottles), about 1.5s. **Not a reasoning model**: on 2026-10-21 every xAI reasoning model took 16–32s on a 31-wine cellar (3,500 thinking tokens) and timed out in production, while the non-reasoning model scored the same on the eval. Re-run the eval before switching back. The placeholder says "Looking through your cellar…", then edits itself: a matching line, "down to a few", then the pick. The message is never rewritten into a different bottle. A tie names both bottles in that one message. The reasoning call can ask one question; the option tap recommends without asking again. Each recommendation is a `TasteIntent` of kind `ask`. Buttons are `cf` `cc` `cq` `ck` `cn` `co` `cx` `cr` `cw`. Each ask records its `model` (`quick` for the code fallback) and `latency_ms`; staff see the rollup with `/chatstats [days]`.
+
+*That's the one* leaves a *Take it out now* button (one per fridge holding it, `co`), which removes the bottle through the normal stock-out path with Undo and the thumbs vote, so it never needs scanning out. That removal is also what `/chatstats` counts as the pick being drunk.
+
+Wine questions that aren't about picking from the cellar (ordering at a restaurant, a shop, a region, serving, decanting) are `wine_chat`: one short non-reasoning answer using the taste profile, nothing recorded. How to use Whiney itself (add a person, start a cellar, "does my wife need Telegram?", how photos work) is `help`: one short non-reasoning answer from a fixed fact sheet of how the bot actually works, in the language they asked in. It must not invent commands. If the sheet does not cover it, it says so and points at `/help` or a screenshot to whoever set Whiney up. If that call fails, a canned line for the known topics (`/invite`, `/newcellar` for staff, `/switch`) is the fallback. Anything not about wine, drink, food or Whiney is `offtopic` and gets a one-line decline. There is no keyword list; the parser decides. An `unsure` full sentence goes to `wine_chat`, which declines on its own if it isn't wine. The parser classifies by meaning in any language, and `wine_chat` replies in the language it was asked in.
+
+Finding somewhere to go (a restaurant, wine bar, farm or shop with good wine) is `place`. A named area searches straight away. "Near me" replies with a one-tap *Send my location* button (or the user types a suburb). The pending request is held under `place:<chat_id>`, apart from the open ask, and any other message or command drops it. `find_places` is the only live web search in chat: `grok-4.3` on `POST /v1/responses` with the `web_search` tool (`/chat/completions` rejects that tool with a 422), about 10s behind a progress message, up to 3 places with links. The shared location is used for that one search and is not stored.
+
+A price or a correction patches through `update_wine`. A price naming a wine goes to that wine. Otherwise the bottle is the open suggestion, else the newest unsaved label card (the card's merged reading, so Add still creates the right wine), else the wine named in the sentence. Market price is never written.
+
+A GPS pin is stored on the open ask only when a location arrives while that ask has no place yet. Nothing asks for a location, and a later live-location update is ignored.
+
+If the parser or the cellar API is down, a short phrase still searches and a full sentence says chat is resting. A recommendation that cannot reach the model, times out, or returns junk twice gets a code quick pick with a *Try properly* button, so a sentence never ends without a bottle. Three failures open a two-minute circuit. An auth failure alerts staff once an hour; the user never sees the words key or credit. `/status` includes `Chat: ready` or `Chat: resting`.
+
+Label vision stays on `grok-4.3`. A typed correction after a misread (`identify_wine_from_hint`) is the same live web search as places: `POST /v1/responses` with `web_search`. `/chat/completions` rejects that tool with a 422, so the old path never searched; it now falls back to `/chat/completions` without the tool only if the search call itself fails. The live eval is `scanner-service/tests/eval/run.py` (needs `XAI_API_KEY`; pytest does not collect it).
 
 ### Onboarding (unprovisioned users)
 

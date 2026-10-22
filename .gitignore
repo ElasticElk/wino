@@ -25,6 +25,7 @@ wine-cellar/build/
 wine-cellar/media/
 wine-cellar/*.mo
 wine-cellar/site/
+wine-cellar/wine_cellar/test_media/
 
 # Celery beat runtime state (written into the source tree by the dev bind mount)
 celerybeat-schedule*
