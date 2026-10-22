@@ -35,6 +35,7 @@ def handler():
     h._chat_id_to_country = {"111": "GB", "222": "GB"}
     h._chat_id_to_currency = {}
     h._country_asked = set()
+    h._await_producer = {}
     h.admin_chat_ids = []
     return h
 

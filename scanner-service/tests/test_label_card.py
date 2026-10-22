@@ -18,18 +18,29 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from integrations.card_store import CardStore
+from telegram.error import BadRequest
+
 from integrations.telegram_bot import (
+    ADD_ANOTHER_PHOTO,
+    ADD_PHOTO_INFO,
     JUST_LOOKING_NOTE,
     REFS_PENDING_NOTE,
     RESEND_PHOTO,
+    VIEW_WINE,
+    BrowseSession,
     TelegramBotHandler,
+    _can_update_wine,
     _cb,
     _clean_wine_data,
     _merge_stored_references,
     _needs_references,
+    _safe_edit,
     apply_vote_choice,
     apply_vote_thanks,
     build_drank_view,
+    find_existing_wines,
+    merge_front_back,
+    proposed_wine_update,
 )
 
 LABEL = {
@@ -50,6 +61,10 @@ def _status_msg():
 
 
 def _handler(api):
+    if isinstance(getattr(api.list_all_wines, "return_value", None), MagicMock):
+        api.list_all_wines.return_value = []
+    if isinstance(getattr(api, "web_url", None), MagicMock) or not getattr(api, "web_url", None):
+        api.web_url = "https://cellar.test"
     return TelegramBotHandler(
         bot_token="t", chat_ids=["4242"], wine_cellar_api=api, pending_store={},
     )
@@ -380,6 +395,64 @@ async def test_second_add_to_cellar_tap_resumes_the_fridge_picker():
     assert "Étoile de Pauillac" in text
     assert "already handled" not in text.lower()
     assert "expired" not in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_safe_edit_swallows_not_modified_and_answers():
+    query = AsyncMock()
+    query.edit_message_text = AsyncMock(
+        side_effect=BadRequest(
+            "Message is not modified: specified new message content and "
+            "reply markup are exactly the same as a current content and "
+            "reply markup of the message"
+        ),
+    )
+    await _safe_edit(query, "same", parse_mode="HTML")
+    query.answer.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_safe_edit_reraises_other_badrequest():
+    query = AsyncMock()
+    query.edit_message_text = AsyncMock(side_effect=BadRequest("Message to edit not found"))
+    with pytest.raises(BadRequest, match="not found"):
+        await _safe_edit(query, "x")
+    query.answer.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_double_tap_add_ignores_unmodified_store_card():
+    """Second Add redraws the same fridge picker; Telegram rejects that."""
+    api = MagicMock()
+    api.household_id = 1
+    api.list_storages.return_value = [
+        {"id": 2, "name": "Wine Fridge", "bottles": 3, "drawers": 8},
+        {"id": 3, "name": "Kitchen", "bottles": 0, "drawers": 0},
+    ]
+    api.get_wine_detail.return_value = {
+        "name": "Cepa Lebrel 2019", "stock_count": 0,
+    }
+    handler = _handler(api)
+    handler._label_cards["4242:7"] = {
+        "committed": True, "wine_id": 12, "wine_name": "Cepa Lebrel 2019",
+    }
+    query = AsyncMock()
+    query.data = _cb("grok", barcode="_label_7")
+    query.message = MagicMock()
+    query.message.chat_id = 4242
+    query.message.message_id = 7
+    query.edit_message_text = AsyncMock(
+        side_effect=BadRequest("Message is not modified"),
+    )
+    update = MagicMock()
+    update.callback_query = query
+    update.effective_chat.id = 4242
+
+    await handler._handle_callback(update, MagicMock())
+
+    api.create_wine.assert_not_called()
+    query.answer.assert_awaited()
+    query.edit_message_text.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -1083,3 +1156,1241 @@ def test_format_competition_race():
     assert "12 days left" in text
     assert "Sam" in text
     assert "Alex" in text
+
+
+def test_match_barcode_less_wine_requires_two_words_and_producer():
+    from integrations.telegram_bot import match_barcode_less_wine, match_barcode_less_wines
+
+    glen = {"id": 4, "name": "Syrah", "producer": "Glenz", "barcode": ""}
+    assert match_barcode_less_wine(
+        {"name": "Private Cellar Syrah", "producer": "Cederberg"}, [glen],
+    ) is None
+
+    contino = {
+        "id": 67, "name": "Contino Reserva",
+        "producer": "Viñedos del Contino", "barcode": "",
+    }
+    match = match_barcode_less_wine(
+        {"name": "Contino Rioja", "producer": "Viñedos Del Contino"},
+        [contino],
+    )
+    assert match["id"] == 67
+
+    others = [
+        contino,
+        {"id": 12, "name": "Viña Pomal", "producer": "Bodegas Bilbaínas", "barcode": ""},
+        {"id": 8, "name": "Contino Gran Reserva", "producer": "Viñedos del Contino", "barcode": ""},
+        {"id": 9, "name": "Contino Viña del Olivo", "producer": "Viñedos del Contino", "barcode": ""},
+        {"id": 10, "name": "Contino Blanco", "producer": "Viñedos del Contino", "barcode": ""},
+    ]
+    hits = match_barcode_less_wines(
+        {"name": "Contino Rioja", "producer": "Viñedos Del Contino"}, others,
+    )
+    assert [w["id"] for w in hits] == [67, 8, 9]
+
+
+def test_match_requires_a_name_word_not_just_producer():
+    from integrations.telegram_bot import match_barcode_less_wine, match_barcode_less_wines
+    same_estate = [
+        {"id": 8, "name": "Gran Reserva", "producer": "Viñedos del Contino", "barcode": ""},
+        {"id": 67, "name": "Contino Reserva", "producer": "Viñedos del Contino", "barcode": ""},
+        {"id": 11, "name": "White Blend", "producer": "Viñedos del Contino", "barcode": ""},
+    ]
+    hits = match_barcode_less_wines(
+        {"name": "Contino Rioja", "producer": "Viñedos Del Contino"}, same_estate,
+    )
+    assert [w["id"] for w in hits] == [67]
+    assert match_barcode_less_wine(
+        {"name": "Imperial Reserva", "producer": "CVNE"},
+        [{"id": 1, "name": "Viña Real Crianza", "producer": "CVNE", "barcode": ""}],
+    ) is None
+
+
+def test_match_barcode_less_wine_ignores_wines_that_already_have_a_barcode():
+    from integrations.telegram_bot import match_barcode_less_wine
+    wines = [
+        {"id": 97, "name": "Contino Rioja", "producer": "Viñedos del Contino",
+         "barcode": "8410591003359"},
+        {"id": 67, "name": "Contino Reserva 2021", "producer": "Viñedos del Contino",
+         "barcode": ""},
+    ]
+    match = match_barcode_less_wine(
+        {"name": "Contino Rioja", "producer": "Viñedos Del Contino"}, wines,
+    )
+    assert match["id"] == 67
+
+
+def test_invalid_12_digit_barcode_is_not_padded_as_upc_a():
+    from integrations.barcodes import normalise_barcode
+    assert normalise_barcode("506558704244") == "506558704244"
+    assert normalise_barcode("123456789012") == "0123456789012"
+
+
+@pytest.mark.asyncio
+async def test_label_on_unknown_barcode_asks_to_link_barcode_less_wine():
+    api = MagicMock()
+    api.household_id = 1
+    api.list_all_wines.return_value = [
+        {"id": 67, "name": "Contino Reserva 2021",
+         "producer": "Viñedos del Contino", "barcode": "", "stock_count": 2},
+    ]
+    handler = _handler(api)
+    status_msg = _status_msg()
+    grok = {
+        "type": "label", "name": "Contino Rioja",
+        "producer": "Viñedos Del Contino",
+        "vintage": 2019, "wine_type": "RE", "country": "ES",
+    }
+    await handler._show_barcode_label_confirm(status_msg, grok, "8410591003359", api)
+    text = status_msg.edit_text.call_args.args[0]
+    assert "Is this" in text
+    assert "Contino Reserva 2021" in text
+    labels = [
+        b.text
+        for row in status_msg.edit_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    assert any(t.startswith("Yes, link") for t in labels)
+    assert "No, new wine" in labels
+
+
+@pytest.mark.asyncio
+async def test_unknown_scan_then_matching_label_links_and_does_not_create():
+    api = MagicMock()
+    api.household_id = 1
+    api.list_all_wines.return_value = [
+        {"id": 67, "name": "Contino Reserva 2021",
+         "producer": "Viñedos del Contino", "barcode": ""},
+    ]
+    api.get_wine_detail.return_value = {
+        "id": 67, "name": "Contino Reserva 2021", "barcode": "",
+    }
+    api.lookup_barcode.return_value = []
+    api.list_storages.return_value = [{"name": "Cellar", "drawers": 0}]
+    api.update_wine.return_value = {"name": "Contino Reserva 2021"}
+    api.add_stock.return_value = {
+        "stock_count": 3, "wine_name": "Contino Reserva 2021", "item_id": 143,
+    }
+    api.refresh_references.return_value = {"updated": False}
+    handler = _handler(api)
+    handler._create_pending(api, "8410591003359", off_data={"name": "Contino Rioja"})
+    handler.pending_store["1:8410591003359"]["grok_merged"] = {
+        "name": "Contino Rioja", "producer": "Viñedos Del Contino", "wine_type": "RE",
+    }
+    handler.pending_store["1:8410591003359"]["photo_data"] = b"label-jpg"
+    query = AsyncMock()
+    query.data = _cb("lnk", wine_id=67, barcode="8410591003359")
+    query.message = MagicMock()
+    query.message.chat_id = 4242
+    query.message.message_id = 7
+    update = MagicMock()
+    update.callback_query = query
+    update.effective_chat.id = 4242
+
+    await handler._handle_callback(update, MagicMock())
+    await handler._handle_callback(update, MagicMock())
+    await _drain()
+
+    api.create_wine.assert_not_called()
+    api.update_wine.assert_called_once_with(67, {"barcode": "8410591003359"})
+    api.upload_wine_image.assert_called_once_with(67, b"label-jpg")
+    api.add_stock.assert_called_once_with(
+        67, storage_name="Cellar", price=None, check_duplicate=True,
+    )
+    texts = [c.args[0] for c in query.edit_message_text.call_args_list if c.args]
+    assert any("already linked" in t.lower() for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_scan_move_without_wine_id_does_not_fetch_a_blank_card():
+    api = MagicMock()
+    api.household_id = 1
+    handler = _handler(api)
+    query = AsyncMock()
+    query.data = _cb("sl", original="4242:7")
+    query.message = MagicMock()
+    query.message.chat_id = 4242
+    query.message.message_id = 7
+    update = MagicMock()
+    update.callback_query = query
+    update.effective_chat.id = 4242
+
+    await handler._handle_callback(update, MagicMock())
+
+    api.get_wine_detail.assert_not_called()
+    text = query.edit_message_text.call_args.args[0]
+    assert "Wine" != text
+    assert "out of date" in text.lower() or "stock" in text.lower()
+
+
+def _tap(handler, data):
+    query = AsyncMock()
+    query.data = data
+    query.message = MagicMock()
+    query.message.chat_id = 4242
+    query.message.message_id = 7
+    update = MagicMock()
+    update.callback_query = query
+    update.effective_chat.id = 4242
+    return update, query
+
+
+LNK_BARCODE = "8410591003359"
+
+
+def _lnk_api():
+    api = MagicMock()
+    api.household_id = 1
+    api.list_all_wines.return_value = []
+    api.get_wine_detail.return_value = {
+        "id": 67, "name": "Contino Reserva", "barcode": "",
+    }
+    api.lookup_barcode.return_value = []
+    api.list_storages.return_value = [{"name": "Cellar", "drawers": 0}]
+    api.update_wine.return_value = {"name": "Contino Reserva"}
+    api.add_stock.return_value = {
+        "stock_count": 3, "wine_name": "Contino Reserva", "item_id": 143,
+    }
+    api.refresh_references.return_value = {"updated": False}
+    return api
+
+
+def _lnk_handler(api, *, pending=True, grok=True):
+    handler = _handler(api)
+    if pending:
+        handler._create_pending(api, LNK_BARCODE, off_data={"name": "Contino Rioja"})
+        if grok:
+            handler.pending_store[f"1:{LNK_BARCODE}"]["grok_merged"] = {
+                "name": "Contino Rioja", "producer": "Viñedos Del Contino",
+                "wine_type": "RE",
+            }
+            handler.pending_store[f"1:{LNK_BARCODE}"]["photo_data"] = b"label-jpg"
+    return handler
+
+
+async def _lnk_taps(handler, n, wine_id=67, barcode=LNK_BARCODE):
+    last = None
+    for _ in range(n):
+        update, last = _tap(handler, _cb("lnk", wine_id=wine_id, barcode=barcode))
+        await handler._handle_callback(update, MagicMock())
+    await _drain()
+    return last
+
+
+@pytest.mark.asyncio
+async def test_lnk_two_and_three_taps_link_once():
+    for n in (2, 3):
+        api = _lnk_api()
+        handler = _lnk_handler(api)
+        query = await _lnk_taps(handler, n)
+        assert api.update_wine.call_count == 1
+        assert api.add_stock.call_count == 1
+        api.update_wine.assert_called_once_with(67, {"barcode": LNK_BARCODE})
+        api.add_stock.assert_called_once_with(
+            67, storage_name="Cellar", price=None, check_duplicate=True,
+        )
+        texts = [c.args[0] for c in query.edit_message_text.call_args_list if c.args]
+        assert texts[-1] == "Already linked."
+
+
+@pytest.mark.asyncio
+async def test_lnk_refuses_expired_or_gone_card():
+    from integrations.telegram_bot import PENDING_TIMEOUT_SECONDS, BARCODE_FINISHED
+    api = _lnk_api()
+    handler = _lnk_handler(api, pending=False)
+    query = await _lnk_taps(handler, 1)
+    api.update_wine.assert_not_called()
+    api.add_stock.assert_not_called()
+    assert query.edit_message_text.call_args.args[0] == BARCODE_FINISHED
+
+    api = _lnk_api()
+    handler = _lnk_handler(api)
+    handler.pending_store[f"1:{LNK_BARCODE}"]["time"] = (
+        time.time() - PENDING_TIMEOUT_SECONDS - 1
+    )
+    query = await _lnk_taps(handler, 1)
+    api.update_wine.assert_not_called()
+    api.add_stock.assert_not_called()
+    assert query.edit_message_text.call_args.args[0] == BARCODE_FINISHED
+
+
+@pytest.mark.asyncio
+async def test_lnk_refuses_target_that_already_has_a_different_barcode():
+    api = _lnk_api()
+    api.get_wine_detail.return_value = {
+        "id": 67, "name": "Contino Reserva", "barcode": "0123456789012",
+    }
+    handler = _lnk_handler(api)
+    query = await _lnk_taps(handler, 1)
+    api.update_wine.assert_not_called()
+    api.add_stock.assert_not_called()
+    assert query.edit_message_text.call_args.args[0] == (
+        "Contino Reserva already has a different barcode"
+    )
+
+
+@pytest.mark.asyncio
+async def test_lnk_refuses_barcode_already_on_another_wine():
+    api = _lnk_api()
+    api.lookup_barcode.return_value = [
+        {"id": 12, "name": "Viña Pomal"},
+    ]
+    handler = _lnk_handler(api)
+    query = await _lnk_taps(handler, 1)
+    api.update_wine.assert_not_called()
+    api.add_stock.assert_not_called()
+    assert "already on Viña Pomal" in query.edit_message_text.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_lnk_created_for_a_different_wine_is_not_already_linked():
+    api = _lnk_api()
+    handler = _lnk_handler(api)
+    handler.pending_store[f"1:{LNK_BARCODE}"]["wine_id"] = 67
+    query = await _lnk_taps(handler, 1, wine_id=8)
+    api.update_wine.assert_not_called()
+    api.add_stock.assert_not_called()
+    assert query.edit_message_text.call_args.args[0] == (
+        "This barcode was already added as Contino Reserva"
+    )
+
+
+@pytest.mark.asyncio
+async def test_grok_no_new_wine_creates_immediately_after_is_this_prompt():
+    api = MagicMock()
+    api.household_id = 1
+    api.list_all_wines.return_value = [
+        {"id": 67, "name": "Contino Reserva",
+         "producer": "Viñedos del Contino", "barcode": ""},
+    ]
+    api.create_wine.return_value = {"id": 98, "name": "Contino Rioja"}
+    api.list_storages.return_value = [{"name": "Cellar", "drawers": 0}]
+    api.add_stock.return_value = {"stock_count": 1, "item_id": 9}
+    handler = _handler(api)
+    handler._create_pending(api, "8410591003359")
+    handler.pending_store["1:8410591003359"]["grok_merged"] = {
+        "name": "Contino Rioja", "producer": "Viñedos Del Contino",
+        "wine_type": "RE", "country": "ES",
+    }
+    update, query = _tap(handler, _cb("grok", barcode="8410591003359"))
+    await handler._handle_callback(update, MagicMock())
+    api.create_wine.assert_not_called()
+    assert "Is this" in query.edit_message_text.call_args.args[0]
+
+    update, query = _tap(
+        handler, _cb("grok", barcode="8410591003359", original="new"),
+    )
+    await handler._handle_callback(update, MagicMock())
+    api.create_wine.assert_called_once()
+    assert not any("busy" in str(c).lower() for c in query.answer.call_args_list)
+    assert not any(
+        "busy" in str(c.args[0]).lower()
+        for c in query.edit_message_text.call_args_list if c.args
+    )
+
+
+@pytest.mark.asyncio
+async def test_mode3_pyzbar_barcode_is_kept_despite_other_pending():
+    api = MagicMock()
+    api.household_id = 1
+    api.lookup_barcode.return_value = []
+    api.list_all_wines.return_value = []
+    handler = _handler(api)
+    handler._create_pending(api, "1111111111111")
+    handler._download_photo = AsyncMock(return_value=b"jpeg")
+    handler.set_local_barcode_reader(lambda data: "8410591003359")
+    handler.set_triage_callback(
+        lambda *a, **k: {**LABEL, "type": "label", "name": "Contino Rioja"},
+    )
+    status_msg = _status_msg()
+    update = MagicMock()
+    update.message.reply_to_message = None
+    update.message.chat_id = 4242
+    update.message.reply_text = AsyncMock(return_value=status_msg)
+    update.effective_chat.id = 4242
+    context = MagicMock()
+
+    from unittest.mock import patch
+    with patch("integrations.open_food_facts.OpenFoodFactsAPI") as off:
+        off.return_value.lookup.return_value = None
+        await handler._handle_photo_body(update, context)
+
+    pending = handler.pending_store.get("1:8410591003359") or {}
+    assert pending.get("grok_merged", {}).get("name") == "Contino Rioja"
+    other = handler.pending_store.get("1:1111111111111") or {}
+    assert "grok_merged" not in other
+    texts = " ".join(
+        str(c.args[0]) for c in status_msg.edit_text.call_args_list if c.args
+    )
+    replies = " ".join(
+        str(c.args[0]) for c in update.message.reply_text.call_args_list if c.args
+    )
+    assert "8410591003359" in texts + replies
+    assert "Multiple barcodes" not in replies
+
+
+@pytest.mark.asyncio
+async def test_pi_scan_then_same_barcode_photo_shows_label_confirm():
+    api = MagicMock()
+    api.household_id = 1
+    api.lookup_barcode.return_value = []
+    api.list_all_wines.return_value = []
+    handler = _handler(api)
+    handler._create_pending(api, "8410591003359", off_data={"name": "Contino Rioja"})
+    handler._download_photo = AsyncMock(return_value=b"jpeg")
+    handler.set_local_barcode_reader(lambda data: "8410591003359")
+    handler.set_photo_callback(
+        lambda *a, **k: {**LABEL, "type": "label", "name": "Contino Rioja"},
+    )
+
+    def no_triage(*a, **k):
+        raise AssertionError("pending barcode should use the label flow, not triage")
+
+    handler.set_triage_callback(no_triage)
+    status_msg = _status_msg()
+    update = MagicMock()
+    update.message.reply_to_message = None
+    update.message.chat_id = 4242
+    update.message.reply_text = AsyncMock(return_value=status_msg)
+    update.effective_chat.id = 4242
+
+    await handler._handle_photo_body(update, MagicMock())
+
+    pending = handler.pending_store.get("1:8410591003359") or {}
+    assert pending.get("grok_merged", {}).get("name") == "Contino Rioja"
+    texts = " ".join(
+        str(c.args[0]) for c in status_msg.edit_text.call_args_list if c.args
+    )
+    replies = " ".join(
+        str(c.args[0]) for c in update.message.reply_text.call_args_list if c.args
+    )
+    blob = texts + replies
+    assert "8410591003359" in blob
+    assert "already pending" not in blob.lower()
+    labels = [
+        b.text
+        for c in status_msg.edit_text.call_args_list
+        for row in (c.kwargs.get("reply_markup").inline_keyboard if c.kwargs.get("reply_markup") else [])
+        for b in row
+    ]
+    assert any("Confirm" in t or "add to cellar" in t.lower() for t in labels)
+
+
+@pytest.mark.asyncio
+async def test_photo_of_already_created_barcode_shows_known_wine_not_grok():
+    api = MagicMock()
+    api.household_id = 1
+    api.lookup_barcode.return_value = [
+        {"id": 67, "name": "Contino Reserva", "stock_count": 1},
+    ]
+    handler = _handler(api)
+    handler._create_pending(api, "8410591003359")
+    handler.pending_store["1:8410591003359"]["wine_id"] = 67
+    handler._download_photo = AsyncMock(return_value=b"jpeg")
+    handler.set_local_barcode_reader(lambda data: "8410591003359")
+
+    def no_grok(*a, **k):
+        raise AssertionError("already-created barcode must not call Grok")
+
+    handler.set_photo_callback(no_grok)
+    handler.set_triage_callback(no_grok)
+    status_msg = _status_msg()
+    update = MagicMock()
+    update.message.reply_to_message = None
+    update.message.chat_id = 4242
+    update.message.reply_text = AsyncMock(return_value=status_msg)
+    update.effective_chat.id = 4242
+
+    await handler._handle_photo_body(update, MagicMock())
+
+    api.lookup_barcode.assert_called()
+    texts = " ".join(
+        str(c.args[0]) for c in status_msg.edit_text.call_args_list if c.args
+    )
+    assert "Contino Reserva" in texts
+    assert "In stock" in texts
+    labels = [
+        b.text
+        for c in status_msg.edit_text.call_args_list
+        for row in (c.kwargs.get("reply_markup").inline_keyboard if c.kwargs.get("reply_markup") else [])
+        for b in row
+    ]
+    assert any("Add" in t for t in labels)
+    assert not any("Confirm" in t for t in labels)
+
+
+@pytest.mark.asyncio
+async def test_lnk_concurrent_taps_link_once_with_try_claim():
+    class ClaimDict(dict):
+        def __init__(self):
+            super().__init__()
+            self._held = set()
+            self._lock = threading.Lock()
+
+        def try_claim(self, key):
+            with self._lock:
+                if key in self._held:
+                    return False
+                self._held.add(key)
+                return True
+
+        def release_claim(self, key):
+            with self._lock:
+                self._held.discard(key)
+
+    api = _lnk_api()
+    handler = TelegramBotHandler(
+        bot_token="t", chat_ids=["4242"], wine_cellar_api=api,
+        pending_store=ClaimDict(),
+    )
+    handler._create_pending(api, LNK_BARCODE, off_data={"name": "Contino Rioja"})
+    handler.pending_store[f"1:{LNK_BARCODE}"]["grok_merged"] = {
+        "name": "Contino Rioja", "producer": "Viñedos Del Contino",
+        "wine_type": "RE",
+    }
+    updates = [_tap(handler, _cb("lnk", wine_id=67, barcode=LNK_BARCODE)) for _ in range(3)]
+    await asyncio.gather(*(
+        handler._handle_callback(update, MagicMock()) for update, _ in updates
+    ))
+    await _drain()
+    assert api.update_wine.call_count == 1
+    assert api.add_stock.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_fridge_minus_last_bottle_offers_undo_and_put_back():
+    api = MagicMock()
+    api.household_id = 1
+    api.remove_stock.return_value = {
+        "wine_name": "Barbaresco 2021", "stock_count": 0, "item_id": 10,
+        "storage": "Big Fridge",
+    }
+    api.restore_stock.return_value = {
+        "wine_name": "Barbaresco 2021", "stock_count": 1, "item_id": 10,
+        "storage": "Big Fridge", "action": "restored",
+    }
+    leftover = [{
+        "id": 1, "name": "Barbaresco 2021", "stock_count": 1,
+        "wine_type": "RE", "producer": "Cascina Ghercina",
+    }]
+    api.wines_in_stock.return_value = []
+    handler = _handler(api)
+    handler._browse_sessions["4242:7"] = BrowseSession(
+        leftover, mode="fridge", storage_name="All storages",
+    )
+    update, query = _tap(handler, _cb("-", wine_id=1, page=0))
+    await handler._handle_callback(update, MagicMock())
+    text = query.edit_message_text.call_args.args[0]
+    assert "last bottle" in text.lower()
+    assert "Barbaresco 2021" in text
+    labels = [
+        b.text
+        for row in query.edit_message_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    assert any("Undo" in t for t in labels)
+    api.remove_stock.assert_called_once_with(1)
+
+    api.wines_in_stock.return_value = leftover
+    update, query = _tap(handler, _cb("ul", wine_id=1, item_id=10))
+    await handler._handle_callback(update, MagicMock())
+    api.restore_stock.assert_called_once_with(10)
+    api.add_stock.assert_not_called()
+    restored = query.edit_message_text.call_args.args[0]
+    assert "Barbaresco 2021" in restored
+    assert "last bottle" not in restored.lower()
+
+
+@pytest.mark.asyncio
+async def test_ul_double_tap_restores_once():
+    api = MagicMock()
+    api.household_id = 1
+    api.restore_stock.side_effect = [
+        {
+            "item_id": 10, "wine_name": "Barbaresco 2021", "stock_count": 1,
+            "storage": "Big Fridge", "action": "restored",
+        },
+        {"error": "already_restored", "item_id": 10, "wine_name": "Barbaresco 2021",
+         "stock_count": 1},
+    ]
+    handler = _handler(api)
+    update, first = _tap(handler, _cb("ul", wine_id=1, item_id=10))
+    await handler._handle_callback(update, MagicMock())
+    update, second = _tap(handler, _cb("ul", wine_id=1, item_id=10))
+    await handler._handle_callback(update, MagicMock())
+    assert api.restore_stock.call_count == 2
+    api.add_stock.assert_not_called()
+    assert "Put back" in first.edit_message_text.call_args.args[0]
+    assert second.edit_message_text.call_args.args[0] == "Already put back"
+
+
+@pytest.mark.asyncio
+async def test_ul_after_ten_minutes_is_refused():
+    api = MagicMock()
+    api.household_id = 1
+    api.restore_stock.return_value = {"error": "too_late", "item_id": 10}
+    handler = _handler(api)
+    update, query = _tap(handler, _cb("ul", wine_id=1, item_id=10))
+    await handler._handle_callback(update, MagicMock())
+    api.restore_stock.assert_called_once_with(10)
+    api.add_stock.assert_not_called()
+    assert query.edit_message_text.call_args.args[0] == (
+        "Too late to undo, use + to add it back"
+    )
+
+
+CEPA = {
+    "id": 94, "name": "Cepa Lebrel / De Nuestra Bodega 2019 Rioja",
+    "producer": "De Nuestra Bodega", "vintage": 2019, "country": "ES",
+    "region_name": "Rioja", "wine_type": "RE", "barcode": "",
+}
+
+
+def test_reserva_without_producer_offers_cepa_lebrel_not_other_vintages():
+    from integrations.telegram_bot import match_barcode_less_wines
+
+    wines = [
+        CEPA,
+        {**CEPA, "id": 95, "name": "Cepa Lebrel 2018", "vintage": 2018},
+        {
+            "id": 96, "name": "Ribera Reserva", "producer": "Other",
+            "vintage": 2019, "country": "ES", "region_name": "Ribera del Duero",
+            "wine_type": "RE", "barcode": "",
+        },
+    ]
+    hits = match_barcode_less_wines(
+        {"name": "Reserva", "vintage": 2019, "country": "ES",
+         "region": "Rioja", "wine_type": "RE"},
+        wines,
+    )
+    assert [w["id"] for w in hits] == [94]
+
+
+@pytest.mark.asyncio
+async def test_classification_name_confirm_card_asks_is_this_one_of_these():
+    api = MagicMock()
+    api.household_id = 1
+    api.list_all_wines.return_value = [CEPA]
+    handler = _handler(api)
+    status_msg = _status_msg()
+    await handler._show_barcode_label_confirm(
+        status_msg,
+        {"name": "Reserva", "vintage": 2019, "country": "ES",
+         "region": "Rioja", "wine_type": "RE"},
+        "4056489114406",
+        api,
+    )
+    await _drain()
+    text = status_msg.edit_text.call_args.args[0]
+    assert "We couldn't read the name, is this one of these?" in text
+    assert "Who makes this?" in text
+    labels = [
+        b.text
+        for row in status_msg.edit_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    assert any("Cepa Lebrel" in t for t in labels)
+
+
+@pytest.mark.asyncio
+async def test_grok_without_producer_asks_who_makes_this_before_create():
+    from integrations.telegram_bot import WHO_MAKES_THIS
+
+    api = MagicMock()
+    api.household_id = 1
+    handler = _handler(api)
+    handler._create_pending(api, "4056489114406")
+    handler.pending_store["1:4056489114406"]["grok_merged"] = {
+        "name": "Reserva", "vintage": 2019, "country": "ES", "wine_type": "RE",
+    }
+    update, query = _tap(handler, _cb("grok", barcode="4056489114406"))
+    await handler._handle_callback(update, MagicMock())
+    api.create_wine.assert_not_called()
+    assert query.edit_message_text.call_args.args[0] == WHO_MAKES_THIS
+    markup = query.edit_message_text.call_args.kwargs.get("reply_markup")
+    assert markup is not None
+    labels = [b.text for row in markup.inline_keyboard for b in row]
+    assert any("Add without producer" in t for t in labels)
+    assert any("Cancel" in t for t in labels)
+    assert "4056489114406" in handler._await_producer["4242"]["barcode"]
+
+
+@pytest.mark.asyncio
+async def test_typed_producer_then_confirm_creates_the_wine():
+    api = MagicMock()
+    api.household_id = 1
+    api.create_wine.return_value = {"id": 100, "name": "Reserva"}
+    api.list_storages.return_value = [{"name": "Cellar", "id": 1, "bottles": 0}]
+    api.add_stock.return_value = {"stock_count": 1, "item_id": 3}
+    handler = _handler(api)
+    handler._create_pending(api, "_label_1")
+    handler.pending_store["_label_1"]["grok_merged"] = {
+        "name": "Reserva", "vintage": 2019, "country": "ES", "wine_type": "RE",
+    }
+    handler._await_producer["4242"] = {"barcode": "_label_1", "time": time.time()}
+    msg = AsyncMock()
+    msg.text = "De Nuestra Bodega"
+    msg.chat_id = 4242
+    msg.message_id = 8
+    update = MagicMock()
+    update.message = msg
+    update.effective_chat.id = 4242
+    assert await handler._maybe_take_producer(
+        update, "De Nuestra Bodega", MagicMock(),
+    ) is True
+    api.create_wine.assert_called_once()
+    assert api.create_wine.call_args.args[0]["producer"] == "De Nuestra Bodega"
+    assert api.create_wine.call_args.args[0]["name"] == "Reserva"
+
+
+@pytest.mark.asyncio
+async def test_front_label_add_tips_to_send_the_barcode_side():
+    from integrations.telegram_bot import BARCODE_TIP
+
+    api = MagicMock()
+    api.household_id = 1
+    api.create_wine.return_value = {"id": 94, "name": "Cepa Lebrel"}
+    api.list_storages.return_value = [
+        {"name": "Kitchen", "id": 2, "bottles": 1},
+        {"name": "Cellar", "id": 1, "bottles": 0},
+    ]
+    handler = _handler(api)
+    handler._create_pending(api, "_label_9")
+    handler.pending_store["_label_9"]["grok_merged"] = {
+        "name": "Cepa Lebrel", "producer": "De Nuestra Bodega", "vintage": 2019,
+    }
+    update, query = _tap(handler, _cb("grok", barcode="_label_9"))
+    await handler._handle_callback(update, MagicMock())
+    text = query.edit_message_text.call_args.args[0]
+    assert "Send the barcode side too so scans find it next time." in text
+    assert BARCODE_TIP.strip() in text or "barcode side" in text
+
+
+@pytest.mark.asyncio
+async def test_plus_after_remove_restores_instead_of_adding_unsorted():
+    api = MagicMock()
+    api.household_id = 1
+    api.restore_stock.return_value = {
+        "wine_name": "Pièce de Résistance", "stock_count": 1,
+        "item_id": 59, "storage": "Kitchen", "action": "restored",
+    }
+    leftover = [{
+        "id": 59, "name": "Pièce de Résistance", "stock_count": 1,
+        "wine_type": "RE",
+    }]
+    api.wines_in_stock.return_value = leftover
+    handler = _handler(api)
+    handler._browse_sessions["4242:7"] = BrowseSession(
+        leftover, mode="fridge", storage_name="Kitchen",
+    )
+    handler._browse_sessions["4242:7"].last_removed = {
+        "wine_id": 59, "name": "Pièce de Résistance", "item_id": 136,
+        "storage": "Kitchen",
+    }
+    update, query = _tap(handler, _cb("+", wine_id=59, page=0))
+    await handler._handle_callback(update, MagicMock())
+    api.restore_stock.assert_called_once_with(136)
+    api.add_stock.assert_not_called()
+    toasts = [c.args[0] for c in query.answer.await_args_list if c.args]
+    assert any("Put back" in str(t) for t in toasts)
+
+
+@pytest.mark.asyncio
+async def test_plus_without_recent_remove_adds_to_filtered_storage():
+    api = MagicMock()
+    api.household_id = 1
+    api.restore_latest.return_value = {"error": "nothing_to_restore"}
+    api.add_stock.return_value = {
+        "wine_name": "Pièce de Résistance", "stock_count": 2, "item_id": 200,
+        "action": "added",
+    }
+    leftover = [{
+        "id": 59, "name": "Pièce de Résistance", "stock_count": 2,
+        "wine_type": "RE",
+    }]
+    api.wines_in_stock.return_value = leftover
+    handler = _handler(api)
+    handler._browse_sessions["4242:7"] = BrowseSession(
+        leftover, mode="fridge", storage_name="Kitchen",
+    )
+    update, query = _tap(handler, _cb("+", wine_id=59, page=0))
+    await handler._handle_callback(update, MagicMock())
+    api.add_stock.assert_called_once_with(59, storage_name="Kitchen")
+
+
+@pytest.mark.asyncio
+async def test_out_button_undo_restores():
+    api = MagicMock()
+    api.household_id = 1
+    api.remove_stock.return_value = {
+        "wine_name": "Barbaresco 2021", "stock_count": 0, "item_id": 10,
+    }
+    api.restore_stock.return_value = {
+        "wine_name": "Barbaresco 2021", "stock_count": 1, "item_id": 10,
+        "storage": "Cellar", "action": "restored",
+    }
+    handler = _handler(api)
+    update, query = _tap(handler, _cb("out", wine_id=1))
+    await handler._handle_callback(update, MagicMock())
+    labels = [
+        b.text
+        for row in query.edit_message_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    assert any("Undo" in t for t in labels)
+    update, query = _tap(handler, _cb("ul", wine_id=1, item_id=10))
+    await handler._handle_callback(update, MagicMock())
+    api.restore_stock.assert_called_once_with(10)
+    assert "Put back" in query.edit_message_text.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_scan_out_card_undo_restores():
+    from integrations.telegram_bot import build_stock_update_view
+
+    api = MagicMock()
+    api.household_id = 1
+    api.restore_stock.return_value = {
+        "wine_name": "Barbaresco 2021", "stock_count": 1, "item_id": 79,
+        "storage": "Big Fridge", "action": "restored",
+    }
+    text, markup = build_stock_update_view(
+        "out", "Barbaresco 2021", 0, wine_id=1, item_id=79, storage="Big Fridge",
+    )
+    assert "Undo" in "".join(b.text for row in markup.inline_keyboard for b in row)
+    undo = markup.inline_keyboard[0][0].callback_data
+    assert "a:ul," in undo
+    handler = _handler(api)
+    update, query = _tap(handler, undo)
+    await handler._handle_callback(update, MagicMock())
+    api.restore_stock.assert_called_once_with(79)
+
+
+@pytest.mark.asyncio
+async def test_drank_undo_restores_and_does_not_revoke_badges():
+    """Undoing Drank puts the bottle back. Badges stay (award is get_or_create)."""
+    api = MagicMock()
+    api.household_id = 1
+    api.restore_stock.return_value = {
+        "wine_name": "Barbaresco 2021", "stock_count": 1, "item_id": 12,
+        "storage": "Cellar", "action": "restored",
+    }
+    text, markup = build_drank_view("Barbaresco 2021", 0, 12, wine_id=1)
+    undo = markup.inline_keyboard[0][0].callback_data
+    assert "a:ul," in undo
+    handler = _handler(api)
+    update, query = _tap(handler, undo)
+    await handler._handle_callback(update, MagicMock())
+    api.restore_stock.assert_called_once_with(12)
+    assert not hasattr(api, "revoke_achievement") or not api.revoke_achievement.called
+
+
+@pytest.mark.asyncio
+async def test_ul_concurrent_taps_restore_once_with_try_claim():
+    class ClaimDict(dict):
+        def __init__(self):
+            super().__init__()
+            self._held = set()
+            self._lock = threading.Lock()
+
+        def try_claim(self, key):
+            with self._lock:
+                if key in self._held:
+                    return False
+                self._held.add(key)
+                return True
+
+        def release_claim(self, key):
+            with self._lock:
+                self._held.discard(key)
+
+    api = MagicMock()
+    api.household_id = 1
+    api.restore_stock.return_value = {
+        "item_id": 10, "wine_name": "Barbaresco 2021", "stock_count": 1,
+        "storage": "Big Fridge", "action": "restored",
+    }
+    handler = TelegramBotHandler(
+        bot_token="t", chat_ids=["4242"], wine_cellar_api=api,
+        pending_store=ClaimDict(),
+        card_store=ClaimDict(),
+    )
+    updates = [_tap(handler, _cb("ul", wine_id=1, item_id=10)) for _ in range(3)]
+    await asyncio.gather(*(
+        handler._handle_callback(update, MagicMock()) for update, _ in updates
+    ))
+    assert api.restore_stock.call_count == 1
+    api.add_stock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_card_redraw_not_modified_is_a_noop_and_answers():
+    api = MagicMock()
+    api.household_id = 1
+    api.wines_in_stock.return_value = [{
+        "id": 1, "name": "Barbaresco 2021", "stock_count": 1, "wine_type": "RE",
+    }]
+    handler = _handler(api)
+    handler._browse_sessions["4242:7"] = BrowseSession(
+        api.wines_in_stock.return_value, mode="fridge", storage_name="All storages",
+    )
+    update, query = _tap(handler, _cb("+", wine_id=1, page=0))
+    api.restore_latest.return_value = {"error": "nothing_to_restore"}
+    api.add_stock.return_value = {
+        "wine_name": "Barbaresco 2021", "stock_count": 2, "action": "added",
+    }
+    query.edit_message_text.side_effect = BadRequest("Message is not modified")
+    await handler._handle_callback(update, MagicMock())
+    query.answer.assert_awaited()
+
+
+HH6_CELLAR = [
+    {
+        "id": 52, "name": "Calamin Grand Cru Epesses",
+        "producer": "Pierre Fonjallaz", "vintage": 2023, "stock_count": 1,
+    },
+    {
+        "id": 105, "name": "St-Saphorin Grand Cru",
+        "producer": "Domaine Bovy", "vintage": 2024, "stock_count": 1,
+    },
+    {
+        "id": 107, "name": "Dezaley",
+        "producer": "Louis Bovard", "vintage": 2022, "stock_count": 1,
+    },
+    {
+        "id": 109, "name": "Dezaley Grand Cru Chasselas",
+        "producer": "Union Vinicole Cully", "vintage": 2025, "stock_count": 1,
+    },
+    {
+        "id": 110, "name": "Dezaley",
+        "producer": "Maison Blanche", "vintage": 2024, "stock_count": 1,
+    },
+]
+DEZALEY_QUERY = {
+    "name": "Dezaley Grand Cru Chasselas",
+    "producer": "Union Vinicole Cully",
+    "vintage": 2025,
+    "wine_type": "WH",
+    "country": "CH",
+}
+
+
+def test_merge_front_back_front_wins_name_back_wins_barcode():
+    merged = merge_front_back(
+        {
+            "name": "L'Originelle", "producer": "Domaine X", "vintage": 2022,
+            "wine_type": "WH", "abv": None,
+        },
+        {
+            "name": "White Wine", "producer": "", "vintage": None,
+            "barcode": "8026856001468", "abv": 12.5, "wine_type": "WH",
+        },
+    )
+    assert merged["name"] == "L'Originelle"
+    assert merged["producer"] == "Domaine X"
+    assert merged["vintage"] == 2022
+    assert merged["barcode"] == "8026856001468"
+    assert merged["abv"] == 12.5
+
+
+def test_proposed_wine_update_fills_blanks_and_flags_overwrites():
+    fills, overwrites = proposed_wine_update(
+        {"producer": "Old Prod", "vintage": 2018, "barcode": "111", "abv": None},
+        {"producer": "New Prod", "vintage": 2020, "barcode": "222", "abv": 13.5},
+    )
+    assert fills["abv"] == 13.5
+    fields = {field for field, _old, _new in overwrites}
+    assert fields == {"producer", "vintage", "barcode"}
+    assert "abv" not in fields
+
+
+def test_dezaley_query_does_not_match_appellation_neighbours():
+    hits = find_existing_wines(DEZALEY_QUERY, HH6_CELLAR)
+    ids = [w["id"] for w in hits]
+    assert 52 not in ids
+    assert 105 not in ids
+    assert 107 not in ids
+    assert 110 not in ids
+    assert ids == [109]
+    assert _can_update_wine(DEZALEY_QUERY, HH6_CELLAR[3])
+
+
+def test_wine_choice_label_includes_producer_and_vintage():
+    from integrations.telegram_bot import _wine_choice_label
+    label = _wine_choice_label(HH6_CELLAR[3])
+    assert "Union Vinicole Cully" in label
+    assert "2025" in label
+
+
+@pytest.mark.asyncio
+async def test_front_and_back_photos_create_one_wine_with_both_images():
+    front = {
+        "type": "label",
+        "name": "L'Originelle",
+        "producer": "Domaine X",
+        "vintage": 2022,
+        "wine_type": "WH",
+        "country": "FR",
+    }
+    back = {
+        "type": "label",
+        "name": "White Wine",
+        "barcode": "8026856001468",
+        "abv": 12.5,
+        "wine_type": "WH",
+        "country": "FR",
+    }
+    api = MagicMock()
+    api.household_id = 1
+    api.list_all_wines.return_value = []
+    api.create_wine.return_value = {"id": 200, "name": "L'Originelle"}
+    api.list_storages.return_value = [{"name": "Cellar", "drawers": 0}]
+    api.add_stock.return_value = {"stock_count": 1, "item_id": 1}
+    api.lookup_references.return_value = {"updated": False}
+    handler = _handler(api)
+    handler.set_label_analyse_callback(
+        lambda photo, *a, **k: dict(back) if photo == b"BACK" else dict(front),
+    )
+    status = _status_msg()
+    update = MagicMock()
+    update.effective_chat.id = 4242
+
+    await handler._handle_triage_label(status, dict(front), photo_data=b"FRONT", update=update)
+    await _drain()
+    labels = [
+        b.text
+        for row in status.edit_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    assert ADD_ANOTHER_PHOTO in labels
+
+    await handler._attach_side_photo(status, "_label_1", b"BACK", update)
+    pending = handler.pending_store["_label_1"]
+    merged = pending["grok_merged"]
+    assert merged["producer"] == "Domaine X"
+    assert merged["vintage"] == 2022
+    assert merged["barcode"] == "8026856001468"
+    assert pending["photo_front"] == b"FRONT"
+    assert pending["photo_back"] == b"BACK"
+
+    tap, query = _tap(handler, _cb("grok", barcode="_label_1"))
+    await handler._handle_callback(tap, MagicMock())
+    api.create_wine.assert_called_once()
+    created = api.create_wine.call_args.args[0]
+    assert created["producer"] == "Domaine X"
+    assert created["vintage"] == 2022
+    assert created["barcode"] == "8026856001468"
+    types = [c.kwargs.get("image_type") for c in api.upload_wine_image.call_args_list]
+    assert types == ["LF", "LB"]
+    assert api.upload_wine_image.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_unsolicited_second_photo_offers_back_of_pending_wine():
+    api = MagicMock()
+    api.household_id = 1
+    api.list_all_wines.return_value = []
+    api.lookup_references.return_value = {"updated": False}
+    handler = _handler(api)
+    status = _status_msg()
+    await handler._handle_triage_label(status, dict(LABEL), photo_data=b"FRONT")
+    await _drain()
+
+    update = MagicMock()
+    update.effective_chat.id = 4242
+    update.message.reply_text = AsyncMock()
+    offered = await handler._maybe_handle_extra_label_photo(update, b"BACK")
+    assert offered is True
+    text = update.message.reply_text.call_args.args[0]
+    assert "Is this the back of" in text
+    assert "Old Vine Chenin Blanc" in text
+    labels = [
+        b.text
+        for row in update.message.reply_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    assert any("back" in t.lower() for t in labels)
+    assert any("different wine" in t.lower() for t in labels)
+
+
+@pytest.mark.asyncio
+async def test_yes_back_attaches_stored_photo_to_same_card():
+    api = MagicMock()
+    api.household_id = 1
+    api.list_all_wines.return_value = []
+    api.lookup_references.return_value = {"updated": False}
+    handler = _handler(api)
+    handler.set_label_analyse_callback(lambda photo, *a, **k: {
+        "type": "label", "name": "White Wine", "barcode": "8026856001468", "abv": 12.5,
+    })
+    status = _status_msg()
+    await handler._handle_triage_label(status, dict(LABEL), photo_data=b"FRONT")
+    await _drain()
+    offer = MagicMock()
+    offer.effective_chat.id = 4242
+    offer.message.reply_text = AsyncMock()
+    await handler._maybe_handle_extra_label_photo(offer, b"BACK")
+    tap, _query = _tap(handler, _cb("yb", barcode="_label_1"))
+    await handler._handle_callback(tap, MagicMock())
+    pending = handler.pending_store["_label_1"]
+    assert pending["grok_merged"]["barcode"] == "8026856001468"
+    assert pending["grok_merged"]["producer"] == "Bosman"
+    assert pending["photo_front"] == b"FRONT"
+    assert pending["photo_back"] == b"BACK"
+
+
+@pytest.mark.asyncio
+async def test_added_card_has_view_wine_add_photo_and_web_url():
+    api = MagicMock()
+    api.household_id = 1
+    api.create_wine.return_value = {"id": 200, "name": "L'Originelle"}
+    api.list_storages.return_value = [{"name": "Cellar", "drawers": 0}]
+    api.add_stock.return_value = {"stock_count": 1, "item_id": 1}
+    handler = _handler(api)
+    handler.pending_store["_label_1"] = {
+        "grok_merged": {
+            "name": "L'Originelle", "producer": "Domaine X", "vintage": 2022,
+        },
+        "time": time.time(),
+    }
+    tap, query = _tap(handler, _cb("grok", barcode="_label_1"))
+    await handler._handle_callback(tap, MagicMock())
+    text = query.edit_message_text.call_args.args[0]
+    assert "https://cellar.test/wine/200" in text
+    labels = [
+        b.text
+        for row in query.edit_message_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    assert ADD_PHOTO_INFO in labels
+    assert VIEW_WINE in labels
+    view = next(
+        b for row in query.edit_message_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for b in row if b.text == VIEW_WINE
+    )
+    assert view.callback_data.startswith("a:det,")
+    assert "w:200" in view.callback_data
+    add = next(
+        b for row in query.edit_message_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for b in row if b.text == ADD_PHOTO_INFO
+    )
+    assert add.callback_data.startswith("a:ai,")
+
+
+def test_detail_card_has_add_photo_info_and_web_url():
+    api = MagicMock()
+    api.household_id = 1
+    handler = _handler(api)
+    wine = {
+        "id": 109, "name": "Dezaley Grand Cru Chasselas",
+        "producer": "Union Vinicole Cully", "vintage": 2025,
+        "wine_type": "WH", "stock_count": 1, "items": [],
+    }
+    text, kb = handler._build_detail_card(wine, api=api)
+    assert "https://cellar.test/wine/109" in text
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    assert ADD_PHOTO_INFO in labels
+    add = next(b for row in kb.inline_keyboard for b in row if b.text == ADD_PHOTO_INFO)
+    assert add.callback_data.startswith("a:ai,")
+
+
+@pytest.mark.asyncio
+async def test_edit_photo_asks_before_overwriting_filled_fields():
+    api = MagicMock()
+    api.household_id = 1
+    api.get_wine_detail.return_value = {
+        "id": 113, "name": "Existing", "producer": "Old Prod",
+        "vintage": 2018, "barcode": "111",
+    }
+    handler = _handler(api)
+    handler._photo_callback = lambda *a, **k: {
+        "name": "Existing", "producer": "New Prod", "vintage": 2020,
+        "barcode": "222", "wine_type": "RE", "country": "FR", "abv": 13.5,
+    }
+    update = MagicMock()
+    update.effective_chat.id = 4242
+    status = _status_msg()
+    update.message.reply_text = AsyncMock(return_value=status)
+    await handler._handle_edit_photo(update, MagicMock(), 113, b"PHOTO")
+    text = status.edit_text.call_args.args[0]
+    assert "Would change" in text
+    labels = [
+        b.text
+        for row in status.edit_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    assert any("apply those changes" in t.lower() for t in labels)
+    assert any("fill blanks" in t.lower() for t in labels)
+    assert handler.pending_store["_edit_113"]["photo_data"] == b"PHOTO"
+
+
+@pytest.mark.asyncio
+async def test_wrong_wine_hint_keeps_original_photo():
+    api = MagicMock()
+    api.household_id = 1
+    api.list_all_wines.return_value = []
+    api.search_wines.return_value = []
+    api.lookup_references.return_value = {"updated": False}
+    handler = _handler(api)
+    handler._identify_callback = lambda *a, **k: {
+        "name": "Correct Wine", "producer": "Estate", "vintage": 2020,
+        "wine_type": "RE", "country": "ZA",
+    }
+    captured = {}
+
+    async def capture(status_msg, data, photo_data=b"", update=None, barcode="", reuse_key=""):
+        captured["photo"] = photo_data
+        captured["name"] = data.get("name")
+
+    handler._handle_triage_label = capture
+    handler._start_misread(
+        4242, barcode="_label_1", wrong_name="Wrong Wine", photo_data=b"FRONTJPEG",
+    )
+    update = MagicMock()
+    update.effective_chat.id = 4242
+    update.message.reply_text = AsyncMock(return_value=_status_msg())
+    assert await handler._maybe_identify_misread_text(update, "Correct Wine Estate 2020")
+    assert captured["photo"] == b"FRONTJPEG"
+    assert captured["name"] == "Correct Wine"
+
+
+@pytest.mark.asyncio
+async def test_shop_label_does_not_offer_update_for_appellation_neighbours():
+    api = MagicMock()
+    api.household_id = 1
+    api.list_all_wines.return_value = HH6_CELLAR
+    api.lookup_references.return_value = {"updated": False}
+    handler = _handler(api)
+    status = _status_msg()
+    await handler._handle_triage_label(status, dict(DEZALEY_QUERY), photo_data=b"FRONT")
+    await _drain()
+    buttons = [
+        b
+        for row in status.edit_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    labels = [b.text for b in buttons]
+    assert not any("Calamin" in t for t in labels)
+    assert not any("St-Saphorin" in t or "Saphorin" in t for t in labels)
+    assert any(t.startswith("✏️ Update") and "Union Vinicole Cully" in t for t in labels)
+    assert any("2025" in t for t in labels)
+    update_btn = next(b for b in buttons if b.text.startswith("✏️ Update"))
+    assert "w:109" in update_btn.callback_data
+    assert not any("w:52" in b.callback_data for b in buttons)
+    assert not any("w:105" in b.callback_data for b in buttons)
+    assert not any("w:107" in b.callback_data for b in buttons)
+    assert not any("w:110" in b.callback_data for b in buttons)
+
+
+@pytest.mark.asyncio
+async def test_add_photo_info_starts_edit_flow():
+    api = MagicMock()
+    api.household_id = 1
+    api.update_wine.return_value = {"name": "L'Originelle"}
+    handler = _handler(api)
+    tap, query = _tap(handler, _cb("ai", wine_id=200))
+    await handler._handle_callback(tap, MagicMock())
+    text = query.edit_message_text.call_args.args[0]
+    assert "Edit:" in text
+    assert "L'Originelle" in text
+    assert "_edit_200" in handler.pending_store

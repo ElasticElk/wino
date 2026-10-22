@@ -29,8 +29,10 @@ class WineCellarAPI:
         self.session.mount("https://", HTTPAdapter(max_retries=retry))
 
     def lookup_barcode(self, barcode: str) -> list[dict]:
+        from integrations.barcodes import normalise_barcode
+        ean = normalise_barcode(barcode) or barcode
         resp = self.session.get(
-            f"{self.base_url}/api/wines/by-barcode/{barcode}/", timeout=10,
+            f"{self.base_url}/api/wines/by-barcode/{ean}/", timeout=10,
         )
         resp.raise_for_status()
         return resp.json()["wines"]
@@ -75,8 +77,13 @@ class WineCellarAPI:
         resp.raise_for_status()
         return resp.json()
 
-    def remove_stock(self, wine_id: int, storage_name: str | None = None) -> dict:
-        data = {"wine_id": wine_id}
+    def remove_stock(self, wine_id: int | None = None, storage_name: str | None = None,
+                     item_id: int | None = None) -> dict:
+        data = {}
+        if wine_id is not None:
+            data["wine_id"] = wine_id
+        if item_id is not None:
+            data["item_id"] = item_id
         if storage_name:
             data["storage_name"] = storage_name
         resp = self.session.post(
@@ -85,6 +92,76 @@ class WineCellarAPI:
         if resp.status_code == 409:
             return resp.json()
         resp.raise_for_status()
+        return resp.json()
+
+    def bulk_stock(self, ops: list[dict]) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/stock/bulk/", json={"ops": ops}, timeout=20,
+        )
+        if resp.status_code >= 400:
+            body = {}
+            try:
+                body = resp.json() if resp.content else {}
+            except ValueError:
+                body = {}
+            if not isinstance(body, dict):
+                body = {}
+            body.setdefault("error", body.get("detail") or f"HTTP {resp.status_code}")
+            body["status_code"] = resp.status_code
+            return body
+        return resp.json()
+
+    def bulk_stock_undo(self, batch_id: str) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/stock/bulk/{batch_id}/undo/", timeout=20,
+        )
+        if resp.status_code >= 400:
+            body = {}
+            try:
+                body = resp.json() if resp.content else {}
+            except ValueError:
+                body = {}
+            if not isinstance(body, dict):
+                body = {}
+            body.setdefault("error", body.get("detail") or f"HTTP {resp.status_code}")
+            body["status_code"] = resp.status_code
+            return body
+        return resp.json()
+
+    def restore_latest(self, wine_id: int) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/stock/restore-latest/",
+            json={"wine_id": wine_id},
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            body = {}
+            try:
+                body = resp.json() if resp.content else {}
+            except ValueError:
+                body = {}
+            if not isinstance(body, dict):
+                body = {}
+            body.setdefault("error", body.get("detail") or f"HTTP {resp.status_code}")
+            body["status_code"] = resp.status_code
+            return body
+        return resp.json()
+
+    def restore_stock(self, item_id: int) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/stock/{item_id}/restore/", timeout=10,
+        )
+        if resp.status_code >= 400:
+            body = {}
+            try:
+                body = resp.json() if resp.content else {}
+            except ValueError:
+                body = {}
+            if not isinstance(body, dict):
+                body = {}
+            body.setdefault("error", body.get("detail") or f"HTTP {resp.status_code}")
+            body["status_code"] = resp.status_code
+            return body
         return resp.json()
 
     def create_wine(self, wine_data: dict) -> dict:
@@ -407,7 +484,7 @@ class WineCellarAPI:
 
     def record_intent(self, kind: str, wine: dict | None = None,
                       wines: list | None = None, scene: str = "",
-                      recommendation=None) -> dict:
+                      recommendation=None, payload: dict | None = None) -> dict:
         body = {"kind": kind}
         if wine:
             body["wine"] = wine
@@ -415,6 +492,8 @@ class WineCellarAPI:
             body["wines"] = wines
             body["scene"] = scene
             body["recommendation"] = recommendation
+        if payload is not None:
+            body["payload"] = payload
         try:
             resp = self.session.post(
                 f"{self.base_url}/api/scanner/taste/", json=body, timeout=8,
@@ -425,6 +504,21 @@ class WineCellarAPI:
             return resp.json()
         except Exception as e:
             logger.warning(f"record_intent failed: {e}")
+            return {}
+
+    def update_intent(self, intent_id: int, changes: dict) -> dict:
+        """Merge outcome, shown, rejected or place into one ask. Never raises."""
+        try:
+            resp = self.session.patch(
+                f"{self.base_url}/api/scanner/taste/{intent_id}/",
+                json=changes, timeout=8,
+            )
+            if resp.status_code >= 400:
+                logger.warning(f"update_intent failed: {resp.status_code} {resp.text}")
+                return {}
+            return resp.json()
+        except Exception as e:
+            logger.warning(f"update_intent failed: {e}")
             return {}
 
     def create_household(self, name: str, chat_id: str, display_name: str) -> dict:
@@ -513,6 +607,14 @@ class WineCellarAPI:
             f"{self.base_url}/api/scanner/whois/",
             params={"q": query},
             timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def chat_stats(self, days: int = 30) -> dict:
+        """Staff-only: how chat recommendations landed across every household."""
+        resp = self.session.get(
+            f"{self.base_url}/api/scanner/chat-stats/", params={"days": days}, timeout=15,
         )
         resp.raise_for_status()
         return resp.json()

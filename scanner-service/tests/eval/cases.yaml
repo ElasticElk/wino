@@ -1,0 +1,73 @@
+# Live eval. Not collected by pytest. Needs XAI_API_KEY.
+# Fact checks use the parse schema: kind, storage_text, drawer, country_code, grape.
+- id: fennel
+  text: "I am keen for a really deep red with notes of fennel seeds"
+  intent: recommend
+  acceptable: [1]
+  must_not: [5, 7, 8, 9, 10, 11, 12, 13, 16]
+- id: leathery
+  text: "something leathery for lamb tonight"
+  intent: recommend
+  acceptable: [15, 1]
+  must_not: [5, 13, 16]
+- id: shiraz_fact
+  text: "is there any shiraz in my fridge?"
+  intent: fact
+  fact: {kind: grape, grape: shiraz}
+- id: drawer
+  text: "what is in D3 of my big fridge?"
+  intent: fact
+  fact: {kind: drawer, drawer: 3, storage_text: big fridge}
+- id: south_africa
+  text: "what wines do I have from South Africa?"
+  intent: fact
+  fact: {kind: country, country_code: ZA}
+- id: list
+  text: "list all my wines"
+  intent: fact
+  fact: {kind: list_all}
+- id: price
+  text: "I paid 18.50 for this"
+  intent: price
+  price: {amount: 18.5}
+- id: correct
+  text: "that's a 2018 Syrah"
+  intent: correct
+  correction: {vintage: 2018, grape: syrah}
+- id: bubbles
+  text: "something bubbly for a toast"
+  intent: recommend
+  acceptable: [7]
+  must_not: [1, 2, 12]
+- id: restaurant
+  text: "I'm at a steakhouse tonight, what kind of wine should I order?"
+  intent: wine_chat
+- id: vintage_question
+  text: "is 2019 a good year for Barolo?"
+  intent: wine_chat
+- id: decant
+  text: "should I decant a 2015 Rioja before dinner?"
+  intent: wine_chat
+- id: shop
+  text: "I'm in Waitrose, what's a good bottle under 15 for a curry?"
+  intent: wine_chat
+- id: plane
+  text: "how high does a plane fly?"
+  intent: offtopic
+- id: football
+  text: "who won the football last night?"
+  intent: offtopic
+- id: add_person
+  text: "how do I add someone new to my house?"
+  intent: help
+- id: new_house
+  text: "can I create a new house?"
+  intent: help
+- id: how_does_this_work
+  text: "how does Whiney work?"
+  intent: help
+- id: chenin
+  text: "a crisp chenin for fish"
+  intent: recommend
+  acceptable: [5]
+  must_not: [1, 12, 15]

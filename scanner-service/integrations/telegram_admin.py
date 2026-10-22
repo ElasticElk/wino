@@ -6,6 +6,7 @@ import this module, point it at a second token, and drop the public handlers.
 
 from __future__ import annotations
 
+import html
 import logging
 
 from telegram import BotCommand, BotCommandScopeChat, BotCommandScopeDefault, Update
@@ -79,6 +80,7 @@ def register_admin_handlers(app, handler) -> None:
 
     app.add_handler(CommandHandler("admin", bind(cmd_admin), filters=admin_filter))
     app.add_handler(CommandHandler("stats", bind(cmd_stats), filters=admin_filter))
+    app.add_handler(CommandHandler("chatstats", bind(cmd_chatstats), filters=admin_filter))
     app.add_handler(CommandHandler("households", bind(cmd_households), filters=admin_filter))
     app.add_handler(CommandHandler("members", bind(cmd_members), filters=admin_filter))
     app.add_handler(CommandHandler("whois", bind(cmd_whois), filters=admin_filter))
@@ -447,6 +449,73 @@ async def cmd_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE, handle
         "the bot yet. Ask them to search for this bot and tap <b>Start</b>.",
         parse_mode="HTML",
     )
+
+
+def format_chat_stats(data: dict) -> str:
+    asks = data.get("asks", 0)
+    days = data.get("days", 30)
+    if not asks:
+        return f"💬 <b>Chat suggestions</b> — last {days} days\n\nNo asks yet."
+    outcomes = data.get("outcomes") or {}
+    votes = data.get("pick_votes") or {}
+    latency = data.get("latency_ms") or {}
+    shown = data.get("shown", 0)
+
+    def pct(n):
+        return f"{round(100 * n / shown)}%" if shown else "—"
+
+    lines = [
+        f"💬 <b>Chat suggestions</b> — last {days} days\n",
+        f"Asks: <b>{asks}</b> ({shown} got a bottle, {data.get('questions', 0)} asked a question first)",
+        "",
+        "<b>What they tapped</b>",
+        f"  That's the one: {outcomes.get('accepted', 0)} ({pct(outcomes.get('accepted', 0))})",
+        f"  Something else taps: {data.get('something_else_taps', 0)}",
+        f"  Gave up on the list: {outcomes.get('rejected', 0)}",
+        f"  Walked away: {outcomes.get('abandoned', 0)}",
+        f"  No tap: {outcomes.get('pending', 0)}",
+        "",
+        "<b>What they drank (within 48h)</b>",
+        f"  The suggested bottle: <b>{data.get('opened_pick', 0)}</b> ({data.get('opened_pick_pct', 0)}%)",
+        f"  A different bottle: {data.get('opened_other', 0)}",
+        f"  Votes on picks: 👍 {votes.get('up', 0)}  — {votes.get('meh', 0)}  👎 {votes.get('down', 0)}"
+        f"  (no vote {votes.get('none', 0)})",
+        "",
+        "<b>Speed</b>",
+        f"  Median {_seconds(latency.get('p50'))}, slowest 10% {_seconds(latency.get('p90'))}",
+        f"  Quick picks (model unavailable): {data.get('fallback', 0)}",
+    ]
+    models = data.get("models") or {}
+    if models:
+        lines.append("  Models: " + ", ".join(f"{html.escape(k, quote=False)} {v}" for k, v in models.items()))
+    worst = data.get("worst") or []
+    if worst:
+        lines += ["", "<b>Worst asks</b>"]
+        for row in worst:
+            sentence = html.escape(row.get("sentence") or "", quote=False)
+            why = html.escape(", ".join(row.get("why") or []), quote=False)
+            hh = html.escape(row.get("household") or "", quote=False)
+            lines.append(f"  • “{sentence}” — {why} <i>({hh}, {(row.get('created') or '')[:10]})</i>")
+    return "\n".join(lines)
+
+
+def _seconds(ms) -> str:
+    return "—" if ms is None else f"{ms / 1000:.1f}s"
+
+
+async def cmd_chatstats(update: Update, context: ContextTypes.DEFAULT_TYPE, handler) -> None:
+    args = context.args or []
+    days = 30
+    if args and args[0].isdigit():
+        days = int(args[0])
+    api = getattr(handler, "admin_api", None) or handler._get_api(update)
+    try:
+        data = api.chat_stats(days)
+    except Exception as e:
+        logger.warning(f"[admin] chat stats failed: {e}")
+        await update.message.reply_text("Couldn't load chat stats just now.")
+        return
+    await update.message.reply_text(format_chat_stats(data), parse_mode="HTML")
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE, handler) -> None:

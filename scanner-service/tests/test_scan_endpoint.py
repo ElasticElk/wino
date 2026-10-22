@@ -29,6 +29,9 @@ class FakeAPI:
         self.lookups.append(barcode)
         return list(self.wines)
 
+    def list_all_wines(self):
+        return list(getattr(self, "all_wines", []))
+
     def add_stock(self, wine_id, price=None, storage_name=None, row=None,
                   drank=False, confirm_duplicate=False, check_duplicate=False):
         self.adds.append((wine_id, storage_name, drank))
@@ -76,8 +79,8 @@ class RecordingNotifier:
     def send_disambiguation(self, *args, **kwargs):
         self.calls.append(("disambiguate", args, kwargs))
 
-    def send_new_wine_prompt(self, barcode, off_data):
-        self.calls.append(("new_wine", barcode, off_data))
+    def send_new_wine_prompt(self, barcode, off_data, suggested=None):
+        self.calls.append(("new_wine", barcode, off_data, suggested))
 
     def send(self, msg):
         self.calls.append(("send", msg))
@@ -98,12 +101,12 @@ def kitchen_pi():
         "default_storage": "Big Fridge",
     }
     server.api_clients[f"{TOKEN}:{HOUSEHOLD}"] = api
-    server.notifiers[TOKEN] = notifier
+    server.notifiers[KEY] = notifier
     server.off = FakeOFF()
     yield api, notifier
     server.scanner_registry.pop(KEY, None)
     server.api_clients.pop(f"{TOKEN}:{HOUSEHOLD}", None)
-    server.notifiers.pop(TOKEN, None)
+    server.notifiers.pop(KEY, None)
     server.pending_store.clear()
 
 
@@ -234,6 +237,60 @@ async def test_known_wine_out_falls_back_when_default_fridge_is_empty(kitchen_pi
     assert notifier.calls[0][1]["storage"] == "Kitchen"
 
 
+@pytest.mark.asyncio
+async def test_scan_notifies_only_that_scanners_chats():
+    """Five Pis share one Django token. Kitchen (hh1) must not ping Garage (hh6)."""
+    token = "shared-account"
+    kitchen_key = "kitchen-pi"
+    andrews_key = "garage-pi"
+    kitchen_api = FakeAPI(
+        wines=[{"id": 1, "name": "Chenin", "stock_count": 1}], household_id=1,
+    )
+    andrews_api = FakeAPI(
+        wines=[{"id": 2, "name": "Rioja", "stock_count": 1}], household_id=6,
+    )
+    kitchen_n = RecordingNotifier()
+    andrews_n = RecordingNotifier()
+    server.scanner_registry[kitchen_key] = {
+        "name": "Kitchen Pi", "api_token": token, "household_id": 1,
+        "api_key": kitchen_key, "default_storage": "Kitchen",
+    }
+    server.scanner_registry[andrews_key] = {
+        "name": "Garage Scanner", "api_token": token, "household_id": 6,
+        "api_key": andrews_key, "default_storage": "Wine Fridge",
+    }
+    server.api_clients[f"{token}:1"] = kitchen_api
+    server.api_clients[f"{token}:6"] = andrews_api
+    server.notifiers[kitchen_key] = kitchen_n
+    server.notifiers[andrews_key] = andrews_n
+    server.off = FakeOFF()
+    try:
+        kitchen = await handle_scan(
+            ScanRequest(barcode=BARCODE, mode="in", api_key=kitchen_key),
+        )
+        assert kitchen.status == "added"
+        assert {c[0] for c in kitchen_n.calls} <= {"stock", "achievements"}
+        assert any(c[0] == "stock" for c in kitchen_n.calls)
+        assert andrews_n.calls == []
+        kitchen_after_own_scan = list(kitchen_n.calls)
+
+        andrews = await handle_scan(
+            ScanRequest(barcode=BARCODE, mode="in", api_key=andrews_key),
+        )
+        assert andrews.status == "added"
+        assert {c[0] for c in andrews_n.calls} <= {"stock", "achievements"}
+        assert any(c[0] == "stock" for c in andrews_n.calls)
+        assert kitchen_n.calls == kitchen_after_own_scan
+    finally:
+        server.scanner_registry.pop(kitchen_key, None)
+        server.scanner_registry.pop(andrews_key, None)
+        server.api_clients.pop(f"{token}:1", None)
+        server.api_clients.pop(f"{token}:6", None)
+        server.notifiers.pop(kitchen_key, None)
+        server.notifiers.pop(andrews_key, None)
+        server.pending_store.clear()
+
+
 def test_in_card_offers_move_and_drawer():
     from integrations.telegram_bot import build_stock_update_view
 
@@ -271,6 +328,9 @@ def test_out_card_offers_optional_votes_with_a_dash_not_a_face():
         item_id=79, storage_id=2,
     )
     labels = [b.text for row in markup.inline_keyboard for b in row]
+    undo = next(b for row in markup.inline_keyboard for b in row if "Undo" in b.text)
+    assert undo.callback_data.startswith("a:ul,")
+    assert "i:79" in undo.callback_data
     assert "\U0001F44E" in labels
     assert "\u2014" in labels
     assert "\U0001F44D" in labels

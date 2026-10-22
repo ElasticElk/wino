@@ -25,7 +25,13 @@ from pydantic import BaseModel
 from integrations.card_store import CardStore
 from integrations.grok_vision import GrokVisionAPI, merge_wine_data, read_barcode_local
 from integrations.open_food_facts import OpenFoodFactsAPI
-from integrations.telegram_bot import TelegramBotHandler, TelegramNotifier, pending_key
+from integrations.barcodes import normalise_barcode
+from integrations.telegram_bot import (
+    TelegramBotHandler,
+    TelegramNotifier,
+    match_barcode_less_wines,
+    pending_key,
+)
 from integrations.wine_cellar_api import WineCellarAPI
 
 logging.basicConfig(
@@ -173,7 +179,7 @@ chat_id_to_api: dict[str, WineCellarAPI] = {}  # chat_id -> WineCellarAPI for th
 chat_id_to_currency: dict[str, str] = {}  # chat_id -> ISO currency code (passed to Grok)
 chat_id_to_country: dict[str, str] = {}  # chat_id -> ISO 2-letter country code (price-context grounding)
 chat_id_to_country_prompted: dict[str, bool] = {}
-notifiers: dict[str, TelegramNotifier] = {}  # api_token -> TelegramNotifier
+notifiers: dict[str, TelegramNotifier] = {}  # scanner api_key -> TelegramNotifier
 off: OpenFoodFactsAPI = None  # type: ignore
 grok: GrokVisionAPI | None = None
 bot_handler: TelegramBotHandler | None = None
@@ -214,7 +220,7 @@ def _get_scanner_context(api_key: str) -> tuple[WineCellarAPI, TelegramNotifier 
     if not api:
         raise HTTPException(status_code=500, detail="No API client for this scanner")
 
-    notifier = notifiers.get(api_token)
+    notifier = notifiers.get(api_key)
     return api, notifier, scanner
 
 
@@ -262,18 +268,22 @@ def _chat_ids_key(chat_ids) -> tuple[str, ...]:
     return tuple(str(c) for c in (chat_ids or []))
 
 
-def _replace_notifier(api_token: str, bot_token: str, chat_ids: list | None) -> None:
-    """Create or reuse a notifier. Close the previous one if the chat list changed."""
+def _replace_notifier(key: str, bot_token: str, chat_ids: list | None) -> None:
+    """Create or reuse a notifier keyed by scanner api_key (or `_fallback`).
+
+    Close the previous one if the chat list changed. A shared Django API
+    token must not collapse two scanners onto one notify list.
+    """
     if not bot_token or not chat_ids:
-        old = notifiers.pop(api_token, None)
+        old = notifiers.pop(key, None)
         if old is not None:
             old.close()
         return
     wanted = _chat_ids_key(chat_ids)
-    existing = notifiers.get(api_token)
+    existing = notifiers.get(key)
     if existing is not None and _chat_ids_key(existing.chat_ids) == wanted:
         return
-    notifiers[api_token] = TelegramNotifier(bot_token, list(wanted))
+    notifiers[key] = TelegramNotifier(bot_token, list(wanted))
     if existing is not None:
         existing.close()
 
@@ -323,13 +333,11 @@ def _register_telegram_user(tu: dict, *, default_storage: str, base_url: str, we
 
 def _ingest_scanners(scanners: list[dict], *, bot_token: str, base_url: str, web_url: str) -> None:
     seen_keys: set[str] = set()
-    seen_tokens: set[str] = set()
     for sc in scanners:
         api_key = sc["api_key"]
         seen_keys.add(api_key)
         scanner_registry[api_key] = sc
         api_token = sc["api_token"]
-        seen_tokens.add(api_token)
         household_id = sc.get("household_id")
         client_key = f"{api_token}:{household_id}" if household_id else api_token
         if client_key not in api_clients:
@@ -341,13 +349,13 @@ def _ingest_scanners(scanners: list[dict], *, bot_token: str, base_url: str, web
                 household_id=household_id,
             )
         if bot_token:
-            _replace_notifier(api_token, bot_token, sc.get("notify_chat_ids") or [])
+            _replace_notifier(api_key, bot_token, sc.get("notify_chat_ids") or [])
     for key in list(scanner_registry):
         if key not in seen_keys:
             scanner_registry.pop(key, None)
-    for token in list(notifiers):
-        if token not in seen_tokens:
-            _replace_notifier(token, bot_token, [])
+    for key in list(notifiers):
+        if key not in seen_keys:
+            _replace_notifier(key, bot_token, [])
 
 
 def _reload_db_config_once() -> None:
@@ -488,7 +496,7 @@ async def lifespan(app: FastAPI):
         )
         yaml_chat_ids = file_config.get("telegram", {}).get("chat_ids", [])
         if bot_token and yaml_chat_ids:
-            _replace_notifier(fallback_token, bot_token, yaml_chat_ids)
+            _replace_notifier("_fallback", bot_token, yaml_chat_ids)
             all_chat_ids = yaml_chat_ids
             # No DB to tell us who is staff; in fallback mode the yaml chat_ids
             # are the operator's own, so they're the right audience for notices.
@@ -527,6 +535,10 @@ async def lifespan(app: FastAPI):
             admin_chat_ids=admin_chat_ids,
             admin_api=admin_api,
             card_store=CardStore.from_url(redis_url, prefix="whiney:card:"),
+            ask_store=CardStore.from_url(redis_url, prefix="whiney:ask:", ttl=1800),
+        )
+        bot_handler._catchup_store = CardStore.from_url(
+            redis_url, ttl=1800, prefix="whiney:catchup:",
         )
         bot_handler.set_local_barcode_reader(read_barcode_local)
         for cid, ccy in chat_id_to_currency.items():
@@ -578,6 +590,9 @@ async def lifespan(app: FastAPI):
             bot_handler.set_triage_callback(grok.triage_photo)
             bot_handler.set_winelist_callback(grok.analyse_wine_list)
             bot_handler.set_identify_callback(grok.identify_wine_from_hint)
+            bot_handler.set_label_analyse_callback(grok.analyse_label)
+            from integrations.chat_models import ChatModels
+            bot_handler.set_chat_models(ChatModels(api_key=grok_key))
         bot_handler.run_in_thread()
         logger.info(f"Telegram bot: ACTIVE ({len(all_chat_ids)} user(s))")
 
@@ -637,7 +652,7 @@ async def health():
 
 @app.post("/scan", response_model=ScanResponse)
 async def handle_scan(req: ScanRequest):
-    barcode = req.barcode.strip()
+    barcode = normalise_barcode(req.barcode.strip()) or req.barcode.strip()
     mode = req.mode.strip().lower()
 
     if not barcode:
@@ -797,6 +812,13 @@ def _handle_unknown(barcode: str, api: WineCellarAPI,
     if off_data and off_data.get("name"):
         logger.info(f"OFF found: {off_data['name']}")
 
+    suggested = None
+    if off_data and off_data.get("name"):
+        try:
+            suggested = match_barcode_less_wines(off_data, api.list_all_wines())
+        except Exception as e:
+            logger.info(f"Barcode-less match skipped: {e}")
+
     with pending_lock:
         pending_store[key] = {
             "off_data": off_data,
@@ -806,7 +828,7 @@ def _handle_unknown(barcode: str, api: WineCellarAPI,
         }
 
     if notifier:
-        notifier.send_new_wine_prompt(barcode, off_data)
+        notifier.send_new_wine_prompt(barcode, off_data, suggested=suggested)
 
     return ScanResponse(
         status="unknown", beep="unknown",

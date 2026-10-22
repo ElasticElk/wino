@@ -1,0 +1,557 @@
+[
+  {
+    "id": 1,
+    "name": "Kanonkop Paul Sauer 2019",
+    "producer": "Kanonkop",
+    "vintage": 2019,
+    "country": "ZA",
+    "region": "Stellenbosch",
+    "grapes": [
+      "Cabernet Sauvignon",
+      "Merlot",
+      "Cabernet Franc"
+    ],
+    "drink_by": "2028-06-01",
+    "rating": 9,
+    "critic_score": 95,
+    "vivino_rating": 4.4,
+    "attributes": [
+      "full-bodied"
+    ],
+    "pairs": [],
+    "votes": {
+      "up": 1,
+      "meh": 0,
+      "down": 0
+    },
+    "items": [
+      {
+        "storage": "Big fridge",
+        "price": 45,
+        "drawer": 3
+      }
+    ],
+    "wine_type": "RE",
+    "comment": "Deep cassis, cedar and a fennel-seed lift. Serious, savoury.",
+    "food_pairings": [
+      "lamb"
+    ]
+  },
+  {
+    "id": 2,
+    "name": "Boekenhoutskloof Syrah 2021",
+    "producer": "Boekenhoutskloof",
+    "vintage": 2021,
+    "country": "ZA",
+    "region": "Swartland",
+    "grapes": [
+      "Syrah"
+    ],
+    "drink_by": "2027-01-01",
+    "rating": 8,
+    "critic_score": 93,
+    "vivino_rating": 4.2,
+    "attributes": [
+      "full-bodied"
+    ],
+    "pairs": [],
+    "votes": {
+      "up": 0,
+      "meh": 0,
+      "down": 0
+    },
+    "items": [
+      {
+        "storage": "Big fridge",
+        "price": 28,
+        "drawer": 1
+      }
+    ],
+    "wine_type": "RE",
+    "comment": "Black pepper, olive and smoked meat.",
+    "food_pairings": [
+      "beef"
+    ]
+  },
+  {
+    "id": 3,
+    "name": "Mullineux Syrah 2020",
+    "producer": "Mullineux",
+    "vintage": 2020,
+    "country": "ZA",
+    "region": "Swartland",
+    "grapes": [
+      "Syrah"
+    ],
+    "drink_by": "2029-01-01",
+    "rating": 8,
+    "critic_score": 94,
+    "vivino_rating": 4.3,
+    "attributes": [],
+    "pairs": [],
+    "votes": {
+      "up": 0,
+      "meh": 0,
+      "down": 0
+    },
+    "items": [
+      {
+        "storage": "Small fridge",
+        "price": 32,
+        "drawer": 2
+      }
+    ],
+    "wine_type": "RE",
+    "comment": "White pepper, fynbos and iron.",
+    "food_pairings": []
+  },
+  {
+    "id": 4,
+    "name": "Sadie Columella 2020",
+    "producer": "Sadie Family",
+    "vintage": 2020,
+    "country": "ZA",
+    "region": "Swartland",
+    "grapes": [
+      "Syrah",
+      "Mourvedre",
+      "Grenache"
+    ],
+    "drink_by": "2030-01-01",
+    "rating": 9,
+    "critic_score": 96,
+    "vivino_rating": 4.5,
+    "attributes": [],
+    "pairs": [],
+    "votes": {
+      "up": 2,
+      "meh": 0,
+      "down": 0
+    },
+    "items": [
+      {
+        "storage": "Big fridge",
+        "price": 70,
+        "drawer": 4
+      }
+    ],
+    "wine_type": "RE",
+    "comment": "Red fruit, herbs and a dry finish.",
+    "food_pairings": []
+  },
+  {
+    "id": 5,
+    "name": "Reyneke Chenin Blanc 2022",
+    "producer": "Reyneke",
+    "vintage": 2022,
+    "country": "ZA",
+    "region": "Stellenbosch",
+    "grapes": [
+      "Chenin Blanc"
+    ],
+    "drink_by": "2027-06-01",
+    "rating": 8,
+    "critic_score": 92,
+    "vivino_rating": 4.1,
+    "attributes": [],
+    "pairs": [],
+    "votes": {
+      "up": 0,
+      "meh": 0,
+      "down": 0
+    },
+    "items": [
+      {
+        "storage": "Small fridge",
+        "price": 18,
+        "drawer": 1
+      }
+    ],
+    "wine_type": "WH",
+    "comment": "Quince, hay and a salty edge.",
+    "food_pairings": [
+      "fish"
+    ]
+  },
+  {
+    "id": 6,
+    "name": "Hamilton Russell Pinot Noir 2021",
+    "producer": "Hamilton Russell",
+    "vintage": 2021,
+    "country": "ZA",
+    "region": "Hemel-en-Aarde",
+    "grapes": [
+      "Pinot Noir"
+    ],
+    "drink_by": "2027-01-01",
+    "rating": 8,
+    "critic_score": 93,
+    "vivino_rating": 4.2,
+    "attributes": [
+      "light"
+    ],
+    "pairs": [],
+    "votes": {
+      "up": 0,
+      "meh": 0,
+      "down": 0
+    },
+    "items": [
+      {
+        "storage": "Small fridge",
+        "price": 40,
+        "drawer": 3
+      }
+    ],
+    "wine_type": "RE",
+    "comment": "Cherry, mushroom and a light frame.",
+    "food_pairings": [
+      "duck"
+    ]
+  },
+  {
+    "id": 7,
+    "name": "Billecart-Salmon Brut Reserve",
+    "producer": "Billecart-Salmon",
+    "vintage": null,
+    "country": "FR",
+    "region": "Champagne",
+    "grapes": [
+      "Pinot Noir",
+      "Chardonnay",
+      "Pinot Meunier"
+    ],
+    "drink_by": null,
+    "rating": null,
+    "critic_score": 92,
+    "vivino_rating": 4.3,
+    "attributes": [],
+    "pairs": [],
+    "votes": {
+      "up": 0,
+      "meh": 0,
+      "down": 0
+    },
+    "items": [
+      {
+        "storage": "Big fridge",
+        "price": 55,
+        "drawer": 6
+      }
+    ],
+    "wine_type": "SP",
+    "comment": "Apple, brioche and a fine bead.",
+    "food_pairings": []
+  },
+  {
+    "id": 8,
+    "name": "Taylor's Late Bottled Vintage 2018",
+    "producer": "Taylor's",
+    "vintage": 2018,
+    "country": "PT",
+    "region": "Douro",
+    "grapes": [
+      "Touriga Nacional"
+    ],
+    "drink_by": "2032-01-01",
+    "rating": 7,
+    "critic_score": 91,
+    "vivino_rating": 4.2,
+    "attributes": [
+      "sweet"
+    ],
+    "pairs": [],
+    "votes": {
+      "up": 0,
+      "meh": 0,
+      "down": 0
+    },
+    "items": [
+      {
+        "storage": "Big fridge",
+        "price": 22,
+        "drawer": 8
+      }
+    ],
+    "wine_type": "FO",
+    "comment": "Fig, chocolate and spirit.",
+    "food_pairings": [
+      "cheese"
+    ]
+  },
+  {
+    "id": 9,
+    "name": "Whispering Angel 2023",
+    "producer": "Chateau d'Esclans",
+    "vintage": 2023,
+    "country": "FR",
+    "region": "Provence",
+    "grapes": [
+      "Grenache",
+      "Cinsault"
+    ],
+    "drink_by": "2026-09-01",
+    "rating": 6,
+    "critic_score": null,
+    "vivino_rating": 3.9,
+    "attributes": [],
+    "pairs": [],
+    "votes": {
+      "up": 0,
+      "meh": 0,
+      "down": 0
+    },
+    "items": [
+      {
+        "storage": "Small fridge",
+        "price": 16,
+        "drawer": 4
+      }
+    ],
+    "wine_type": "RO",
+    "comment": "Strawberry and dry.",
+    "food_pairings": []
+  },
+  {
+    "id": 10,
+    "name": "Chateau d'Yquem 2015",
+    "producer": "Yquem",
+    "vintage": 2015,
+    "country": "FR",
+    "region": "Sauternes",
+    "grapes": [
+      "Semillon",
+      "Sauvignon Blanc"
+    ],
+    "drink_by": "2045-01-01",
+    "rating": 10,
+    "critic_score": 97,
+    "vivino_rating": 4.6,
+    "attributes": [
+      "sweet"
+    ],
+    "pairs": [],
+    "votes": {
+      "up": 0,
+      "meh": 0,
+      "down": 0
+    },
+    "items": [
+      {
+        "storage": "Big fridge",
+        "price": 180,
+        "drawer": 9
+      }
+    ],
+    "wine_type": "DE",
+    "comment": "Apricot, honey and botrytis.",
+    "food_pairings": [
+      "foie gras"
+    ]
+  },
+  {
+    "id": 11,
+    "name": "Radford Dale Nudity 2022",
+    "producer": "Radford Dale",
+    "vintage": 2022,
+    "country": "ZA",
+    "region": "Stellenbosch",
+    "grapes": [
+      "Chenin Blanc"
+    ],
+    "drink_by": "2027-01-01",
+    "rating": 7,
+    "critic_score": null,
+    "vivino_rating": 4.0,
+    "attributes": [],
+    "pairs": [],
+    "votes": {
+      "up": 0,
+      "meh": 0,
+      "down": 0
+    },
+    "items": [
+      {
+        "storage": "Small fridge",
+        "price": 20,
+        "drawer": 5
+      }
+    ],
+    "wine_type": "OR",
+    "comment": "Skin contact, tea and orange peel.",
+    "food_pairings": []
+  },
+  {
+    "id": 12,
+    "name": "Penfolds Bin 28 2020",
+    "producer": "Penfolds",
+    "vintage": 2020,
+    "country": "AU",
+    "region": "South Australia",
+    "grapes": [
+      "Shiraz"
+    ],
+    "drink_by": "2030-01-01",
+    "rating": 7,
+    "critic_score": 91,
+    "vivino_rating": 4.1,
+    "attributes": [
+      "full-bodied"
+    ],
+    "pairs": [],
+    "votes": {
+      "up": 0,
+      "meh": 0,
+      "down": 1
+    },
+    "items": [
+      {
+        "storage": "Big fridge",
+        "price": 25,
+        "drawer": 2
+      }
+    ],
+    "wine_type": "RE",
+    "comment": "Dark plum and mocha. No fennel.",
+    "food_pairings": [
+      "barbecue"
+    ]
+  },
+  {
+    "id": 13,
+    "name": "Cloudy Bay Sauvignon Blanc 2023",
+    "producer": "Cloudy Bay",
+    "vintage": 2023,
+    "country": "NZ",
+    "region": "Marlborough",
+    "grapes": [
+      "Sauvignon Blanc"
+    ],
+    "drink_by": "2026-12-01",
+    "rating": 7,
+    "critic_score": 90,
+    "vivino_rating": 4.0,
+    "attributes": [],
+    "pairs": [],
+    "votes": {
+      "up": 0,
+      "meh": 0,
+      "down": 0
+    },
+    "items": [
+      {
+        "storage": "Small fridge",
+        "price": 19,
+        "drawer": 1
+      }
+    ],
+    "wine_type": "WH",
+    "comment": "Gooseberry and passion fruit.",
+    "food_pairings": [
+      "goat cheese"
+    ]
+  },
+  {
+    "id": 14,
+    "name": "Ridge Geyserville 2019",
+    "producer": "Ridge",
+    "vintage": 2019,
+    "country": "US",
+    "region": "Sonoma",
+    "grapes": [
+      "Zinfandel",
+      "Carignan",
+      "Petite Sirah"
+    ],
+    "drink_by": "2029-01-01",
+    "rating": 8,
+    "critic_score": 94,
+    "vivino_rating": 4.3,
+    "attributes": [],
+    "pairs": [],
+    "votes": {
+      "up": 0,
+      "meh": 0,
+      "down": 0
+    },
+    "items": [
+      {
+        "storage": "Big fridge",
+        "price": 48,
+        "drawer": 5
+      }
+    ],
+    "wine_type": "RE",
+    "comment": "Brambly fruit and pepper.",
+    "food_pairings": []
+  },
+  {
+    "id": 15,
+    "name": "Lopez de Heredia Vina Tondonia 2011",
+    "producer": "Lopez de Heredia",
+    "vintage": 2011,
+    "country": "ES",
+    "region": "Rioja",
+    "grapes": [
+      "Tempranillo",
+      "Garnacha"
+    ],
+    "drink_by": "2034-01-01",
+    "rating": 9,
+    "critic_score": 95,
+    "vivino_rating": 4.4,
+    "attributes": [],
+    "pairs": [],
+    "votes": {
+      "up": 1,
+      "meh": 0,
+      "down": 0
+    },
+    "items": [
+      {
+        "storage": "Big fridge",
+        "price": 42,
+        "drawer": 7
+      }
+    ],
+    "wine_type": "RE",
+    "comment": "Leather, dried cherry and oak.",
+    "food_pairings": [
+      "lamb"
+    ]
+  },
+  {
+    "id": 16,
+    "name": "Trimbach Riesling 2020",
+    "producer": "Trimbach",
+    "vintage": 2020,
+    "country": "FR",
+    "region": "Alsace",
+    "grapes": [
+      "Riesling"
+    ],
+    "drink_by": "2032-01-01",
+    "rating": 8,
+    "critic_score": 93,
+    "vivino_rating": 4.2,
+    "attributes": [
+      "dry"
+    ],
+    "pairs": [],
+    "votes": {
+      "up": 0,
+      "meh": 0,
+      "down": 0
+    },
+    "items": [
+      {
+        "storage": "Small fridge",
+        "price": 24,
+        "drawer": 6
+      }
+    ],
+    "wine_type": "WH",
+    "comment": "Lime, slate and dry.",
+    "food_pairings": []
+  }
+]

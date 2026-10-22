@@ -7,6 +7,7 @@ import logging
 import re
 import threading
 import time
+import unicodedata
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -20,6 +21,7 @@ from telegram import (
     InputFile,
     Update,
 )
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -34,6 +36,11 @@ from integrations.card_store import CardStore, StoreError
 logger = logging.getLogger(__name__)
 
 PENDING_TIMEOUT_SECONDS = 600  # 10 minutes
+TYPED_ADD_TTL = 3600  # typed "confirm"/"add" still finds the card for an hour
+TYPED_ADD_RE = re.compile(
+    r"^(confirm|add|add it|add to cellar|yes|ok|\u2705)\W*$",
+    re.IGNORECASE,
+)
 
 WINE_TYPES = {
     "RE": "Red", "WH": "White", "RO": "Rose", "SP": "Sparkling",
@@ -65,6 +72,9 @@ MISREAD_TTL = 900  # 15 minutes to type the real name after a wrong read
 # Example: "a:ww,w:42,b:7798039590229,o:in" = 37 bytes
 
 
+CALLBACK_DATA_MAX = 64
+
+
 def _cb(action: str, wine_id: int | None = None, barcode: str = "",
         original: str = "", page: int | None = None,
         item_id: int | None = None, row: int | None = None) -> str:
@@ -82,7 +92,13 @@ def _cb(action: str, wine_id: int | None = None, barcode: str = "",
         parts.append(f"i:{item_id}")
     if row is not None:
         parts.append(f"r:{row}")
-    return ",".join(parts)
+    data = ",".join(parts)
+    size = len(data.encode("utf-8"))
+    if size > CALLBACK_DATA_MAX:
+        raise ValueError(
+            f"callback_data is {size} bytes (Telegram limit {CALLBACK_DATA_MAX}): {data!r}"
+        )
+    return data
 
 
 CARD_FINISHED = (
@@ -181,13 +197,21 @@ def apply_vote_choice(markup, chosen: str) -> InlineKeyboardMarkup:
 
 def build_drank_view(
     wine_name: str, stock_count: int, item_id: int, chosen: str | None = None,
+    wine_id: int | None = None,
 ) -> tuple[str, InlineKeyboardMarkup]:
     text = (
         f"\U0001F377 <b>Drank:</b> {wine_name}\n"
         f"\U0001F4CA In stock: {stock_count}\n\n"
         f"{VOTE_PROMPT}"
     )
-    return text, InlineKeyboardMarkup([vote_keyboard_row(item_id, chosen)])
+    rows = []
+    if item_id and wine_id:
+        rows.append([InlineKeyboardButton(
+            "\u21a9\ufe0f Undo",
+            callback_data=_cb("ul", wine_id=wine_id, item_id=item_id),
+        )])
+    rows.append(vote_keyboard_row(item_id, chosen))
+    return text, InlineKeyboardMarkup(rows)
 
 
 def format_drank_at(value) -> str:
@@ -347,9 +371,14 @@ def build_stock_update_view(
     if stock_count == 0:
         lines.append("")
         lines.append("\u26A0\ufe0f <b>Last bottle removed!</b>")
-    undo_action = "ua" if action == "in" else "ur"
+    if action == "in":
+        undo_cb = _cb("ua", wine_id=wine_id)
+    elif item_id:
+        undo_cb = _cb("ul", wine_id=wine_id, item_id=item_id)
+    else:
+        undo_cb = _cb("ur", wine_id=wine_id)
     keyboard = [[
-        InlineKeyboardButton("\u21a9\ufe0f Undo", callback_data=_cb(undo_action, wine_id=wine_id)),
+        InlineKeyboardButton("\u21a9\ufe0f Undo", callback_data=undo_cb),
         InlineKeyboardButton("\U0001F195 Wrong wine", callback_data=_cb(
             "ww", wine_id=wine_id, barcode=barcode, original=action,
         )),
@@ -745,6 +774,53 @@ async def send_achievement_card(bot, chat_id, achievements: list | None) -> None
 LABEL_HEADER = "\U0001F50D <b>Label analysis complete!</b>\n\n"
 REFS_PENDING_NOTE = "\n\u23F3 <i>Checking ratings and price\u2026</i>"
 JUST_LOOKING_NOTE = "\n\n\U0001F440 <i>Just looking \u2014 not added to your cellar.</i>"
+BARCODE_TIP = (
+    "\n\n\U0001F4F8 <i>Send the barcode side too so scans find it next time.</i>"
+)
+WHO_MAKES_THIS = (
+    "Who makes this?\n\n"
+    "Type the producer, or add without one."
+)
+ADD_WITHOUT_PRODUCER = "\u23ed Add without producer"
+ADD_TO_CELLAR = "\u2705 Add to cellar"
+ADD_ANOTHER_PHOTO = "\U0001F4F8 Add another photo (front/back)"
+ADD_PHOTO_INFO = "\U0001F4F8 Add photo/info"
+VIEW_WINE = "\U0001F377 View wine"
+
+
+def _callback_status(query):
+    """Message-like object whose edit_text is the callback's edit_message_text."""
+    message = getattr(query, "message", None)
+
+    class _Status:
+        chat_id = getattr(message, "chat_id", None)
+        message_id = getattr(message, "message_id", None)
+
+        async def edit_text(self, *args, **kwargs):
+            return await _safe_edit(query, *args, **kwargs)
+
+    return _Status()
+
+
+def _wine_url(api, wine_id) -> str:
+    base = (getattr(api, "web_url", None) or "").rstrip("/")
+    if not base or not wine_id:
+        return ""
+    return f"{base}/wine/{wine_id}"
+
+
+def _wine_followup_rows(wine_id) -> list:
+    return [[
+        InlineKeyboardButton(ADD_PHOTO_INFO, callback_data=_cb("ai", wine_id=wine_id)),
+        InlineKeyboardButton(VIEW_WINE, callback_data=_cb("det", wine_id=wine_id)),
+    ]]
+
+
+def _append_wine_url(text: str, api, wine_id) -> str:
+    url = _wine_url(api, wine_id)
+    if not url or url in (text or ""):
+        return text
+    return f"{text.rstrip()}\n\n{url}"
 
 REFERENCE_FIELDS = (
     "critic_score", "vivino_rating", "category_rating",
@@ -901,6 +977,24 @@ def empty_cellar(
     return text, keyboard
 
 
+def last_bottle_removed_view(
+    wine_id: int, name: str, item_id: int | None = None,
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Shown when fridge minus takes the last bottle — empty_cellar has no undo."""
+    safe = html.escape(str(name or "that wine"), quote=False)
+    text = (
+        f"\U0001F4E4 Removed the last bottle of <b>{safe}</b>.\n\n"
+        "Tap Undo if that was a mistake."
+    )
+    rows = []
+    if item_id:
+        rows.append([InlineKeyboardButton(
+            "\u21a9\ufe0f Undo",
+            callback_data=_cb("ul", wine_id=wine_id, item_id=item_id),
+        )])
+    return text, InlineKeyboardMarkup(rows)
+
+
 def _unconfigured_storage(api) -> tuple[bool, str]:
     """True only for the auto-created empty Cellar in a household with no bottles."""
     try:
@@ -933,6 +1027,451 @@ def _stock_failed(result) -> str | None:
 
 
 BUSY_TAP = "Still working on that — try again in a moment."
+
+_MATCH_SKIP = {
+    "wine", "the", "de", "du", "le", "la", "les", "di", "del", "das", "der",
+    "reserve", "reserva", "red", "white", "brut", "extra", "dry",
+    "grand", "cru", "appellation", "dezaley", "calamin", "lavaux",
+    "epesses", "saphorin", "saint",
+}
+FRONT_WINS = ("name", "producer", "vintage")
+BACK_WINS = ("barcode", "abv")
+CONFIRM_OVERWRITE_FIELDS = {"producer", "vintage", "barcode", "name"}
+
+
+def _fold_accents(text: str) -> str:
+    nfd = unicodedata.normalize("NFD", text or "")
+    return "".join(ch for ch in nfd if unicodedata.category(ch) != "Mn")
+
+
+def _name_words(text: str) -> set[str]:
+    folded = _fold_accents(text).lower()
+    words = {
+        w for w in re.findall(r"[a-z0-9]+", folded)
+        if w not in _MATCH_SKIP and len(w) > 2
+    }
+    for init in re.findall(r"\b[a-z](?:\.[a-z0-9]+)+\.?", folded):
+        collapsed = init.replace(".", "")
+        if len(collapsed) >= 2:
+            words.add(collapsed)
+    return words
+
+
+_INITIALS_TOKEN = re.compile(r"^[A-Za-z](?:\.[A-Za-z0-9]+){1,}\.?$")
+_GRAPE_WORDS = {
+    "grenache", "noir", "blanc", "chardonnay", "cabernet", "sauvignon",
+    "merlot", "syrah", "shiraz", "pinot", "grigio", "gris", "chenin",
+    "chasselas", "cinsault", "cinsaut", "malbec", "riesling", "viognier",
+    "tempranillo", "sangiovese", "nebbiolo", "barbera", "zinfandel",
+    "mourvedre", "carignan", "colombard", "semillon", "muscat",
+    "gewurztraminer", "albarino", "vermentino", "red", "white", "rose",
+    "blend",
+}
+
+
+def _suggested_producer(name: str) -> str:
+    """Guess a producer from a Grok name like 'G.W.M Grenache Noir'."""
+    parts = [p for p in (name or "").split() if p]
+    if not parts:
+        return ""
+    first = parts[0]
+    if _INITIALS_TOKEN.match(first) and len(parts) >= 2:
+        return first
+    grape_tail = 0
+    for word in reversed(parts):
+        folded = _fold_accents(word).lower().strip(".,")
+        if folded in _GRAPE_WORDS or folded in _MATCH_SKIP:
+            grape_tail += 1
+        else:
+            break
+    if grape_tail and len(parts) > grape_tail:
+        producer = " ".join(parts[:-grape_tail]).strip()
+        if 1 <= len(producer.split()) <= 4:
+            return producer
+    return ""
+
+
+def _plausible_producer(text: str) -> bool:
+    """Reject questions and long sentences so they fall through to search."""
+    raw = (text or "").strip()
+    if len(raw) < 2 or raw.startswith("/") or "?" in raw:
+        return False
+    if TYPED_ADD_RE.match(raw):
+        return False
+    return len(raw.split()) < 5
+
+
+def _who_makes_keyboard(barcode: str, guess: str = "") -> InlineKeyboardMarkup:
+    rows = []
+    if guess:
+        rows.append([InlineKeyboardButton(
+            f"Producer: {guess} \u2705",
+            callback_data=_cb("gp", barcode=barcode),
+        )])
+    rows.append([InlineKeyboardButton(
+        ADD_WITHOUT_PRODUCER, callback_data=_cb("np", barcode=barcode),
+    )])
+    rows.append([InlineKeyboardButton("\u274c Cancel", callback_data=_cb("x"))])
+    return InlineKeyboardMarkup(rows)
+
+
+PRODUCER_HINT = (
+    "\n\n<b>Who makes this?</b> Type the producer, or add without one."
+)
+
+
+def _guess_producer_row(barcode: str, name: str) -> list:
+    guess = _suggested_producer(name or "")
+    if not guess:
+        return []
+    return [[InlineKeyboardButton(
+        f"Producer: {guess} \u2705",
+        callback_data=_cb("gp", barcode=barcode),
+    )]]
+
+
+DIFFERENT_BOTTLE = (
+    "This looks like a different bottle — new wine or attach anyway?"
+)
+
+
+def _different_bottle_keyboard(barcode: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "New wine", callback_data=_cb("nd", barcode=barcode),
+        )],
+        [InlineKeyboardButton(
+            "Attach anyway", callback_data=_cb("yb", barcode=barcode),
+        )],
+    ])
+
+
+def _clearly_different_label(first: dict, second: dict) -> bool:
+    """True when two Grok reads name two different wines, not a back-label."""
+    a = _name_words(first.get("name") or "")
+    b = _name_words(second.get("name") or "")
+    if not a or not b or (a & b):
+        return False
+    return True
+
+
+def _as_edit_query(update):
+    """Let typed flows reuse _safe_edit / _prompt_where_to_store."""
+    class _Q:
+        def __init__(self):
+            self.message = update.message
+
+        async def answer(self):
+            return None
+
+        async def edit_message_text(self, *args, **kwargs):
+            return await update.message.reply_text(*args, **kwargs)
+
+    return _Q()
+
+
+def _is_classification_name(name: str) -> bool:
+    """True when Grok only read a style word (Reserva, Red, Brut…)."""
+    raw = (name or "").strip()
+    if not raw:
+        return True
+    return not _name_words(raw)
+
+
+def _region_of(wine: dict) -> str:
+    return _fold_accents(
+        str(wine.get("region_name") or wine.get("region") or "")
+    ).lower().strip()
+
+
+def _country_of(value) -> str:
+    return _fold_accents(str(value or "")).lower().strip()
+
+
+def _attrs_match(query: dict, wine: dict) -> int | None:
+    """Score a vintage/country/region/type match. None if they disagree."""
+    score = 0
+    q_vin, w_vin = query.get("vintage"), wine.get("vintage")
+    if q_vin not in (None, "") and w_vin not in (None, ""):
+        if str(q_vin) != str(w_vin):
+            return None
+        score += 2
+    q_cty, w_cty = _country_of(query.get("country")), _country_of(wine.get("country"))
+    if q_cty and w_cty:
+        if q_cty != w_cty and q_cty not in w_cty and w_cty not in q_cty:
+            return None
+        score += 1
+    q_reg, w_reg = _region_of(query), _region_of(wine)
+    if q_reg and w_reg:
+        if q_reg not in w_reg and w_reg not in q_reg:
+            return None
+        score += 2
+    elif q_reg and not w_reg:
+        return None
+    q_type = str(query.get("wine_type") or "").upper()
+    w_type = str(wine.get("wine_type") or "").upper()
+    if q_type and w_type:
+        if q_type != w_type:
+            return None
+        score += 1
+    if score < 2:
+        return None
+    if q_vin not in (None, "") and str(q_vin) == str(w_vin):
+        return score
+    if q_reg and w_reg:
+        return score
+    return None
+
+
+def match_barcode_less_wines(query: dict, wines: list[dict], limit: int = 3) -> list[dict]:
+    """Fuzzy-match name+producer against household wines that have no barcode.
+
+    Producer must agree when both sides have one. At least two meaningful
+    words must overlap, and at least one of those must come from the wine
+    name (not only the producer), so a whole range from one estate is not
+    offered. Accents are folded so ñ matches n.
+
+    When the scanned name is only a classification word (Reserva) or a
+    producer is missing, fall back to vintage / country / region / type.
+    """
+    q_name = (query.get("name") or "").strip()
+    q_name_words = _name_words(q_name)
+    q_prod = _name_words(query.get("producer") or "")
+    q_words = q_name_words | q_prod
+    scored = []
+    for wine in wines:
+        if str(wine.get("barcode") or "").strip():
+            continue
+        w_name = (wine.get("name") or "").strip()
+        if not w_name:
+            continue
+        w_name_words = _name_words(w_name)
+        w_prod = _name_words(wine.get("producer") or "")
+        if q_prod and w_prod and not (q_prod & w_prod):
+            continue
+        if q_name_words and (q_name_words & w_name_words):
+            overlap = q_words & (w_name_words | w_prod)
+            if len(overlap) >= 2:
+                scored.append((100 + len(overlap), wine))
+                continue
+        if not q_name_words or not q_prod or not w_prod:
+            attr = _attrs_match(query, wine)
+            if attr:
+                scored.append((attr, wine))
+    scored.sort(key=lambda row: row[0], reverse=True)
+    return [wine for _, wine in scored[:limit]]
+
+
+def match_barcode_less_wine(query: dict, wines: list[dict]) -> dict | None:
+    hits = match_barcode_less_wines(query, wines, limit=1)
+    return hits[0] if hits else None
+
+
+def _filled(value) -> bool:
+    return value not in (None, "", [], {}, 0)
+
+
+def _producer_agrees(query: dict, wine: dict) -> bool:
+    q, w = _name_words(query.get("producer") or ""), _name_words(wine.get("producer") or "")
+    if q and w:
+        return bool(q & w)
+    return True
+
+
+def _vintage_agrees(query: dict, wine: dict) -> bool:
+    q, w = query.get("vintage"), wine.get("vintage")
+    if q not in (None, "") and w not in (None, ""):
+        return str(q) == str(w)
+    return True
+
+
+def _can_update_wine(query: dict, wine: dict) -> bool:
+    """Update when producer agrees, and vintage agrees if both sides have one."""
+    q_prod, w_prod = _name_words(query.get("producer") or ""), _name_words(
+        wine.get("producer") or "",
+    )
+    q_vin, w_vin = query.get("vintage"), wine.get("vintage")
+    if not (q_prod and w_prod and (q_prod & w_prod)):
+        return False
+    if q_vin not in (None, "") and w_vin not in (None, "") and str(q_vin) != str(w_vin):
+        return False
+    q_name, w_name = _name_words(query.get("name") or ""), _name_words(
+        wine.get("name") or "",
+    )
+    if q_name and w_name and not (q_name & w_name):
+        return False
+    return True
+
+
+def find_existing_wines(query: dict, wines: list[dict], limit: int = 3) -> list[dict]:
+    """Household wines that may already be this bottle.
+
+    Producer must agree when both sides have one, vintage when both have one.
+    Appellation words (Dezaley, Grand Cru, …) do not count toward name overlap.
+    """
+    q_name_words = _name_words(query.get("name") or "")
+    q_prod = _name_words(query.get("producer") or "")
+    scored = []
+    for wine in wines:
+        w_name_words = _name_words(wine.get("name") or "")
+        w_prod = _name_words(wine.get("producer") or "")
+        if not _producer_agrees(query, wine) or not _vintage_agrees(query, wine):
+            continue
+        name_overlap = q_name_words & w_name_words
+        prod_overlap = q_prod & w_prod
+        if not name_overlap and len(prod_overlap) < 2:
+            continue
+        score = len(name_overlap) * 2 + len(prod_overlap)
+        if _can_update_wine(query, wine):
+            score += 10
+        scored.append((score, wine))
+    scored.sort(key=lambda row: row[0], reverse=True)
+    return [wine for _, wine in scored[:limit]]
+
+
+def _wine_choice_label(wine: dict, limit: int = 50) -> str:
+    name = str(wine.get("name") or "that wine")
+    producer = str(wine.get("producer") or "")
+    vintage = str(wine.get("vintage") or "")
+    tail = " · ".join(part for part in (producer, vintage) if part)
+    if not tail:
+        return name[:limit]
+    if len(name) + 3 + len(tail) <= limit:
+        return f"{name} · {tail}"
+    room = max(8, limit - len(tail) - 3)
+    return f"{name[:room].rstrip()} · {tail}"[:limit]
+
+
+def merge_front_back(front: dict | None, back: dict | None) -> dict:
+    """Combine two label reads. Front wins name/producer/vintage; back wins barcode/ABV."""
+    front = dict(front or {})
+    back = dict(back or {})
+    merged = {}
+    for key in list(dict.fromkeys([*front, *back])):
+        fv, bv = front.get(key), back.get(key)
+        if key in FRONT_WINS:
+            merged[key] = fv if _filled(fv) else bv
+        elif key in BACK_WINS:
+            merged[key] = bv if _filled(bv) else fv
+        else:
+            merged[key] = fv if _filled(fv) else bv
+    return {k: v for k, v in merged.items() if _filled(v) or k in ("type",)}
+
+
+def proposed_wine_update(current: dict, incoming: dict) -> tuple[dict, list[tuple[str, object, object]]]:
+    """Split a Grok patch into blank-fills vs overwrites of filled fields."""
+    fills: dict = {}
+    overwrites: list[tuple[str, object, object]] = []
+    current = current or {}
+    for field, new in (incoming or {}).items():
+        if new in (None, "", [], {}):
+            continue
+        old = current.get("comment") if field == "description" else current.get(field)
+        if not _filled(old):
+            fills[field] = new
+            continue
+        if str(old).strip() == str(new).strip():
+            continue
+        if field in CONFIRM_OVERWRITE_FIELDS:
+            overwrites.append((field, old, new))
+    return fills, overwrites
+
+
+def _another_photo_row(barcode: str, pending: dict | None = None) -> list:
+    if pending and pending.get("photo_back"):
+        return []
+    return [[InlineKeyboardButton(
+        ADD_ANOTHER_PHOTO, callback_data=_cb("ap", barcode=barcode),
+    )]]
+
+
+def _is_this_keyboard(barcode: str, wines: list[dict], *, new_action: str = "grok"):
+    rows = []
+    for wine in wines[:3]:
+        name = (wine.get("name") or "that wine")[:32]
+        rows.append([InlineKeyboardButton(
+            f"Yes, link {name}",
+            callback_data=_cb("lnk", wine_id=wine["id"], barcode=barcode),
+        )])
+    if new_action == "nn":
+        rows.append([InlineKeyboardButton(
+            "No, new wine", callback_data=_cb("nn", barcode=barcode),
+        )])
+    else:
+        rows.append([InlineKeyboardButton(
+            "No, new wine",
+            callback_data=_cb("grok", barcode=barcode, original="new"),
+        )])
+    return InlineKeyboardMarkup(rows)
+
+
+def _is_this_text(barcode: str, wines: list[dict], extra: str = "") -> str:
+    code = html.escape(barcode, quote=False)
+    if len(wines) == 1:
+        name = html.escape(str(wines[0].get("name") or "that wine"), quote=False)
+        body = f"Is this <b>{name}</b>?"
+    else:
+        body = "Is this one of these?"
+    return f"❓ Unknown barcode <code>{code}</code>\n\n{body}{extra}"
+
+
+def unknown_barcode_prompt(barcode: str, off_data: dict | None = None):
+    """Text + buttons for an unknown scan when we are not offering a link."""
+    if off_data and off_data.get("name"):
+        text = (
+            f"🍷 <b>New wine scanned!</b>\n\n"
+            f"OFF found: <b>{html.escape(str(off_data['name']), quote=False)}</b>\n"
+            f"Producer: {html.escape(str(off_data.get('producer', 'Unknown')), quote=False)}\n"
+            f"Country: {html.escape(str(off_data.get('country', 'Unknown')), quote=False)}\n"
+            f"ABV: {html.escape(str(off_data.get('abv', 'Unknown')), quote=False)}\n"
+            f"Barcode: <code>{html.escape(barcode, quote=False)}</code>\n\n"
+            f"📸 Send a label photo to enrich with tasting notes, "
+            f"pairings and more — or add with OFF data below.\n"
+            f"Or type the producer, name and vintage and I'll look it up."
+        )
+        keyboard = [
+            [InlineKeyboardButton("📸 Send label photo", callback_data=_cb("retry", barcode=barcode))],
+            [InlineKeyboardButton("✅ Add with OFF data", callback_data=_cb("off", barcode=barcode))],
+            [InlineKeyboardButton("🔗 Link to existing wine", callback_data=_cb("link", barcode=barcode))],
+            [InlineKeyboardButton("✏️ Add manually", callback_data=_cb("man", barcode=barcode))],
+            [InlineKeyboardButton("❌ Skip", callback_data=_cb("skip", barcode=barcode))],
+        ]
+    else:
+        text = (
+            f"❓ <b>Unknown barcode: <code>{html.escape(barcode, quote=False)}</code></b>\n\n"
+            f"Not found in Open Food Facts.\n\n"
+            f"📸 Send a label photo and I'll extract the details + tasting notes.\n"
+            f"Or type the producer, name and vintage and I'll look it up."
+        )
+        keyboard = [
+            [InlineKeyboardButton("📸 Send label photo", callback_data=_cb("retry", barcode=barcode))],
+            [InlineKeyboardButton("🔗 Link to existing wine", callback_data=_cb("link", barcode=barcode))],
+            [InlineKeyboardButton("✏️ Add manually", callback_data=_cb("man", barcode=barcode))],
+            [InlineKeyboardButton("❌ Skip", callback_data=_cb("skip", barcode=barcode))],
+        ]
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+def _not_modified(exc: BaseException) -> bool:
+    return "message is not modified" in str(exc).lower()
+
+
+async def _safe_edit(query, *args, **kwargs):
+    """Redraw a callback message. A double-tap sends the same content again,
+    and Telegram rejects that with BadRequest 'Message is not modified'.
+    Ignore that, and always answer so the client spinner cannot stick.
+    """
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    try:
+        return await query.edit_message_text(*args, **kwargs)
+    except BadRequest as e:
+        if _not_modified(e):
+            logger.info("[tap] edit unchanged")
+            return None
+        raise
 
 
 def _retry_add_markup(wine_id, *, drank: bool = False, barcode: str = "") -> InlineKeyboardMarkup:
@@ -1475,6 +2014,10 @@ class BrowseSession:
         self.time = time.time()
         self.mode = mode  # "stock" or "fridge"
         self.storage_name = storage_name  # for fridge title
+        self.last_removed: dict | None = None
+        # Group-by values for the current grouped view. Buttons carry an index
+        # into this list so a long producer/grape never lands in callback_data.
+        self.group_values: list[tuple[str, str]] = []
 
     @property
     def filtered_wines(self) -> list[dict]:
@@ -1640,14 +2183,16 @@ def _build_browse_groups(
 
     lines = [title]
     keyboard = []
+    session.group_values = []
 
-    for val, display, count in groups:
+    for idx, (val, display, count) in enumerate(groups):
         bottles = sum(w.get("stock_count", 0) for w in wines
                       if (w.get({"type": "wine_type"}.get(dim, dim), "") or "Unknown") == val)
         lines.append(f"  {display} \u2014 {count} wines, {bottles} bottles")
+        session.group_values.append((dim, val))
         keyboard.append([InlineKeyboardButton(
             f"{display} ({count})",
-            callback_data=_cb("sd2", original=f"{session_key}:{dim}:{val}"),
+            callback_data=_cb("sd2", original=session_key, page=idx),
         )])
 
     # "Group by" alternatives
@@ -1665,8 +2210,12 @@ def _build_browse_groups(
     # "List all" option
     keyboard.append([InlineKeyboardButton(
         f"\U0001F4CB List all {len(wines)}",
-        callback_data=_cb("sl", original=session_key),
+        callback_data=_cb("bl", original=session_key),
     )])
+    if session.mode == "fridge":
+        keyboard.append([InlineKeyboardButton(
+            "Catch up", callback_data=_cb("cu", original="go"),
+        )])
 
     # Back button
     if session.filters:
@@ -1683,11 +2232,15 @@ def _build_browse_list(
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Build a paginated flat list of wines. Layout depends on session.mode."""
     total = len(wines)
+    total_pages = max(1, (total + BROWSE_PAGE_SIZE - 1) // BROWSE_PAGE_SIZE)
+    if session.page >= total_pages:
+        session.page = total_pages - 1
+    if session.page < 0:
+        session.page = 0
     page = session.page
     start = page * BROWSE_PAGE_SIZE
     end = min(start + BROWSE_PAGE_SIZE, total)
     page_wines = wines[start:end]
-    total_pages = max(1, (total + BROWSE_PAGE_SIZE - 1) // BROWSE_PAGE_SIZE)
 
     breadcrumb = _build_breadcrumb(session)
     total_bottles = sum(w.get("stock_count", 0) for w in wines)
@@ -1734,14 +2287,27 @@ def _build_browse_list(
                 InlineKeyboardButton("\U0001F4E4 -1", callback_data=_cb("out", wine_id=w["id"])),
             ])
 
+    removed = getattr(session, "last_removed", None)
+    if removed and removed.get("wine_id") and removed.get("item_id"):
+        name = str(removed.get("name") or "last bottle")
+        label = f"\u21a9\ufe0f Undo {name}"
+        if len(label) > 34:
+            label = "\u21a9\ufe0f Undo last bottle"
+        keyboard.append([InlineKeyboardButton(
+            label,
+            callback_data=_cb(
+                "ul", wine_id=removed["wine_id"], item_id=removed["item_id"],
+            ),
+        )])
+
     # Pagination
     if total_pages > 1:
         nav = []
         if page > 0:
-            nav.append(InlineKeyboardButton("\u2b05\ufe0f Prev", callback_data=_cb("sp", original=f"{session_key}:{page - 1}")))
+            nav.append(InlineKeyboardButton("\u2b05\ufe0f Prev", callback_data=_cb("bp", original=f"{session_key}:{page - 1}")))
         nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data=_cb("x")))
         if page < total_pages - 1:
-            nav.append(InlineKeyboardButton("Next \u27a1\ufe0f", callback_data=_cb("sp", original=f"{session_key}:{page + 1}")))
+            nav.append(InlineKeyboardButton("Next \u27a1\ufe0f", callback_data=_cb("bp", original=f"{session_key}:{page + 1}")))
         keyboard.append(nav)
 
     # Back button
@@ -1749,6 +2315,10 @@ def _build_browse_list(
         keyboard.append([InlineKeyboardButton(
             "\u2b05\ufe0f Back",
             callback_data=_cb("sb", original=session_key),
+        )])
+    if session.mode == "fridge":
+        keyboard.append([InlineKeyboardButton(
+            "Catch up", callback_data=_cb("cu", original="go"),
         )])
 
     return "\n".join(lines), InlineKeyboardMarkup(keyboard)
@@ -1874,42 +2444,23 @@ class TelegramNotifier:
             chat_id=cid, text=message, reply_markup=reply_markup, parse_mode="HTML",
         ))
 
-    def send_new_wine_prompt(self, barcode: str, off_data: dict | None = None):
+    def send_new_wine_prompt(self, barcode: str, off_data: dict | None = None,
+                             suggested=None):
         """Prompt user about a new unknown barcode — always ask for a label photo."""
-        if off_data and off_data.get("name"):
-            text = (
-                f"🍷 <b>New wine scanned!</b>\n\n"
-                f"OFF found: <b>{off_data['name']}</b>\n"
-                f"Producer: {off_data.get('producer', 'Unknown')}\n"
-                f"Country: {off_data.get('country', 'Unknown')}\n"
-                f"ABV: {off_data.get('abv', 'Unknown')}\n"
-                f"Barcode: <code>{barcode}</code>\n\n"
-                f"📸 Send a label photo to enrich with tasting notes, "
-                f"pairings and more — or add with OFF data below.\n"
-                f"Or type the producer, name and vintage and I'll look it up."
-            )
-            keyboard = [
-                [InlineKeyboardButton("📸 Send label photo", callback_data=_cb("retry", barcode=barcode))],
-                [InlineKeyboardButton("✅ Add with OFF data", callback_data=_cb("off", barcode=barcode))],
-                [InlineKeyboardButton("🔗 Link to existing wine", callback_data=_cb("link", barcode=barcode))],
-                [InlineKeyboardButton("✏️ Add manually", callback_data=_cb("man", barcode=barcode))],
-                [InlineKeyboardButton("❌ Skip", callback_data=_cb("skip", barcode=barcode))],
-            ]
+        hits = suggested if isinstance(suggested, list) else (
+            [suggested] if isinstance(suggested, dict) and suggested.get("id") else []
+        )
+        hits = [w for w in hits if isinstance(w, dict) and w.get("id")][:3]
+        if hits:
+            extra = ""
+            if off_data and off_data.get("name"):
+                extra = (
+                    f"\nOFF read it as {html.escape(str(off_data['name']), quote=False)}."
+                )
+            text = _is_this_text(barcode, hits, extra)
+            reply_markup = _is_this_keyboard(barcode, hits, new_action="nn")
         else:
-            text = (
-                f"❓ <b>Unknown barcode: <code>{barcode}</code></b>\n\n"
-                f"Not found in Open Food Facts.\n\n"
-                f"📸 Send a label photo and I'll extract the details + tasting notes.\n"
-                f"Or type the producer, name and vintage and I'll look it up."
-            )
-            keyboard = [
-                [InlineKeyboardButton("📸 Send label photo", callback_data=_cb("retry", barcode=barcode))],
-                [InlineKeyboardButton("🔗 Link to existing wine", callback_data=_cb("link", barcode=barcode))],
-                [InlineKeyboardButton("✏️ Add manually", callback_data=_cb("man", barcode=barcode))],
-                [InlineKeyboardButton("❌ Skip", callback_data=_cb("skip", barcode=barcode))],
-            ]
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
+            text, reply_markup = unknown_barcode_prompt(barcode, off_data)
         self._send_to_all(lambda cid: self.bot.send_message(
             chat_id=cid, text=text, reply_markup=reply_markup, parse_mode="HTML",
         ))
@@ -1942,6 +2493,7 @@ class TelegramBotHandler:
         admin_chat_ids: list[str] | None = None,
         admin_api=None,
         card_store=None,
+        ask_store=None,
     ):
         self.bot_token = bot_token
         self.chat_ids = [str(cid) for cid in chat_ids]
@@ -1959,6 +2511,7 @@ class TelegramBotHandler:
         self._triage_callback = None
         self._winelist_callback = None
         self._identify_callback = None
+        self._label_analyse = None
         self._local_barcode_reader = None
         self._browse_sessions: dict[str, BrowseSession] = {}
         self._chat_id_to_currency: dict[str, str] = {}
@@ -1971,13 +2524,29 @@ class TelegramBotHandler:
         # keyed chat:message. Redis-backed when REDIS_URL is set so a restart
         # does not kill open cards.
         self._label_cards = card_store if card_store is not None else CardStore()
+        self._asks = ask_store if ask_store is not None else CardStore(ttl=1800, prefix="whiney:ask:")
+        self._chat = None
+        self._router = None
         # Shelf-tag paid prices waiting for add_stock (create then storage picker).
         self._pending_paid: dict[int, float] = {}
         self._misread_corrections: dict[str, dict] = {}
         self.bot_username: str | None = None
         self._first_cellars: set[str] = set()
         self._country_asked: set[str] = set()
+        self._await_producer: dict[str, dict] = {}
+        self._await_side_photo: dict[str, dict] = {}
+        self._pending_side_bytes: dict[str, bytes] = {}
         self._invites = None
+
+    def set_chat_models(self, chat):
+        """Turn plain text into cellar answers and recommendations.
+
+        Left unset in tests and when there is no Grok key, so a typed wine
+        name keeps going straight to search.
+        """
+        from integrations.chat_router import ChatRouter
+        self._chat = chat
+        self._router = ChatRouter(self, chat)
 
     def _get_api(self, update_or_id=None):
         """Get the household-specific API client for a chat_id, or fallback.
@@ -2023,6 +2592,10 @@ class TelegramBotHandler:
         Called with (hint, wrong_name, currency, country)."""
         self._identify_callback = callback
 
+    def set_label_analyse_callback(self, callback: Callable):
+        """Re-read a photo that only yielded a classification word."""
+        self._label_analyse = callback
+
     def set_triage_callback(self, callback: Callable):
         """Set callback for classifying + processing an unknown photo.
         Called with (photo_bytes). Returns a dict with "type" key:
@@ -2049,6 +2622,14 @@ class TelegramBotHandler:
             from integrations.telegram_invites import InviteFlow
             flow = InviteFlow(self)
             self._invites = flow
+        return flow
+
+    def _catchup_flow(self):
+        flow = getattr(self, "_catchups", None)
+        if flow is None:
+            from integrations.telegram_catchup import CatchUpFlow
+            flow = CatchUpFlow(self)
+            self._catchups = flow
         return flow
 
     def set_api_factory(self, factory: Callable):
@@ -2324,6 +2905,9 @@ class TelegramBotHandler:
         state = flow.state_for(chat_id)
         if state and state.get("step") in ("name", "confirm"):
             flow.clear(chat_id)
+        router = getattr(self, "_router", None)
+        if router is not None:
+            await router.abandon(chat_id)
 
     async def _stranger_fallback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Anything at all from an unprovisioned chat gets the onboarding reply."""
@@ -2418,7 +3002,7 @@ class TelegramBotHandler:
         is_staff = str(update.effective_chat.id) in getattr(self, "admin_chat_ids", [])
         text = (
             "🍷 <b>Whiney</b>\n\n"
-            "/fridge \u2014 What's in the fridge (adjust stock)\n"
+            "/fridge \u2014 What's in the fridge (Catch up walks a drawer)\n"
             "/status \u2014 Inventory summary\n"
             "/search \u2014 Find a wine by name\n"
             "/stock \u2014 Browse wines by type\n"
@@ -2493,10 +3077,19 @@ class TelegramBotHandler:
         if await self._maybe_correct_winelist_text(update, text):
             return
 
+        if await self._maybe_typed_add(update, context, text):
+            return
+
+        if await self._maybe_take_producer(update, text, context):
+            return
+
         if await self._maybe_identify_misread_text(update, text):
             return
 
         if len(text) >= 3:
+            router = getattr(self, "_router", None)
+            if router is not None and await router.handle_text(update, context, text):
+                return
             await self._do_search(update, text)
             return
         await update.message.reply_text(
@@ -2565,6 +3158,9 @@ class TelegramBotHandler:
                 if len(wines) > 10:
                     text += f"<i>... and {len(wines) - 10} more</i>\n"
 
+            router = getattr(self, "_router", None)
+            if router is not None:
+                text += router.status_line()
             await update.message.reply_text(text, parse_mode="HTML")
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
@@ -2677,10 +3273,10 @@ class TelegramBotHandler:
                 limit=DRANK_PAGE_SIZE,
             )
         except Exception as e:
-            await query.edit_message_text(f"Error: {e}")
+            await _safe_edit(query,f"Error: {e}")
             return
         text, markup = build_drank_history_view(payload)
-        await query.edit_message_text(
+        await _safe_edit(query,
             text, parse_mode="HTML", reply_markup=markup,
         )
 
@@ -2804,6 +3400,7 @@ class TelegramBotHandler:
 
         if new_api:
             self._chat_id_to_api[chat_id] = new_api
+            self._catchup_flow().drop(chat_id)
             text = f"\u2705 Switched to <b>{household_name}</b>"
             buttons = InlineKeyboardMarkup([
                 [
@@ -2816,7 +3413,7 @@ class TelegramBotHandler:
             buttons = None
 
         if hasattr(update_or_query, "edit_message_text"):
-            await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=buttons)
+            await _safe_edit(update_or_query, text, parse_mode="HTML", reply_markup=buttons)
         elif hasattr(update_or_query, "message"):
             await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=buttons)
 
@@ -2949,6 +3546,9 @@ class TelegramBotHandler:
         if not self._is_known(update):
             await self._greet_stranger(update)
             return
+        router = getattr(self, "_router", None)
+        if router is not None:
+            await router.on_location(update, context)
 
     async def _handle_photo_routed(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await self._invite_flow().on_photo(update, context):
@@ -3148,7 +3748,7 @@ class TelegramBotHandler:
         except Exception as e:
             text = f"Error loading fridge: {e}"
             if hasattr(update_or_query, "edit_message_text"):
-                await update_or_query.edit_message_text(text)
+                await _safe_edit(update_or_query, text)
             else:
                 await update_or_query.message.reply_text(text)
             return
@@ -3161,7 +3761,7 @@ class TelegramBotHandler:
                 storage_name=storage_name or hint_name,
             )
             if hasattr(update_or_query, "edit_message_text"):
-                await update_or_query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+                await _safe_edit(update_or_query, text, reply_markup=kb, parse_mode="HTML")
             else:
                 await update_or_query.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
             return
@@ -3182,7 +3782,7 @@ class TelegramBotHandler:
             session_key = f"{chat_id}:{msg_id}"
             self._browse_sessions[session_key] = session
             text, keyboard = _build_browse_view(session, session_key)
-            await update_or_query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+            await _safe_edit(update_or_query, text, reply_markup=keyboard, parse_mode="HTML")
         else:
             # New message
             msg = await update_or_query.message.reply_text("\U0001F504 Loading...")
@@ -3259,8 +3859,20 @@ class TelegramBotHandler:
         wines = api.wines_in_stock(storage_name=storage_name)
         session.all_wines = wines
         if not wines:
+            removed = getattr(session, "last_removed", None)
+            if removed and removed.get("wine_id"):
+                text, kb = last_bottle_removed_view(
+                    removed["wine_id"], removed.get("name") or "that wine",
+                    item_id=removed.get("item_id"),
+                )
+                await _safe_edit(
+                    query,
+                    text, reply_markup=kb, parse_mode="HTML",
+                )
+                return
             del self._browse_sessions[session_key]
-            await query.edit_message_text(
+            await _safe_edit(
+                query,
                 empty_cellar()[0], reply_markup=empty_cellar()[1], parse_mode="HTML",
             )
             return
@@ -3269,9 +3881,9 @@ class TelegramBotHandler:
         total_pages = max(1, (len(filtered) + BROWSE_PAGE_SIZE - 1) // BROWSE_PAGE_SIZE)
         session.page = min(session.page, total_pages - 1)
         text, keyboard = _build_browse_list(session, session_key, filtered)
-        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+        await _safe_edit(query, text, reply_markup=keyboard, parse_mode="HTML")
 
-    def _build_detail_card(self, wine: dict) -> tuple[str, InlineKeyboardMarkup]:
+    def _build_detail_card(self, wine: dict, api=None) -> tuple[str, InlineKeyboardMarkup]:
         """Build the wine detail card text and keyboard."""
         wine_id = wine["id"]
         text = f"\U0001F377 <b>{wine['name']}</b>\n\n"
@@ -3308,7 +3920,9 @@ class TelegramBotHandler:
                 if drawer is not None:
                     loc += f", Drawer {drawer}"
                 text += loc + "\n"
-
+        url = _wine_url(api or self.api, wine_id)
+        if url:
+            text += f"\n{url}"
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("\U0001F4E5 +1", callback_data=_cb("in", wine_id=wine_id)),
@@ -3326,6 +3940,9 @@ class TelegramBotHandler:
             [
                 InlineKeyboardButton("\U0001F504 Refresh refs", callback_data=_cb("rr", wine_id=wine_id)),
                 InlineKeyboardButton("\u270f\ufe0f Update from label", callback_data=_cb("ed", wine_id=wine_id)),
+            ],
+            [
+                InlineKeyboardButton(ADD_PHOTO_INFO, callback_data=_cb("ai", wine_id=wine_id)),
             ],
         ])
         return text, keyboard
@@ -3393,6 +4010,47 @@ class TelegramBotHandler:
         """Read a pending entry for this household. Returns {} when absent."""
         with self._lock:
             return dict(self.pending_store.get(self._pkey(api, barcode), {}))
+
+    def _upload_pending_photos(self, api, pending_entry: dict, wine_id: int) -> None:
+        front = pending_entry.get("photo_front") or pending_entry.get("photo_data")
+        back = pending_entry.get("photo_back")
+        if front:
+            itype = "LF" if back else "FR"
+            try:
+                api.upload_wine_image(wine_id, front, image_type=itype)
+            except Exception as e:
+                logger.warning(f"[PHOTO] Failed to upload front image: {e}")
+        if back:
+            try:
+                api.upload_wine_image(wine_id, back, image_type="LB")
+            except Exception as e:
+                logger.warning(f"[PHOTO] Failed to upload back image: {e}")
+
+    def _open_label_cards(self, api, *, max_age: float | None = None,
+                          include_complete: bool = False) -> list[tuple[str, dict]]:
+        """Uncommitted label cards, newest first, including `_label_` keys."""
+        now = time.time()
+        hid = self._hid(api)
+        timeout = PENDING_TIMEOUT_SECONDS if max_age is None else max_age
+        found = []
+        with self._lock:
+            for key, data in self.pending_store.items():
+                if not isinstance(data, dict) or data.get("resolved") or data.get("wine_id"):
+                    continue
+                if key.startswith("_edit_"):
+                    continue
+                if (now - data.get("time", 0)) >= timeout:
+                    continue
+                if hid is not None and data.get("household_id") not in (None, hid):
+                    continue
+                if data.get("photo_back") and not include_complete:
+                    continue
+                if not (data.get("grok_merged") or data.get("photo_data") or data.get("photo_front")):
+                    continue
+                barcode = key if str(key).startswith("_") else (data.get("barcode") or key)
+                found.append((barcode, data))
+        found.sort(key=lambda row: row[1].get("time", 0), reverse=True)
+        return found
 
     def _is_pending(self, api, barcode: str) -> bool:
         with self._lock:
@@ -3548,7 +4206,7 @@ class TelegramBotHandler:
 
     async def _resend_photo(self, query):
         try:
-            await query.edit_message_text(RESEND_PHOTO)
+            await _safe_edit(query,RESEND_PHOTO)
         except Exception:
             try:
                 await query.answer(RESEND_PHOTO, show_alert=True)
@@ -3565,10 +4223,13 @@ class TelegramBotHandler:
         item_id = card.get("item_id")
         stock = card.get("stock_count") or 0
         if item_id:
-            text, markup = build_drank_view(name, stock, item_id)
-            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+            text, markup = build_drank_view(
+                name, stock, item_id, wine_id=card.get("wine_id"),
+            )
+            await _safe_edit(query, text, parse_mode="HTML", reply_markup=markup)
             return
-        await query.edit_message_text(
+        await _safe_edit(
+            query,
             f"\U0001F377 <b>Drank:</b> {name}\n"
             f"\U0001F4CA In stock: {stock}",
             parse_mode="HTML",
@@ -3576,11 +4237,13 @@ class TelegramBotHandler:
 
     async def _prompt_where_to_store(
         self, query, api, context, *, wine_id, name, paid=None, created=True,
+        ask_barcode=False,
     ):
         """Fridge picker after creating a wine — Hillside has several."""
         card = self._card_logged_item(query.message)
         if card.get("item_id") and not card.get("drunk") and not card.get("guard"):
-            await query.edit_message_text(
+            await _safe_edit(
+                query,
                 f"📥 <b>Added:</b> {card.get('wine_name') or name}\n"
                 f"📊 In stock: {card.get('stock_count') or 0}",
                 parse_mode="HTML",
@@ -3603,7 +4266,8 @@ class TelegramBotHandler:
                     query.message, guard=True, wine_id=wine_id,
                     wine_name=stock.get("wine_name") or name, in_progress=False,
                 )
-                await query.edit_message_text(
+                await _safe_edit(
+                    query,
                     f"Already added <b>{stock.get('wine_name') or name}</b> a moment ago."
                     "\n\nAdd another bottle?",
                     parse_mode="HTML",
@@ -3614,7 +4278,8 @@ class TelegramBotHandler:
                 return
             failed = _stock_failed(stock)
             if failed:
-                await query.edit_message_text(
+                await _safe_edit(
+                    query,
                     f"Saved <b>{name}</b> but couldn't add a bottle.\n\n⚠️ {failed}",
                     parse_mode="HTML",
                     reply_markup=_retry_add_markup(wine_id),
@@ -3645,9 +4310,11 @@ class TelegramBotHandler:
                 keyboard.append([InlineKeyboardButton(
                     "Skip", callback_data=_cb("sd", item_id=item_id, row=-1, wine_id=wine_id),
                 )])
-                await query.edit_message_text(
+                tip = BARCODE_TIP if ask_barcode else ""
+                await _safe_edit(
+                    query,
                     f"🍷 <b>Wine created:</b> {name}\n"
-                    f"📍 {storage_name}\n\n"
+                    f"📍 {storage_name}{tip}\n\n"
                     f"🗄 <b>Which drawer?</b>",
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(keyboard),
@@ -3657,14 +4324,25 @@ class TelegramBotHandler:
                     query.message.chat_id, name, stock.get("stock_count"),
                 )
                 if first:
-                    await query.edit_message_text(first, parse_mode="HTML")
-                else:
-                    await query.edit_message_text(
-                        f"🍷 <b>Wine added:</b> {name}\n"
-                        f"📍 {storage_name}\n"
-                        f"📊 In stock: {stock['stock_count']}\n\n"
-                        f"⏳ <i>Looking up ratings and price — these will arrive in a follow-up message in a few seconds.</i>",
+                    await _safe_edit(
+                        query,
+                        _append_wine_url(first, api, wine_id),
                         parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup(_wine_followup_rows(wine_id)),
+                    )
+                else:
+                    tip = BARCODE_TIP if ask_barcode else ""
+                    text = (
+                        f"🍷 <b>Wine added:</b> {name}\n"
+                        f"📍 {storage_name}{tip}\n"
+                        f"📊 In stock: {stock['stock_count']}\n\n"
+                        f"⏳ <i>Looking up ratings and price — these will arrive in a follow-up message in a few seconds.</i>"
+                    )
+                    await _safe_edit(
+                        query,
+                        _append_wine_url(text, api, wine_id),
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup(_wine_followup_rows(wine_id)),
                     )
             return
         keyboard = []
@@ -3677,11 +4355,200 @@ class TelegramBotHandler:
                 callback_data=_cb("si", wine_id=wine_id, page=s["id"]),
             )])
         heading = "Wine created" if created else "Wine added"
-        await query.edit_message_text(
-            f"🍷 <b>{heading}:</b> {name}\n\n"
+        tip = BARCODE_TIP if ask_barcode else ""
+        await _safe_edit(
+            query,
+            f"🍷 <b>{heading}:</b> {name}{tip}\n\n"
             f"📍 <b>Where are you storing this?</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    async def _add_pending_wine(
+        self, query, api, context, barcode, *,
+        skip_producer=False, producer_override=None, original="",
+        tap_action="grok",
+    ):
+        """Claim a pending label card and create the wine (grok / np / gp / typed)."""
+        tap_chat = None
+        if query.message:
+            tap_chat = getattr(query.message, "chat_id", None) or getattr(
+                getattr(query.message, "chat", None), "id", None,
+            )
+        self._touch_label_card(query.message, committed=True)
+        status, existing_id = self._claim_pending(api, barcode)
+        logger.info(
+            "[tap] %s claim=%s barcode=%s existing=%s",
+            tap_action, status, barcode or "-", existing_id,
+        )
+        if status == "gone":
+            self._log_tap_early(tap_action, "gone", barcode, tap_chat)
+            card = self._label_cards.get(
+                self._card_key(query.message) if query.message else "",
+            ) or {}
+            existing_id = card.get("wine_id")
+            if existing_id:
+                status = "created"
+            elif barcode and not str(barcode).startswith("_"):
+                try:
+                    hits = api.lookup_barcode(barcode)
+                except Exception:
+                    hits = []
+                if hits:
+                    name = hits[0].get("name") or "that wine"
+                    await _safe_edit(
+                        query,
+                        f"That's already in as <b>{name}</b>. "
+                        "Scan it on the gun to add a bottle.",
+                        parse_mode="HTML",
+                    )
+                    return
+                await _safe_edit(query, _finished_copy(barcode))
+                return
+            else:
+                await _safe_edit(query, _finished_copy(barcode))
+                return
+        if status == "busy":
+            self._log_tap_early(tap_action, "busy", barcode, tap_chat)
+            await self._tap_busy(query)
+            return
+        if status == "created":
+            card = self._label_cards.get(
+                self._card_key(query.message) if query.message else "",
+            ) or {}
+            name = card.get("wine_name") or ""
+            stock = 0
+            try:
+                detail = api.get_wine_detail(existing_id)
+                if isinstance(detail, dict):
+                    raw = detail.get("stock_count")
+                    if isinstance(raw, int):
+                        stock = raw
+                    if not name:
+                        name = detail.get("name") or ""
+            except Exception:
+                pass
+            if stock > 0:
+                self._log_tap_early(tap_action, "already_in", barcode, tap_chat)
+                await _safe_edit(
+                    query,
+                    f"That's already in as <b>{name or 'that wine'}</b> "
+                    f"({stock} in stock).",
+                    parse_mode="HTML",
+                )
+                return
+            await self._prompt_where_to_store(
+                query, api, context,
+                wine_id=existing_id, name=name or "that wine",
+                paid=self._paid_for(query.message, existing_id),
+            )
+            return
+
+        try:
+            merged = dict(self._get_pending(api, barcode).get("grok_merged") or {})
+            if not merged:
+                self._log_tap_early(
+                    tap_action, "no_extracted_data", barcode, tap_chat,
+                )
+                await _safe_edit(
+                    query,
+                    "I lost the reading for that bottle. Send the label photo again?",
+                )
+                return
+            if producer_override is not None:
+                merged["producer"] = producer_override
+                self._update_pending(api, barcode, grok_merged=merged)
+            elif skip_producer:
+                merged["producer"] = str(merged.get("producer") or "").strip()
+                self._update_pending(api, barcode, grok_merged=merged)
+            elif not str(merged.get("producer") or "").strip():
+                self._log_tap_early(tap_action, "no_producer", barcode, tap_chat)
+                guess = _suggested_producer(merged.get("name") or "")
+                chat_id = str(tap_chat or "")
+                if chat_id:
+                    self._await_producer[chat_id] = {
+                        "barcode": barcode,
+                        "time": time.time(),
+                        "card_key": self._card_key(query.message) if query.message else "",
+                    }
+                await _safe_edit(
+                    query,
+                    WHO_MAKES_THIS,
+                    parse_mode="HTML",
+                    reply_markup=_who_makes_keyboard(barcode, guess),
+                )
+                return
+
+            from integrations.barcodes import accepted_barcode, normalise_barcode
+            wine_data = _clean_wine_data(merged)
+            if str(barcode).startswith("_"):
+                grok_bc = accepted_barcode(merged.get("barcode"))
+                if grok_bc:
+                    wine_data["barcode"] = grok_bc
+            if not str(barcode).startswith("_"):
+                if original != "new":
+                    try:
+                        hits = match_barcode_less_wines(
+                            merged, api.list_all_wines(),
+                        )
+                    except Exception:
+                        hits = []
+                    if hits:
+                        self._log_tap_early(
+                            tap_action, "is_this", barcode, tap_chat,
+                        )
+                        await _safe_edit(
+                            query,
+                            _is_this_text(barcode, hits),
+                            parse_mode="HTML",
+                            reply_markup=_is_this_keyboard(barcode, hits),
+                        )
+                        return
+                wine_data["barcode"] = normalise_barcode(barcode) or barcode
+            result = api.create_wine(wine_data)
+            wine_id = result["id"]
+            paid = wine_data.get("price")
+            self._remember_paid(query.message, wine_id, paid)
+            self._update_pending(api, barcode, wine_id=wine_id)
+            self._touch_label_card(
+                query.message, committed=True,
+                wine_id=wine_id, wine_name=result.get("name"),
+            )
+
+            pending_entry = self._get_pending(api, barcode)
+            self._upload_pending_photos(api, pending_entry, wine_id)
+            if not (pending_entry.get("photo_data") or pending_entry.get("photo_front")):
+                logger.warning(
+                    f"[PHOTO] No photo_data found in pending_store for barcode={barcode}"
+                )
+
+            chat_id = tap_chat
+            if chat_id is None and getattr(query, "message", None):
+                chat_id = query.message.chat_id
+            self._reuse_label_lookup(
+                wine_id, merged, query.message, api,
+                chat_id, result.get("name", ""),
+            )
+
+            self._resolve_pending(api, barcode)
+            await self._prompt_where_to_store(
+                query, api, context,
+                wine_id=wine_id, name=result.get("name") or "",
+                paid=paid,
+                ask_barcode=str(barcode).startswith("_"),
+            )
+        except StoreError:
+            raise
+        except Exception as e:
+            logger.exception("%s confirm failed after create", tap_action)
+            await _safe_edit(query, f"Error creating wine: {e}")
+        finally:
+            self._unclaim_pending(api, barcode)
+
+    def _log_tap_early(self, action, reason, barcode, chat):
+        logger.info(
+            "[tap] %s early-return reason=%s barcode=%s chat=%s",
+            action, reason, barcode or "-", chat,
         )
 
     async def _redraw_scan_card(
@@ -3689,6 +4556,9 @@ class TelegramBotHandler:
         item_id=None, storage_id=None,
     ):
         """Re-render the fridge-scan card after Move / Drawer / Back."""
+        if not wine_id:
+            await _safe_edit(query, "That card's out of date — send /stock again.")
+            return
         wine = api.get_wine_detail(wine_id) or {}
         name = wine.get("name") or "Wine"
         vintage = wine.get("vintage")
@@ -3722,7 +4592,7 @@ class TelegramBotHandler:
             wine_id=wine_id, barcode=barcode, storage=storage,
             item_id=item_id, drawers=drawers, row=row, storage_id=sid,
         )
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        await _safe_edit(query, text, parse_mode="HTML", reply_markup=markup)
 
     # --- Callback handler ---
 
@@ -3733,6 +4603,14 @@ class TelegramBotHandler:
         except StoreError:
             logger.exception("[tap] store")
             await self._resend_photo(query)
+        except BadRequest as e:
+            if not _not_modified(e):
+                raise
+            logger.info("[tap] message unchanged")
+            try:
+                await query.answer()
+            except Exception:
+                pass
 
     async def _dispatch_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -3741,6 +4619,9 @@ class TelegramBotHandler:
             return
 
         if await self._invite_flow().on_callback(update, context):
+            return
+
+        if await self._catchup_flow().on_callback(update, context):
             return
 
         data = _parse_cb(query.data)
@@ -3757,11 +4638,19 @@ class TelegramBotHandler:
         # Fridge +/- use custom answer toasts; all others answer immediately.
         # answer() fails on callbacks older than ~48h; that must not abort the
         # handler, or every button in the user's scrollback becomes a no-op.
-        if action not in ("+", "-", "mv", "ss", "vt"):
+        if action not in ("+", "-", "mv", "ss", "vt", "ul", "ap"):
             try:
                 await query.answer()
             except Exception as e:
                 logger.info(f"[callback] answer() failed (likely a stale button): {e}")
+
+        if action in ("cf", "cc", "cq", "ck", "cn", "co", "cx", "cr", "cw"):
+            router = getattr(self, "_router", None)
+            if router is None:
+                await query.message.reply_text("That's finished — just type again.")
+                return
+            await router.on_callback(query, data, context)
+            return
 
         api = self._get_api(query)
 
@@ -3782,10 +4671,10 @@ class TelegramBotHandler:
             cmd = query.data.split(":")[1]
             api = self._get_api(query)  # re-fetch after potential switch
             if cmd == "fridge":
-                await query.edit_message_text("\U0001f9ca Loading fridge...")
+                await _safe_edit(query,"\U0001f9ca Loading fridge...")
                 await self._cmd_fridge(update, context)
             elif cmd == "status":
-                await query.edit_message_text("\U0001f4ca Loading status...")
+                await _safe_edit(query,"\U0001f4ca Loading status...")
                 await self._cmd_status(update, context)
             return
 
@@ -3793,7 +4682,7 @@ class TelegramBotHandler:
             key = f"{query.message.chat_id}:{query.message.message_id}"
             entry = self._winelists.get(key)
             if not entry:
-                await query.edit_message_text(
+                await _safe_edit(query,
                     "\U0001F4CB That list has expired — send the photo again."
                 )
                 return
@@ -3804,7 +4693,7 @@ class TelegramBotHandler:
                 detail_index=data.get("page") if action == "wli" else None,
                 from_pick=data.get("original") == "p",
             )
-            await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
+            await _safe_edit(query,text, parse_mode="HTML", reply_markup=keyboard)
             return
 
         if action == "wlf":
@@ -3812,12 +4701,12 @@ class TelegramBotHandler:
             return
 
         if action == "howto":
-            await query.edit_message_text(
+            await _safe_edit(query,
                 "\U0001F4F8 <b>Adding a wine</b>\n\n"
                 "1. Take a photo of the <b>front label</b> — straight on, whole "
                 "label in frame, no flash glare.\n"
                 "2. Send it to me here. No caption needed.\n"
-                "3. I'll show you what I read off it — tap <b>Confirm</b>.\n"
+                "3. I'll show you what I read off it — tap <b>Add to cellar</b>.\n"
                 "4. Pick where you're putting the bottle.\n\n"
                 "That's it. Ratings and a price estimate arrive a few seconds later.\n\n"
                 "\U0001F4E6 A photo of a <b>barcode</b> works too — I'll look it up "
@@ -3836,14 +4725,14 @@ class TelegramBotHandler:
             try:
                 wine = api.get_wine_detail(wine_id) if wine_id else None
                 if not wine:
-                    await query.edit_message_text("Wine not found.")
+                    await _safe_edit(query,"Wine not found.")
                     return
                 text, markup = build_drank_notes_view(wine, page=page)
-                await query.edit_message_text(
+                await _safe_edit(query,
                     text, parse_mode="HTML", reply_markup=markup,
                 )
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
             return
 
         if action == "di":
@@ -3873,7 +4762,7 @@ class TelegramBotHandler:
                             parse_mode="HTML",
                             reply_markup=InlineKeyboardMarkup(keyboard),
                         )
-                        await query.edit_message_text(
+                        await _safe_edit(query,
                             f"\U0001F4F8 {wine_name} \u2014 photo below \u2b07\ufe0f"
                         )
                         return
@@ -3883,13 +4772,13 @@ class TelegramBotHandler:
                         callback_data=_cb("dh", page=page),
                     ),
                 ]]
-                await query.edit_message_text(
+                await _safe_edit(query,
                     f"\U0001F4F8 <b>{wine_name}</b>\n\nNo label photo attached.",
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(keyboard),
                 )
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
             return
 
         if action == "dib":
@@ -3944,16 +4833,16 @@ class TelegramBotHandler:
             markup = query.message.reply_markup if query.message else None
             raw = ""
             if query.message:
-                html = getattr(query.message, "text_html", None)
+                html_text = getattr(query.message, "text_html", None)
                 plain = getattr(query.message, "text", None)
-                if isinstance(html, str) and html:
-                    raw = html
+                if isinstance(html_text, str) and html_text:
+                    raw = html_text
                 elif isinstance(plain, str) and plain:
                     raw = plain
             new_markup = apply_vote_choice(markup, chosen) if markup else None
             try:
                 if raw:
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         apply_vote_thanks(raw, chosen),
                         parse_mode="HTML",
                         reply_markup=new_markup,
@@ -3994,14 +4883,24 @@ class TelegramBotHandler:
                         status, barcode or "-", existing_id,
                     )
                     if status == "busy":
+                        logger.info(
+                            "[tap] drank early-return reason=busy barcode=%s chat=%s",
+                            barcode or "-", tap_chat,
+                        )
                         await self._tap_busy(query)
                         return
                     if status == "claimed":
                         pending_claimed = True
                         merged = self._get_pending(api, barcode).get("grok_merged")
                         if not merged:
-                            self._unclaim_pending(api, barcode)
-                            await query.edit_message_text("Error: no extracted data found.")
+                            logger.info(
+                                "[tap] drank early-return reason=no_extracted_data barcode=%s chat=%s",
+                                barcode or "-", tap_chat,
+                            )
+                            await _safe_edit(
+                                query,
+                                "I lost the reading for that bottle. Send the label photo again?",
+                            )
                             return
                         wine_data = _clean_wine_data(merged)
                         if not str(barcode).startswith("_"):
@@ -4015,12 +4914,9 @@ class TelegramBotHandler:
                         card = self._label_cards.get(key) if key else card
                         paid = wine_data.get("price")
                         self._remember_paid(query.message, wine_id, paid)
-                        photo = self._get_pending(api, barcode).get("photo_data")
-                        if photo:
-                            try:
-                                api.upload_wine_image(wine_id, photo)
-                            except Exception as e:
-                                logger.warning(f"[PHOTO] Failed to upload image: {e}")
+                        self._upload_pending_photos(
+                            api, self._get_pending(api, barcode), wine_id,
+                        )
                         self._reuse_label_lookup(
                             wine_id, merged, query.message, api,
                             update.effective_chat.id, created_name,
@@ -4032,10 +4928,10 @@ class TelegramBotHandler:
                         wine_id = (card or {}).get("wine_id")
                         if not wine_id:
                             logger.info(
-                                "[tap] drank gone chat=%s barcode=%s",
-                                tap_chat, barcode or "-",
+                                "[tap] drank early-return reason=gone barcode=%s chat=%s",
+                                barcode or "-", tap_chat,
                             )
-                            await query.edit_message_text(_finished_copy(barcode))
+                            await _safe_edit(query,_finished_copy(barcode))
                             return
                         logger.info("[tap] drank duplicate chat=%s wine_id=%s", tap_chat, wine_id)
                         detail = {}
@@ -4051,7 +4947,7 @@ class TelegramBotHandler:
                         stock = detail.get("stock_count")
                         if stock is None:
                             stock = 0
-                        await query.edit_message_text(
+                        await _safe_edit(query,
                             f"\U0001F377 <b>Drank:</b> {name}\n"
                             f"\U0001F4CA In stock: {stock}",
                             parse_mode="HTML",
@@ -4068,7 +4964,7 @@ class TelegramBotHandler:
                         query.message, guard=True, in_progress=False,
                         wine_id=wine_id, wine_name=name,
                     )
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         f"Already logged <b>{name or 'that wine'}</b> a moment ago."
                         "\n\nLog another bottle?",
                         parse_mode="HTML",
@@ -4079,7 +4975,7 @@ class TelegramBotHandler:
                     return
                 failed = _stock_failed(result)
                 if failed:
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         f"⚠️ {failed}"
                         + (f"\n\nSaved <b>{name}</b> but didn't log the bottle." if wine_id else ""),
                         parse_mode="HTML",
@@ -4096,7 +4992,7 @@ class TelegramBotHandler:
                     wine_id=wine_id,
                 )
                 if not item_id:
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         f"\U0001F377 <b>Drank:</b> {name}\n"
                         f"\U0001F4CA In stock: {result.get('stock_count', 0)}",
                         parse_mode="HTML",
@@ -4104,9 +5000,9 @@ class TelegramBotHandler:
                     await self._celebrate(context, query.message.chat_id, result)
                     return
                 text, markup = build_drank_view(
-                    name, result.get("stock_count", 0), item_id,
+                    name, result.get("stock_count", 0), item_id, wine_id=wine_id,
                 )
-                await query.edit_message_text(
+                await _safe_edit(query,
                     text, parse_mode="HTML", reply_markup=markup,
                 )
                 await self._celebrate(context, query.message.chat_id, result)
@@ -4115,7 +5011,7 @@ class TelegramBotHandler:
                 await self._resend_photo(query)
             except Exception as e:
                 logger.exception("[tap] drank failed")
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
             finally:
                 self._release_card(query.message)
                 if pending_claimed and barcode:
@@ -4126,11 +5022,11 @@ class TelegramBotHandler:
             wine_id = data.get("wine_id")
             drank = action == "la"
             if not wine_id:
-                await query.edit_message_text("Couldn't log that.")
+                await _safe_edit(query,"Couldn't log that.")
                 return
             card = self._card_logged_item(query.message)
             if not card.get("guard"):
-                await query.edit_message_text(
+                await _safe_edit(query,
                     "That card's finished — send the photo again if you still want to add it."
                 )
                 return
@@ -4138,7 +5034,7 @@ class TelegramBotHandler:
                 if drank:
                     await self._reshow_drank(query, card)
                 else:
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         f"📥 <b>Added:</b> {card.get('wine_name') or 'that wine'}\n"
                         f"📊 In stock: {card.get('stock_count') or 0}",
                         parse_mode="HTML",
@@ -4155,7 +5051,7 @@ class TelegramBotHandler:
                 )
                 failed = _stock_failed(result)
                 if failed:
-                    await query.edit_message_text(failed)
+                    await _safe_edit(query,failed)
                     return
                 name = result.get("wine_name") or ""
                 item_id = result.get("item_id")
@@ -4166,7 +5062,7 @@ class TelegramBotHandler:
                     logged_another=True, wine_id=wine_id,
                 )
                 if not item_id:
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         f"\U0001F377 <b>Drank:</b> {name}\n"
                         f"\U0001F4CA In stock: {result.get('stock_count', 0)}"
                         if drank else f"📥 <b>Added:</b> {name}",
@@ -4176,13 +5072,13 @@ class TelegramBotHandler:
                     return
                 if drank:
                     text, markup = build_drank_view(
-                        name, result.get("stock_count", 0), item_id,
+                        name, result.get("stock_count", 0), item_id, wine_id=wine_id,
                     )
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         text, parse_mode="HTML", reply_markup=markup,
                     )
                 else:
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         f"📥 <b>Added:</b> {name}\n"
                         f"📊 In stock: {result.get('stock_count', 0)}",
                         parse_mode="HTML",
@@ -4193,7 +5089,7 @@ class TelegramBotHandler:
                 await self._resend_photo(query)
             except Exception as e:
                 logger.exception("[tap] log-another failed")
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
             finally:
                 self._release_card(query.message)
             return
@@ -4211,12 +5107,14 @@ class TelegramBotHandler:
                 except Exception:
                     pass
             if item_id:
-                text, markup = build_drank_view(name, stock, item_id)
-                await query.edit_message_text(
+                text, markup = build_drank_view(
+                    name, stock, item_id, wine_id=wine_id,
+                )
+                await _safe_edit(query,
                     text, parse_mode="HTML", reply_markup=markup,
                 )
             else:
-                await query.edit_message_text(
+                await _safe_edit(query,
                     f"\U0001F377 <b>Drank:</b> {name}\n"
                     f"\U0001F4CA In stock: {stock}",
                     parse_mode="HTML",
@@ -4242,7 +5140,7 @@ class TelegramBotHandler:
             text = (query.message.text_html if query.message else "") or ""
             text = text.replace(REFS_PENDING_NOTE.strip(), "").rstrip()
             try:
-                await query.edit_message_text(
+                await _safe_edit(query,
                     text + JUST_LOOKING_NOTE, parse_mode="HTML",
                 )
             except Exception as e:
@@ -4253,8 +5151,10 @@ class TelegramBotHandler:
             # Photo/barcode read was the wrong wine — accept a typed name next.
             barcode = data.get("barcode", "")
             grok = {}
+            pending = {}
             if barcode:
-                grok = (self._get_pending(api, barcode) or {}).get("grok_merged") or {}
+                pending = self._get_pending(api, barcode) or {}
+                grok = pending.get("grok_merged") or {}
             wrong = grok.get("name") or ""
             real_barcode = "" if str(barcode).startswith("_") else barcode
             self._start_misread(
@@ -4262,9 +5162,10 @@ class TelegramBotHandler:
                 barcode=real_barcode or barcode,
                 wrong_name=wrong,
                 context={**grok, "barcode": real_barcode or barcode},
+                photo_data=pending.get("photo_front") or pending.get("photo_data") or b"",
             )
             had = f"I had it as <b>{wrong}</b>" if wrong else "That reading was wrong"
-            await query.edit_message_text(
+            await _safe_edit(query,
                 f"\u2717 {had}.\n\n"
                 f"Type the producer, name and vintage and I'll look it up — "
                 f"or send a closer label photo.",
@@ -4276,13 +5177,13 @@ class TelegramBotHandler:
             barcode = data.get("barcode", "")
             if barcode:
                 self._resolve_pending(api, barcode)
-            await query.edit_message_text("Cancelled.")
+            await _safe_edit(query,"Cancelled.")
             return
 
         if action == "skip":
             barcode = data.get("barcode", "")
             self._resolve_pending(api, barcode)
-            await query.edit_message_text("Skipped.")
+            await _safe_edit(query,"Skipped.")
             return
 
         # --- Stock add: show storage picker ---
@@ -4294,7 +5195,7 @@ class TelegramBotHandler:
             try:
                 card = self._card_logged_item(query.message)
                 if card.get("item_id") and not card.get("drunk") and not card.get("guard"):
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         f"📥 <b>Added:</b> {card.get('wine_name') or 'that wine'}\n"
                         f"📊 In stock: {card.get('stock_count') or 0}",
                         parse_mode="HTML",
@@ -4316,7 +5217,7 @@ class TelegramBotHandler:
                             query.message, guard=True, wine_id=wine_id,
                             wine_name=result.get("wine_name"), in_progress=False,
                         )
-                        await query.edit_message_text(
+                        await _safe_edit(query,
                             f"Already added <b>{result.get('wine_name') or 'that wine'}</b>"
                             " a moment ago.\n\nAdd another bottle?",
                             parse_mode="HTML",
@@ -4326,7 +5227,7 @@ class TelegramBotHandler:
                         )
                         return
                     if "error" in result:
-                        await query.edit_message_text(f"⚠️ {result['error']}")
+                        await _safe_edit(query,f"⚠️ {result['error']}")
                     else:
                         self._touch_label_card(
                             query.message, item_id=result.get("item_id"),
@@ -4353,7 +5254,7 @@ class TelegramBotHandler:
                             keyboard.append([InlineKeyboardButton(
                                 "Skip", callback_data=_cb("sd", item_id=item_id, row=-1, wine_id=wine_id),
                             )])
-                            await query.edit_message_text(
+                            await _safe_edit(query,
                                 f"📥 <b>Added:</b> {result['wine_name']}\n"
                                 f"📍 {storage_name}\n\n"
                                 f"🗄 <b>Which drawer?</b>",
@@ -4364,7 +5265,7 @@ class TelegramBotHandler:
                             keyboard = [[InlineKeyboardButton(
                                 "↩️ Undo", callback_data=_cb("ua", wine_id=wine_id),
                             )]]
-                            await query.edit_message_text(
+                            await _safe_edit(query,
                                 f"📥 <b>Added:</b> {result['wine_name']}\n"
                                 f"📍 {storage_name}\n"
                                 f"📊 In stock: {result['stock_count']}",
@@ -4383,7 +5284,7 @@ class TelegramBotHandler:
                         label,
                         callback_data=_cb("si", wine_id=wine_id, page=s["id"]),
                     )])
-                await query.edit_message_text(
+                await _safe_edit(query,
                     "📍 <b>Where are you storing this?</b>",
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(keyboard),
@@ -4391,7 +5292,7 @@ class TelegramBotHandler:
             except StoreError:
                 raise
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
             finally:
                 self._release_card(query.message)
 
@@ -4405,7 +5306,7 @@ class TelegramBotHandler:
             try:
                 card = self._card_logged_item(query.message)
                 if card.get("item_id") and not card.get("drunk") and not card.get("guard"):
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         f"📥 <b>Added:</b> {card.get('wine_name') or 'that wine'}\n"
                         f"📊 In stock: {card.get('stock_count') or 0}",
                         parse_mode="HTML",
@@ -4427,7 +5328,7 @@ class TelegramBotHandler:
                         query.message, guard=True, wine_id=wine_id,
                         wine_name=result.get("wine_name"), in_progress=False,
                     )
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         f"Already added <b>{result.get('wine_name') or 'that wine'}</b>"
                         " a moment ago.\n\nAdd another bottle?",
                         parse_mode="HTML",
@@ -4437,7 +5338,7 @@ class TelegramBotHandler:
                     )
                     return
                 if "error" in result:
-                    await query.edit_message_text(f"⚠️ {result['error']}")
+                    await _safe_edit(query,f"⚠️ {result['error']}")
                 else:
                     self._touch_label_card(
                         query.message, item_id=result.get("item_id"),
@@ -4465,7 +5366,7 @@ class TelegramBotHandler:
                         keyboard.append([InlineKeyboardButton(
                             "Skip", callback_data=_cb("sd", item_id=item_id, row=-1, wine_id=wine_id),
                         )])
-                        await query.edit_message_text(
+                        await _safe_edit(query,
                             f"📥 <b>Added:</b> {result['wine_name']}\n"
                             f"📍 {storage_name}\n\n"
                             f"🗄 <b>Which drawer?</b>",
@@ -4476,17 +5377,21 @@ class TelegramBotHandler:
                         keyboard = [[InlineKeyboardButton(
                             "↩️ Undo", callback_data=_cb("ua", wine_id=wine_id),
                         )]]
-                        await query.edit_message_text(
-                            f"📥 <b>Added:</b> {result['wine_name']}\n"
-                            f"📍 {storage_name}\n"
-                            f"📊 In stock: {result['stock_count']}",
+                        keyboard.extend(_wine_followup_rows(wine_id))
+                        await _safe_edit(query,
+                            _append_wine_url(
+                                f"📥 <b>Added:</b> {result['wine_name']}\n"
+                                f"📍 {storage_name}\n"
+                                f"📊 In stock: {result['stock_count']}",
+                                api, wine_id,
+                            ),
                             parse_mode="HTML",
                             reply_markup=InlineKeyboardMarkup(keyboard),
                         )
             except StoreError:
                 raise
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
             finally:
                 self._release_card(query.message)
 
@@ -4516,15 +5421,23 @@ class TelegramBotHandler:
                         barcode=data.get("barcode", ""), item_id=item_id,
                     )
                 else:
-                    await query.edit_message_text(placed, parse_mode="HTML")
+                    markup = InlineKeyboardMarkup(_wine_followup_rows(wine_id)) if wine_id else None
+                    await _safe_edit(query,
+                        _append_wine_url(placed, api, wine_id) if wine_id else placed,
+                        parse_mode="HTML",
+                        reply_markup=markup,
+                    )
             except Exception as e:
-                await query.edit_message_text(f"Error setting drawer: {e}")
+                await _safe_edit(query,f"Error setting drawer: {e}")
 
         # --- Fridge-scan card: pick a different storage for this bottle ---
         elif action == "sp":
             item_id = data.get("item_id")
             wine_id = data.get("wine_id")
             barcode = data.get("barcode", "")
+            if not wine_id:
+                await _safe_edit(query,"That card's out of date — send /stock again.")
+                return
             try:
                 storages = api.list_storages()
                 keyboard = []
@@ -4537,19 +5450,22 @@ class TelegramBotHandler:
                     "\u2b05\ufe0f Back",
                     callback_data=_cb("sc", item_id=item_id, wine_id=wine_id, barcode=barcode, original="in"),
                 )])
-                await query.edit_message_text(
+                await _safe_edit(query,
                     "\U0001F4E6 <b>Move this bottle to:</b>",
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(keyboard),
                 )
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
 
         elif action == "sl":
             item_id = data.get("item_id")
             wine_id = data.get("wine_id")
             barcode = data.get("barcode", "")
             storage_id = data.get("page", 0)
+            if not wine_id:
+                await _safe_edit(query,"That card's out of date — send /stock again.")
+                return
             try:
                 storages = api.list_storages()
                 storage = next((s for s in storages if s["id"] == storage_id), None)
@@ -4560,7 +5476,7 @@ class TelegramBotHandler:
                     barcode=barcode, item_id=item_id,
                 )
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
 
         elif action == "dp":
             item_id = data.get("item_id")
@@ -4593,13 +5509,13 @@ class TelegramBotHandler:
                     "\u2b05\ufe0f Back",
                     callback_data=_cb("sc", item_id=item_id, wine_id=wine_id, barcode=barcode, original="in"),
                 )])
-                await query.edit_message_text(
+                await _safe_edit(query,
                     "\U0001F5C4 <b>Which drawer?</b>",
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(keyboard),
                 )
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
 
         elif action == "sc":
             await self._redraw_scan_card(
@@ -4630,18 +5546,18 @@ class TelegramBotHandler:
                     callback_data=_cb("sc", wine_id=wine_id, barcode=barcode, original="out", page=from_id),
                 )])
                 if len(keyboard) == 1:
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         "There's only one fridge in this cellar.",
                         reply_markup=InlineKeyboardMarkup(keyboard),
                     )
                 else:
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         "\U0001F4E4 <b>That bottle actually left:</b>",
                         parse_mode="HTML",
                         reply_markup=InlineKeyboardMarkup(keyboard),
                     )
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
 
         elif action == "ro":
             wine_id = data.get("wine_id")
@@ -4653,7 +5569,7 @@ class TelegramBotHandler:
                 dest = next((s for s in storages if s["id"] == to_id), None)
                 src = next((s for s in storages if s["id"] == from_id), None)
                 if not dest:
-                    await query.edit_message_text("Couldn't find that fridge.")
+                    await _safe_edit(query,"Couldn't find that fridge.")
                     return
                 # Take from the chosen fridge first. Put the default-fridge
                 # bottle back only after that succeeds, so a miss doesn't
@@ -4662,7 +5578,7 @@ class TelegramBotHandler:
                     wine_id, storage_name=(dest["name"] if dest else None),
                 )
                 if "error" in result:
-                    await query.edit_message_text(f"\u26a0\ufe0f {result['error']}")
+                    await _safe_edit(query,f"\u26a0\ufe0f {result['error']}")
                 else:
                     if src:
                         put_back = api.add_stock(wine_id, storage_name=src["name"])
@@ -4672,14 +5588,14 @@ class TelegramBotHandler:
                                 wine_id, storage_name=dest["name"],
                             )
                             if _stock_failed(rollback):
-                                await query.edit_message_text(
+                                await _safe_edit(query,
                                     f"Couldn't finish the move. The bottle left "
                                     f"<b>{dest['name']}</b> and isn't back yet — "
                                     f"add it in {dest['name']} or {src['name']}.",
                                     parse_mode="HTML",
                                 )
                             else:
-                                await query.edit_message_text(
+                                await _safe_edit(query,
                                     f"Couldn't put that back in <b>{src['name']}</b>, "
                                     f"so it's still in {dest['name']}.",
                                     parse_mode="HTML",
@@ -4697,11 +5613,11 @@ class TelegramBotHandler:
                         item_id=result.get("item_id"),
                         row=result.get("row"),
                     )
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         text, parse_mode="HTML", reply_markup=markup,
                     )
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
 
         # --- Stock remove ---
         elif action == "out":
@@ -4709,12 +5625,16 @@ class TelegramBotHandler:
             try:
                 result = api.remove_stock(wine_id)
                 if "error" in result:
-                    await query.edit_message_text(f"⚠️ {result['error']}")
+                    await _safe_edit(query,f"⚠️ {result['error']}")
                 else:
-                    keyboard = [[InlineKeyboardButton(
-                        "↩️ Undo", callback_data=_cb("ur", wine_id=wine_id),
-                    )]]
                     item_id = result.get("item_id")
+                    if item_id:
+                        undo_cb = _cb("ul", wine_id=wine_id, item_id=item_id)
+                    else:
+                        undo_cb = _cb("ur", wine_id=wine_id)
+                    keyboard = [[InlineKeyboardButton(
+                        "↩️ Undo", callback_data=undo_cb,
+                    )]]
                     text = (
                         f"📤 <b>Removed:</b> {result['wine_name']}\n"
                         f"📊 In stock: {result['stock_count']}"
@@ -4722,13 +5642,13 @@ class TelegramBotHandler:
                     if item_id:
                         text += f"\n\n{VOTE_PROMPT}"
                         keyboard.append(vote_keyboard_row(item_id))
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         text,
                         parse_mode="HTML",
                         reply_markup=InlineKeyboardMarkup(keyboard),
                     )
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
 
         # --- "It's a new/different wine" with a duplicate barcode ---
         elif action == "nw":
@@ -4739,7 +5659,7 @@ class TelegramBotHandler:
                 barcode=barcode,
                 context={"barcode": barcode},
             )
-            await query.edit_message_text(
+            await _safe_edit(query,
                 f"🆕 <b>New wine with barcode <code>{barcode}</code></b>\n\n"
                 f"📸 <b>Reply to this message</b> with a label photo, "
                 f"or type the producer, name and vintage and I'll look it up.\n\n"
@@ -4753,15 +5673,15 @@ class TelegramBotHandler:
             try:
                 result = api.remove_stock(wine_id)
                 if "error" in result:
-                    await query.edit_message_text(f"⚠️ Could not undo: {result['error']}")
+                    await _safe_edit(query,f"⚠️ Could not undo: {result['error']}")
                 else:
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         f"↩️ <b>Undone.</b> {result['wine_name']}\n"
                         f"📊 In stock: {result['stock_count']}",
                         parse_mode="HTML",
                     )
             except Exception as e:
-                await query.edit_message_text(f"Error undoing: {e}")
+                await _safe_edit(query,f"Error undoing: {e}")
 
         # --- Undo remove (reverse = add) ---
         elif action == "ur":
@@ -4770,15 +5690,15 @@ class TelegramBotHandler:
                 result = api.add_stock(wine_id)
                 failed = _stock_failed(result)
                 if failed:
-                    await query.edit_message_text(f"⚠️ Could not undo: {failed}")
+                    await _safe_edit(query,f"⚠️ Could not undo: {failed}")
                     return
-                await query.edit_message_text(
+                await _safe_edit(query,
                     f"↩️ <b>Undone.</b> {result['wine_name']}\n"
                     f"📊 In stock: {result['stock_count']}",
                     parse_mode="HTML",
                 )
             except Exception as e:
-                await query.edit_message_text(f"Error undoing: {e}")
+                await _safe_edit(query,f"Error undoing: {e}")
 
         # --- Wrong wine: undo the stock change AND start new-wine photo flow ---
         elif action == "ww":
@@ -4814,7 +5734,7 @@ class TelegramBotHandler:
                 wrong_name=wrong_name,
                 context={"barcode": barcode},
             )
-            await query.edit_message_text(
+            await _safe_edit(query,
                 f"{undo_line}"
                 f"🆕 <b>New wine with barcode <code>{barcode}</code></b>\n\n"
                 f"Type the producer, name and vintage and I'll look it up — "
@@ -4827,12 +5747,12 @@ class TelegramBotHandler:
             barcode = data["barcode"]
             if not self._is_pending(api, barcode):
                 logger.info("[tap] off gone barcode=%s", barcode)
-                await query.edit_message_text(_finished_copy(barcode))
+                await _safe_edit(query,_finished_copy(barcode))
                 return
 
             off_data = self._get_pending(api, barcode).get("off_data", {})
             if not off_data:
-                await query.edit_message_text("No OFF data found for this barcode.")
+                await _safe_edit(query,"No OFF data found for this barcode.")
                 return
 
             try:
@@ -4850,7 +5770,7 @@ class TelegramBotHandler:
                 failed = _stock_failed(stock)
                 if failed:
                     self._resolve_pending(api, barcode)
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         f"Saved <b>{result.get('name') or 'that wine'}</b> "
                         f"but couldn't add a bottle.\n\n⚠️ {failed}",
                         parse_mode="HTML",
@@ -4858,7 +5778,7 @@ class TelegramBotHandler:
                     )
                     return
                 self._resolve_pending(api, barcode)
-                await query.edit_message_text(
+                await _safe_edit(query,
                     f"🍷 <b>Wine added:</b> {result['name']}\n"
                     f"📊 In stock: {stock['stock_count']}\n\n"
                     f"⏳ <i>Looking up ratings and price — these will arrive in a follow-up message in a few seconds.</i>",
@@ -4870,153 +5790,84 @@ class TelegramBotHandler:
             except StoreError:
                 raise
             except Exception as e:
-                await query.edit_message_text(f"Error creating wine: {e}")
+                await _safe_edit(query,f"Error creating wine: {e}")
 
         # --- Add manually via web UI ---
         elif action == "man":
             barcode = data["barcode"]
             if not self._is_pending(api, barcode):
                 logger.info("[tap] man gone barcode=%s", barcode)
-                await query.edit_message_text(_finished_copy(barcode))
+                await _safe_edit(query,_finished_copy(barcode))
                 return
             self._resolve_pending(api, barcode)
-            await query.edit_message_text(
+            await _safe_edit(query,
                 f"Add manually in Wine Cellar:\n"
                 f"🔗 {api.web_url}/wine/add/{barcode}",
                 parse_mode="HTML",
             )
 
         # --- Confirm Grok extraction and create wine ---
-        elif action == "grok":
+        elif action in ("grok", "np", "gp"):
             barcode = data["barcode"]
-            # Ratings lookup edits this same card. Mark it committed first so
-            # those numbers cannot resurrect Add to cellar and wipe the picker.
-            self._touch_label_card(query.message, committed=True)
-            status, existing_id = self._claim_pending(api, barcode)
-            logger.info(
-                "[tap] grok claim=%s barcode=%s existing=%s",
-                status, barcode or "-", existing_id,
+            producer_override = None
+            if action == "gp":
+                pending = self._get_pending(api, barcode)
+                producer_override = _suggested_producer(
+                    (pending.get("grok_merged") or {}).get("name") or "",
+                ) or None
+            await self._add_pending_wine(
+                query, api, context, barcode,
+                skip_producer=(action == "np"),
+                producer_override=producer_override,
+                original=data.get("original") or "",
+                tap_action=action,
             )
-            if status == "gone":
-                card = self._label_cards.get(
-                    self._card_key(query.message) if query.message else "",
-                ) or {}
-                existing_id = card.get("wine_id")
-                if existing_id:
-                    status = "created"
-                elif barcode and not str(barcode).startswith("_"):
-                    try:
-                        hits = api.lookup_barcode(barcode)
-                    except Exception:
-                        hits = []
-                    if hits:
-                        name = hits[0].get("name") or "that wine"
-                        await query.edit_message_text(
-                            f"That's already in as <b>{name}</b>. "
-                            "Scan it on the gun to add a bottle.",
-                            parse_mode="HTML",
-                        )
-                        return
-                    await query.edit_message_text(_finished_copy(barcode))
-                    return
-                else:
-                    await query.edit_message_text(_finished_copy(barcode))
-                    return
-            if status == "busy":
-                await self._tap_busy(query)
+
+        elif action == "ap":
+            barcode = data.get("barcode") or ""
+            chat_id = str(query.message.chat_id)
+            self._await_side_photo[chat_id] = {
+                "barcode": barcode, "time": time.time(),
+            }
+            await query.answer("Send the other side of the bottle — I'll attach it.")
+
+        elif action == "yb":
+            barcode = data.get("barcode") or ""
+            chat_id = str(query.message.chat_id)
+            photo = getattr(self, "_pending_side_bytes", {}).pop(chat_id, b"")
+            getattr(self, "_await_side_photo", {}).pop(chat_id, None)
+            if not photo:
+                await _safe_edit(query,"Send the photo again and I'll attach it.")
                 return
-            if status == "created":
-                card = self._label_cards.get(
-                    self._card_key(query.message) if query.message else "",
-                ) or {}
-                name = card.get("wine_name") or ""
-                stock = 0
-                try:
-                    detail = api.get_wine_detail(existing_id)
-                    if isinstance(detail, dict):
-                        raw = detail.get("stock_count")
-                        if isinstance(raw, int):
-                            stock = raw
-                        if not name:
-                            name = detail.get("name") or ""
-                except Exception:
-                    pass
-                if stock > 0:
-                    await query.edit_message_text(
-                        f"That's already in as <b>{name or 'that wine'}</b> "
-                        f"({stock} in stock).",
-                        parse_mode="HTML",
-                    )
-                    return
-                await self._prompt_where_to_store(
-                    query, api, context,
-                    wine_id=existing_id, name=name or "that wine",
-                    paid=self._paid_for(query.message, existing_id),
-                )
+            await _safe_edit(query,"Attaching the other side\u2026")
+            detected = await self._decode_photo_barcode(photo)
+            await self._attach_side_photo(
+                _callback_status(query), barcode, photo, update,
+                force=True, detected=detected,
+            )
+
+        elif action == "nd":
+            chat_id = str(query.message.chat_id)
+            photo = getattr(self, "_pending_side_bytes", {}).pop(chat_id, b"")
+            getattr(self, "_await_side_photo", {}).pop(chat_id, None)
+            if not photo:
+                await _safe_edit(query,"Send a photo of the other bottle.")
                 return
-
-            merged = self._get_pending(api, barcode).get("grok_merged")
-            if not merged:
-                self._unclaim_pending(api, barcode)
-                await query.edit_message_text("Error: no extracted data found.")
-                return
-
-            try:
-                wine_data = _clean_wine_data(merged)
-                if not barcode.startswith("_"):
-                    wine_data["barcode"] = barcode
-                result = api.create_wine(wine_data)
-                wine_id = result["id"]
-                paid = wine_data.get("price")
-                self._remember_paid(query.message, wine_id, paid)
-                self._update_pending(api, barcode, wine_id=wine_id)
-                self._touch_label_card(
-                    query.message, committed=True,
-                    wine_id=wine_id, wine_name=result.get("name"),
-                )
-
-                # Upload label photo if available
-                pending_entry = self._get_pending(api, barcode)
-                photo = pending_entry.get("photo_data")
-                logger.info(f"[PHOTO] grok handler: barcode={barcode}, has_photo={photo is not None}, "
-                            f"photo_size={len(photo) if photo else 0}, "
-                            f"pending_keys={list(pending_entry.keys())}")
-                if photo:
-                    try:
-                        api.upload_wine_image(wine_id, photo)
-                        logger.info(f"[PHOTO] Uploaded label photo for wine #{wine_id}")
-                    except Exception as e:
-                        logger.warning(f"[PHOTO] Failed to upload image: {e}")
-                else:
-                    logger.warning(f"[PHOTO] No photo_data found in pending_store for barcode={barcode}")
-
-                self._reuse_label_lookup(
-                    wine_id, merged, query.message, api,
-                    update.effective_chat.id, result.get("name", ""),
-                )
-
-                self._resolve_pending(api, barcode)
-                await self._prompt_where_to_store(
-                    query, api, context,
-                    wine_id=wine_id, name=result.get("name") or "",
-                    paid=paid,
-                )
-            except StoreError:
-                raise
-            except Exception as e:
-                logger.exception("grok confirm failed after create")
-                await query.edit_message_text(f"Error creating wine: {e}")
-            finally:
-                self._unclaim_pending(api, barcode)
+            await _safe_edit(query,"📷 Analysing photo...")
+            grok_data = await self._analyse_photo_bytes(photo, update) or {}
+            grok_data.setdefault("type", "label")
+            await self._handle_triage_label(
+                _callback_status(query), grok_data, photo_data=photo, update=update,
+            )
 
         # --- Retry with a new photo ---
         elif action == "retry":
             barcode = data["barcode"]
             if not self._is_pending(api, barcode):
                 logger.info("[tap] retry gone barcode=%s", barcode)
-                await query.edit_message_text(_finished_copy(barcode))
+                await _safe_edit(query,_finished_copy(barcode))
                 return
-            await query.edit_message_text(
+            await _safe_edit(query,
                 f"📸 Send another photo — <b>reply to this message</b> "
                 f"with a label photo.\n\nBarcode: <code>{barcode}</code>",
                 parse_mode="HTML",
@@ -5024,94 +5875,93 @@ class TelegramBotHandler:
 
         # --- Browse: drill into a group ---
         elif action == "sd2":
-            parts = data.get("original", "").split(":", 2)
-            if len(parts) < 3:
-                await query.edit_message_text("Invalid browse action.")
-                return
-            session_key = f"{parts[0]}:{parts[1]}"
-            # parts[2] is "dim:value" but value may contain ":"
-            rest = data["original"][len(session_key) + 1:]
-            dim, _, value = rest.partition(":")
+            session_key = data.get("original", "")
             session = self._browse_sessions.get(session_key)
             if not session:
-                await query.edit_message_text("Session expired. Use /stock again.")
+                await _safe_edit(query,"Session expired. Use /stock again.")
                 return
+            idx = data.get("page")
+            groups = getattr(session, "group_values", None) or []
+            if idx is None or idx < 0 or idx >= len(groups):
+                await _safe_edit(query,"That group is out of date — send /stock again.")
+                return
+            dim, value = groups[idx]
             session.add_filter(dim, value)
             try:
                 text, keyboard = _build_browse_view(session, session_key)
-                await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+                await _safe_edit(query,text, reply_markup=keyboard, parse_mode="HTML")
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
 
         # --- Browse: regroup by a different dimension ---
         elif action == "sg":
             parts = data.get("original", "").split(":", 2)
             if len(parts) < 3:
-                await query.edit_message_text("Invalid browse action.")
+                await _safe_edit(query,"Invalid browse action.")
                 return
             session_key = f"{parts[0]}:{parts[1]}"
             dim = parts[2]
             session = self._browse_sessions.get(session_key)
             if not session:
-                await query.edit_message_text("Session expired. Use /stock again.")
+                await _safe_edit(query,"Session expired. Use /stock again.")
                 return
             # Rebuild the grouped view with the chosen dimension
             wines = session.filtered_wines
             total_bottles = sum(w.get("stock_count", 0) for w in wines)
             try:
                 text, keyboard = _build_browse_groups(session, session_key, wines, dim, total_bottles)
-                await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+                await _safe_edit(query,text, reply_markup=keyboard, parse_mode="HTML")
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
 
         # --- Browse: list all (flat, paginated) ---
-        elif action == "sl":
+        elif action == "bl":
             session_key = data.get("original", "")
             session = self._browse_sessions.get(session_key)
             if not session:
-                await query.edit_message_text("Session expired. Use /stock again.")
+                await _safe_edit(query,"Session expired. Use /stock again.")
                 return
             session.page = 0
             try:
                 wines = session.filtered_wines
                 text, keyboard = _build_browse_list(session, session_key, wines)
-                await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+                await _safe_edit(query,text, reply_markup=keyboard, parse_mode="HTML")
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
 
         # --- Browse: page navigation ---
-        elif action == "sp":
+        elif action == "bp":
             parts = data.get("original", "").rsplit(":", 1)
             if len(parts) < 2:
-                await query.edit_message_text("Invalid page action.")
+                await _safe_edit(query,"Invalid page action.")
                 return
             session_key = parts[0]
             page = int(parts[1])
             session = self._browse_sessions.get(session_key)
             if not session:
-                await query.edit_message_text("Session expired. Use /stock again.")
+                await _safe_edit(query,"Session expired. Use /stock again.")
                 return
             session.page = page
             try:
                 wines = session.filtered_wines
                 text, keyboard = _build_browse_list(session, session_key, wines)
-                await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+                await _safe_edit(query,text, reply_markup=keyboard, parse_mode="HTML")
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
 
         # --- Browse: back one level ---
         elif action == "sb":
             session_key = data.get("original", "")
             session = self._browse_sessions.get(session_key)
             if not session:
-                await query.edit_message_text("Session expired. Use /stock again.")
+                await _safe_edit(query,"Session expired. Use /stock again.")
                 return
             session.remove_last_filter()
             try:
                 text, keyboard = _build_browse_view(session, session_key)
-                await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+                await _safe_edit(query,text, reply_markup=keyboard, parse_mode="HTML")
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
 
         # --- Fridge: storage select ---
         elif action == "fs":
@@ -5129,35 +5979,54 @@ class TelegramBotHandler:
                 try:
                     await self._refresh_browse_session(query, session_key, session)
                 except Exception as e:
-                    await query.edit_message_text(f"Error: {e}")
+                    await _safe_edit(query,f"Error: {e}")
             else:
                 try:
                     wines = api.wines_in_stock()
                 except Exception as e:
-                    await query.edit_message_text(f"Error loading fridge: {e}")
+                    await _safe_edit(query,f"Error loading fridge: {e}")
                     return
                 if not wines:
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         empty_cellar()[0], reply_markup=empty_cellar()[1], parse_mode="HTML",
                     )
                     return
                 text, keyboard = self._build_fridge_page(wines, page=page)
-                await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+                await _safe_edit(query,text, reply_markup=keyboard, parse_mode="HTML")
 
         # --- Fridge: +1 stock ---
         elif action == "+":
             wine_id = data["wine_id"]
             page = data.get("page", 0)
+            session_key, session = self._get_browse_session(query)
             try:
-                result = api.add_stock(wine_id)
+                result = None
+                last = getattr(session, "last_removed", None) if session else None
+                item_id = None
+                if last and last.get("wine_id") == wine_id:
+                    item_id = last.get("item_id")
+                if item_id:
+                    result = api.restore_stock(item_id)
+                if not result or result.get("error"):
+                    if hasattr(api, "restore_latest"):
+                        result = api.restore_latest(wine_id)
+                if result and result.get("action") == "restored":
+                    if session:
+                        session.last_removed = None
+                else:
+                    storage_name = None
+                    if session and session.storage_name not in (None, "", "All storages"):
+                        storage_name = session.storage_name
+                    elif last and last.get("storage"):
+                        storage_name = last.get("storage")
+                    result = api.add_stock(wine_id, storage_name=storage_name)
                 failed = _stock_failed(result)
                 if failed:
                     await query.answer(failed, show_alert=True)
                     return
-                await query.answer(f"Added: {result['wine_name']} ({result['stock_count']}x)")
+                verb = "Put back" if result.get("action") == "restored" else "Added"
+                await query.answer(f"{verb}: {result['wine_name']} ({result['stock_count']}x)")
                 await self._celebrate(context, update.effective_chat.id, result)
-                # Try browse session first, fall back to legacy
-                session_key, session = self._get_browse_session(query)
                 if session:
                     await self._refresh_browse_session(query, session_key, session)
                 else:
@@ -5165,7 +6034,7 @@ class TelegramBotHandler:
                     total_pages = max(1, (len(wines) + self.FRIDGE_PAGE_SIZE - 1) // self.FRIDGE_PAGE_SIZE)
                     page = min(page, total_pages - 1)
                     text, keyboard = self._build_fridge_page(wines, page=page)
-                    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+                    await _safe_edit(query,text, reply_markup=keyboard, parse_mode="HTML")
             except Exception as e:
                 await query.answer(f"Error: {e}", show_alert=True)
 
@@ -5182,20 +6051,99 @@ class TelegramBotHandler:
                 # Try browse session first, fall back to legacy
                 session_key, session = self._get_browse_session(query)
                 if session:
+                    session.last_removed = {
+                        "wine_id": wine_id,
+                        "name": result.get("wine_name") or "that wine",
+                        "item_id": result.get("item_id"),
+                        "storage": result.get("storage"),
+                    }
                     await self._refresh_browse_session(query, session_key, session)
                 else:
                     wines = api.wines_in_stock()
                     if not wines:
-                        await query.edit_message_text(
-                            empty_cellar()[0], reply_markup=empty_cellar()[1], parse_mode="HTML",
+                        text, kb = last_bottle_removed_view(
+                            wine_id, result.get("wine_name") or "that wine",
+                            item_id=result.get("item_id"),
+                        )
+                        await _safe_edit(query,
+                            text, reply_markup=kb, parse_mode="HTML",
                         )
                         return
                     total_pages = max(1, (len(wines) + self.FRIDGE_PAGE_SIZE - 1) // self.FRIDGE_PAGE_SIZE)
                     page = min(page, total_pages - 1)
                     text, keyboard = self._build_fridge_page(wines, page=page)
-                    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+                    await _safe_edit(query,text, reply_markup=keyboard, parse_mode="HTML")
             except Exception as e:
                 await query.answer(f"Error: {e}", show_alert=True)
+
+        # --- Undo a recent remove/drink by restoring the same StorageItem ---
+        elif action == "ul":
+            wine_id = data.get("wine_id")
+            item_id = data.get("item_id")
+            session_key, session = self._get_browse_session(query)
+            if not item_id:
+                if session:
+                    await query.answer(
+                        "Too late to undo, use + to add it back", show_alert=True,
+                    )
+                else:
+                    await _safe_edit(query,
+                        "Too late to undo, use + to add it back",
+                    )
+                return
+            if not self._claim_card(query.message):
+                await self._tap_busy(query)
+                return
+            await asyncio.sleep(0)
+            try:
+                result = api.restore_stock(item_id)
+                err = result.get("error") if isinstance(result, dict) else None
+                if err == "already_restored":
+                    if session:
+                        session.last_removed = None
+                        try:
+                            await self._refresh_browse_session(
+                                query, session_key, session,
+                            )
+                        except Exception:
+                            pass
+                        await query.answer("Already put back")
+                    else:
+                        await _safe_edit(query,"Already put back")
+                    return
+                if err == "too_late":
+                    msg = "Too late to undo, use + to add it back"
+                    if session:
+                        await query.answer(msg, show_alert=True)
+                    else:
+                        await _safe_edit(query,msg)
+                    return
+                if err:
+                    failed = err if isinstance(err, str) else "Could not undo"
+                    if session:
+                        await query.answer(failed, show_alert=True)
+                    else:
+                        await _safe_edit(query,f"⚠️ Could not undo: {failed}")
+                    return
+                name = result.get("wine_name") or "that wine"
+                stock = result.get("stock_count")
+                if session:
+                    session.last_removed = None
+                    await query.answer(f"Put back: {name} ({stock}x)")
+                    await self._refresh_browse_session(query, session_key, session)
+                else:
+                    await _safe_edit(query,
+                        f"↩️ <b>Put back:</b> {name}\n"
+                        f"📊 In stock: {stock}",
+                        parse_mode="HTML",
+                    )
+            except Exception as e:
+                if session:
+                    await query.answer(f"Error: {e}", show_alert=True)
+                else:
+                    await _safe_edit(query,f"Error undoing: {e}")
+            finally:
+                self._release_card(query.message)
 
         # --- Fridge: show drawer assignment for a wine ---
         elif action == "dw":
@@ -5203,13 +6151,13 @@ class TelegramBotHandler:
             try:
                 text, keyboard = self._build_drawer_view(wine_id, api=api)
                 if text:
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         text, reply_markup=keyboard, parse_mode="HTML",
                     )
                 else:
-                    await query.edit_message_text("Wine not found in stock.")
+                    await _safe_edit(query,"Wine not found in stock.")
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
 
         # --- Wine details (compact card) ---
         elif action == "det":
@@ -5217,15 +6165,15 @@ class TelegramBotHandler:
             try:
                 wine = api.get_wine_detail(wine_id)
                 if not wine:
-                    await query.edit_message_text("Wine not found.")
+                    await _safe_edit(query,"Wine not found.")
                     return
-                text, keyboard = self._build_detail_card(wine)
-                await query.edit_message_text(
+                text, keyboard = self._build_detail_card(wine, api=api)
+                await _safe_edit(query,
                     text, parse_mode="HTML", reply_markup=keyboard,
                 )
             except Exception as e:
                 try:
-                    await query.edit_message_text(f"Error: {e}")
+                    await _safe_edit(query,f"Error: {e}")
                 except Exception:
                     await context.bot.send_message(
                         chat_id=query.message.chat_id, text=f"Error: {e}",
@@ -5237,7 +6185,7 @@ class TelegramBotHandler:
             try:
                 wine = api.get_wine_detail(wine_id)
                 if not wine:
-                    await query.edit_message_text("Wine not found.")
+                    await _safe_edit(query,"Wine not found.")
                     return
 
                 text = f"📝 <b>{wine['name']}</b>\n\n"
@@ -5267,12 +6215,12 @@ class TelegramBotHandler:
                 keyboard = [[
                     InlineKeyboardButton("⬅️ Back", callback_data=_cb("det", wine_id=wine_id)),
                 ]]
-                await query.edit_message_text(
+                await _safe_edit(query,
                     text, parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(keyboard),
                 )
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
 
         # --- Food pairings ---
         elif action == "pr":
@@ -5280,7 +6228,7 @@ class TelegramBotHandler:
             try:
                 wine = api.get_wine_detail(wine_id)
                 if not wine:
-                    await query.edit_message_text("Wine not found.")
+                    await _safe_edit(query,"Wine not found.")
                     return
 
                 text = f"🍽 <b>{wine['name']}</b>\n\n"
@@ -5300,12 +6248,12 @@ class TelegramBotHandler:
                 keyboard = [[
                     InlineKeyboardButton("⬅️ Back", callback_data=_cb("det", wine_id=wine_id)),
                 ]]
-                await query.edit_message_text(
+                await _safe_edit(query,
                     text, parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(keyboard),
                 )
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
 
         # --- Wine photo ---
         elif action == "ph":
@@ -5343,7 +6291,7 @@ class TelegramBotHandler:
                                 parse_mode="HTML",
                                 reply_markup=InlineKeyboardMarkup(keyboard),
                             )
-                            await query.edit_message_text(
+                            await _safe_edit(query,
                                 f"\U0001F4F8 {wine_name} \u2014 photo below \u2b07\ufe0f"
                             )
                             return
@@ -5358,13 +6306,13 @@ class TelegramBotHandler:
                     msg = f"📸 <b>{wine_name}</b>\n\nCould not load photo — try again later."
                 else:
                     msg = f"📸 <b>{wine_name}</b>\n\nNo photo yet."
-                await query.edit_message_text(
+                await _safe_edit(query,
                     msg,
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(keyboard),
                 )
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
 
         # --- Photo back: delete photo, restore original message to details ---
         elif action == "phb":
@@ -5377,7 +6325,7 @@ class TelegramBotHandler:
                 # Rebuild details on the original "photo below" message
                 wine = api.get_wine_detail(wine_id)
                 if wine:
-                    text, keyboard = self._build_detail_card(wine)
+                    text, keyboard = self._build_detail_card(wine, api=api)
                     await context.bot.edit_message_text(
                         chat_id=chat_id, message_id=orig_msg_id,
                         text=text, parse_mode="HTML",
@@ -5397,7 +6345,7 @@ class TelegramBotHandler:
             try:
                 wine = api.get_wine_detail(wine_id)
                 if not wine:
-                    await query.edit_message_text("Wine not found in stock.")
+                    await _safe_edit(query,"Wine not found in stock.")
                     return
 
                 items = wine.get("items", [])
@@ -5424,12 +6372,12 @@ class TelegramBotHandler:
                     "⬅️ Back", callback_data=_cb("det", wine_id=wine_id),
                 )])
 
-                await query.edit_message_text(
+                await _safe_edit(query,
                     text, parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(keyboard),
                 )
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
 
         # --- Move all items to chosen storage ---
         elif action == "ma":
@@ -5442,7 +6390,7 @@ class TelegramBotHandler:
 
                 wine = api.get_wine_detail(wine_id)
                 if not wine:
-                    await query.edit_message_text("Wine not found in stock.")
+                    await _safe_edit(query,"Wine not found in stock.")
                     return
 
                 moved = 0
@@ -5451,7 +6399,7 @@ class TelegramBotHandler:
                         api.move_item(item["item_id"], storage_name=storage_name)
                         moved += 1
 
-                await query.edit_message_text(
+                await _safe_edit(query,
                     f"📦 <b>Moved:</b> {wine['name']}\n"
                     f"📍 → {storage_name}\n"
                     f"({moved} bottle(s) moved)",
@@ -5461,7 +6409,7 @@ class TelegramBotHandler:
                     ]]),
                 )
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
 
         # --- Move item to drawer ---
         elif action == "mv":
@@ -5474,7 +6422,7 @@ class TelegramBotHandler:
                 if wine_id:
                     text, keyboard = self._build_drawer_view(wine_id, api=api)
                     if text:
-                        await query.edit_message_text(
+                        await _safe_edit(query,
                             text, reply_markup=keyboard, parse_mode="HTML",
                         )
                         return
@@ -5485,7 +6433,7 @@ class TelegramBotHandler:
                 else:
                     wines = api.wines_in_stock()
                     text, kb = self._build_fridge_page(wines, page=0)
-                    await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+                    await _safe_edit(query,text, reply_markup=kb, parse_mode="HTML")
             except Exception as e:
                 await query.answer(f"Error: {e}", show_alert=True)
 
@@ -5496,7 +6444,7 @@ class TelegramBotHandler:
             try:
                 wine = api.get_wine_detail(wine_id)
                 if not wine:
-                    await query.edit_message_text("Wine not found in stock.")
+                    await _safe_edit(query,"Wine not found in stock.")
                     return
 
                 current = wine["stock_count"]
@@ -5519,13 +6467,13 @@ class TelegramBotHandler:
                         "⬅️ Back to fridge", callback_data=_cb("fp", page=page),
                     )],
                 ]
-                await query.edit_message_text(
+                await _safe_edit(query,
                     text,
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode="HTML",
                 )
             except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
+                await _safe_edit(query,f"Error: {e}")
 
         # --- Fridge: set stock to exact number ---
         elif action == "ss":
@@ -5544,14 +6492,14 @@ class TelegramBotHandler:
                 else:
                     wines = api.wines_in_stock()
                     if not wines:
-                        await query.edit_message_text(
+                        await _safe_edit(query,
                             empty_cellar()[0], reply_markup=empty_cellar()[1], parse_mode="HTML",
                         )
                         return
                     total_pages = max(1, (len(wines) + self.FRIDGE_PAGE_SIZE - 1) // self.FRIDGE_PAGE_SIZE)
                     page = min(page, total_pages - 1)
                     text, keyboard = self._build_fridge_page(wines, page=page)
-                    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+                    await _safe_edit(query,text, reply_markup=keyboard, parse_mode="HTML")
             except Exception as e:
                 await query.answer(f"Error: {e}", show_alert=True)
 
@@ -5564,7 +6512,7 @@ class TelegramBotHandler:
             original_text = query.message.text_html if query.message else ""
             original_markup = query.message.reply_markup if query.message else None
             try:
-                await query.edit_message_text(
+                await _safe_edit(query,
                     f"🔄 <i>Asking Grok for references…</i>\n\n{original_text}",
                     parse_mode="HTML",
                 )
@@ -5580,7 +6528,7 @@ class TelegramBotHandler:
                 logger.error(f"[rr] refresh_references failed: {e}")
                 # Restore the card and show the error as a popup-style status line
                 try:
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         f"⚠️ <b>Error refreshing references:</b> {e}\n\n{original_text}",
                         reply_markup=original_markup,
                         parse_mode="HTML",
@@ -5594,7 +6542,7 @@ class TelegramBotHandler:
                 confidence = result.get("confidence", "low")
                 # Restore the card with a status banner so the user sees what happened
                 try:
-                    await query.edit_message_text(
+                    await _safe_edit(query,
                         f"⚠️ <b>No update</b> (confidence: {confidence})\n<i>{msg}</i>\n\n{original_text}",
                         reply_markup=original_markup,
                         parse_mode="HTML",
@@ -5607,10 +6555,10 @@ class TelegramBotHandler:
             try:
                 wine = api.get_wine_detail(wine_id)
                 if wine:
-                    text, keyboard = self._build_detail_card(wine)
+                    text, keyboard = self._build_detail_card(wine, api=api)
                     confidence = result.get("confidence", "")
                     text = f"✅ <b>References updated</b> (confidence: {confidence})\n\n{text}"
-                    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+                    await _safe_edit(query,text, reply_markup=keyboard, parse_mode="HTML")
                     return
             except Exception as e:
                 logger.warning(f"[rr] reload failed: {e}")
@@ -5630,7 +6578,7 @@ class TelegramBotHandler:
                 parts.append(f"💰 ~{market:.0f} {currency}")
             summary = " · ".join(parts) if parts else "(no values returned)"
             try:
-                await query.edit_message_text(
+                await _safe_edit(query,
                     f"✅ <b>References updated</b> ({confidence}): {summary}\n\n{original_text}",
                     reply_markup=original_markup,
                     parse_mode="HTML",
@@ -5638,77 +6586,89 @@ class TelegramBotHandler:
             except Exception:
                 pass
 
-        # --- Fridge: edit wine details ---
-        elif action == "ed":
-            wine_id = data["wine_id"]
-            try:
-                result = api.update_wine(wine_id, {})  # GET-like — just fetch current data
-            except Exception:
-                result = {"name": f"Wine #{wine_id}"}
-
-            # Store wine_id for the photo handler
-            with self._lock:
-                self.pending_store[f"_edit_{wine_id}"] = {
-                    "wine_id": wine_id,
-                    "time": time.time(),
-                }
-
-            await query.edit_message_text(
-                f"✏️ <b>Edit: {result.get('name', f'Wine #{wine_id}')}</b>\n\n"
-                f"📸 <b>Reply to this message</b> with a label photo "
-                f"to update this wine's details.\n\n"
-                f"Wine ID: <code>edit:{wine_id}</code>",
-                parse_mode="HTML",
-            )
+        # --- Fridge: edit wine details / add photo after create ---
+        elif action in ("ed", "ai"):
+            await self._start_edit_photo_flow(query, api, data["wine_id"])
 
         # --- Confirm wine update from Grok ---
         elif action == "edc":
             wine_id = data["wine_id"]
             edit_key = f"_edit_{wine_id}"
             with self._lock:
-                edit_data = self.pending_store.get(edit_key, {})
+                edit_data = dict(self.pending_store.get(edit_key, {}))
                 grok_data = edit_data.get("grok_merged")
             if not grok_data:
-                await query.edit_message_text("Error: no extracted data found.")
+                await _safe_edit(query,"Error: no extracted data found.")
                 return
             try:
+                current = {}
+                try:
+                    current = api.get_wine_detail(wine_id) or {}
+                except Exception:
+                    current = {}
                 wine_fields = _clean_wine_data(grok_data)
-                result = api.update_wine(wine_id, wine_fields)
+                grok_bc = grok_data.get("barcode")
+                if grok_bc:
+                    wine_fields["barcode"] = grok_bc
+                fills, overwrites = proposed_wine_update(current, wine_fields)
+                apply = dict(fills)
+                if data.get("original") == "all":
+                    for field, _old, new in overwrites:
+                        apply[field] = new
+                elif overwrites and data.get("original") != "fill":
+                    lines = ["This would change filled fields:"]
+                    for field, old, new in overwrites:
+                        lines.append(f"• {field}: {old} → {new}")
+                    lines.append("\nI won't overwrite those without a tap.")
+                    await _safe_edit(query,
+                        "\n".join(lines),
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton(
+                                "Yes, apply those changes",
+                                callback_data=_cb("edc", wine_id=wine_id, original="all"),
+                            )],
+                            [InlineKeyboardButton(
+                                "Only fill blanks",
+                                callback_data=_cb("edc", wine_id=wine_id, original="fill"),
+                            )],
+                            [InlineKeyboardButton("❌ Cancel", callback_data=_cb("x"))],
+                        ]),
+                    )
+                    return
+                result = api.update_wine(wine_id, apply) if apply else current
 
-                # Upload label photo if available
-                with self._lock:
-                    photo = edit_data.get("photo_data")
+                photo = edit_data.get("photo_data")
                 if photo:
                     try:
                         api.upload_wine_image(wine_id, photo)
-                        logger.info(f"[PHOTO] Uploaded label photo for wine #{wine_id}")
                     except Exception as e:
                         logger.warning(f"[PHOTO] Failed to upload image: {e}")
 
                 with self._lock:
                     self.pending_store.pop(edit_key, None)
-                await query.edit_message_text(
+                await _safe_edit(query,
                     f"✅ <b>Updated:</b> {result.get('name', 'Wine')}\n"
                     f"📊 In stock: {result.get('stock_count', '?')}",
                     parse_mode="HTML",
                 )
             except Exception as e:
-                await query.edit_message_text(f"Error updating wine: {e}")
+                await _safe_edit(query,f"Error updating wine: {e}")
 
         elif action == "link":
             # Show list of existing wines to link a barcode to
             barcode = data.get("barcode", "")
             page = data.get("page", 0)
             if not barcode:
-                await query.edit_message_text("Error: no barcode to link.")
+                await _safe_edit(query,"Error: no barcode to link.")
                 return
             try:
                 wines = api.wines_in_stock()
             except Exception as e:
-                await query.edit_message_text(f"Error loading wines: {e}")
+                await _safe_edit(query,f"Error loading wines: {e}")
                 return
             if not wines:
-                await query.edit_message_text(
+                await _safe_edit(query,
                     "No wines in your cellar yet — nothing to link to.\n"
                     "Add a wine first, then scan the barcode.",
                 )
@@ -5774,7 +6734,7 @@ class TelegramBotHandler:
             if page == 0 and suggested_id and off_data:
                 off_hint = f"\n⭐ Suggested match from OFF: <b>{off_data['name']}</b>\n"
 
-            await query.edit_message_text(
+            await _safe_edit(query,
                 f"🔗 <b>Link barcode <code>{barcode}</code> to which wine?</b>\n"
                 f"{off_hint}"
                 f"\nPage {page + 1}/{(len(wines) + page_size - 1) // page_size}",
@@ -5782,32 +6742,133 @@ class TelegramBotHandler:
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
 
+        elif action == "nn":
+            barcode = data.get("barcode", "")
+            off_data = self._get_pending(api, barcode).get("off_data")
+            text, markup = unknown_barcode_prompt(barcode, off_data)
+            await _safe_edit(query,text, parse_mode="HTML", reply_markup=markup)
+
         elif action == "lnk":
-            # Actually link the barcode to the chosen wine
             wine_id = data.get("wine_id")
             barcode = data.get("barcode", "")
             if not wine_id or not barcode:
-                await query.edit_message_text("Error: missing wine or barcode.")
+                await _safe_edit(query,"Error: missing wine or barcode.")
+                return
+            from integrations.barcodes import normalise_barcode
+            stored = normalise_barcode(barcode) or barcode
+            card = self._card_logged_item(query.message)
+            if card.get("linked") and card.get("wine_id") == wine_id:
+                await _safe_edit(query,"Already linked.")
+                return
+            status, existing_id = self._claim_pending(api, barcode)
+            if status == "busy":
+                logger.info(
+                    "[tap] lnk early-return reason=busy barcode=%s chat=%s",
+                    barcode or "-", tap_chat,
+                )
+                await self._tap_busy(query)
+                return
+            if status == "created":
+                if existing_id and existing_id != wine_id:
+                    added = ""
+                    try:
+                        prev = api.get_wine_detail(existing_id) or {}
+                        added = prev.get("name") or ""
+                    except Exception:
+                        added = ""
+                    if not added:
+                        added = (
+                            self._card_logged_item(query.message).get("wine_name")
+                            or f"Wine #{existing_id}"
+                        )
+                    await _safe_edit(query,
+                        f"This barcode was already added as "
+                        f"{html.escape(str(added), quote=False)}"
+                    )
+                    return
+                await _safe_edit(query,"Already linked.")
+                return
+            if status == "gone":
+                logger.info(
+                    "[tap] lnk early-return reason=gone barcode=%s chat=%s",
+                    barcode or "-", tap_chat,
+                )
+                await _safe_edit(query,_finished_copy(barcode))
                 return
             try:
-                result = api.update_wine(wine_id, {"barcode": barcode})
-                wine_name = result.get("name", f"Wine #{wine_id}")
-                stock = api.add_stock(wine_id)
-                failed = _stock_failed(stock)
-                if failed:
-                    await query.edit_message_text(f"⚠️ Linked, but could not add stock: {failed}")
+                detail = {}
+                try:
+                    detail = api.get_wine_detail(wine_id) or {}
+                except Exception:
+                    detail = {}
+                if not detail:
+                    await _safe_edit(query,"Wine not found.")
                     return
-                self._resolve_pending(api, barcode)
-                await query.edit_message_text(
-                    f"✅ <b>Linked & added!</b>\n\n"
-                    f"🍷 {wine_name}\n"
-                    f"Barcode: <code>{barcode}</code>\n"
-                    f"📊 In stock: {stock['stock_count']}",
-                    parse_mode="HTML",
+                name = detail.get("name") or f"Wine #{wine_id}"
+                current = normalise_barcode(detail.get("barcode") or "") or (
+                    str(detail.get("barcode") or "").strip()
                 )
-                await self._celebrate(context, update.effective_chat.id, stock)
+                if current and current != stored:
+                    await _safe_edit(query,
+                        f"{html.escape(str(name), quote=False)} already has a different barcode"
+                    )
+                    return
+                try:
+                    holders = api.lookup_barcode(stored)
+                except Exception:
+                    holders = []
+                if not isinstance(holders, list):
+                    holders = []
+                other = next(
+                    (
+                        w for w in holders
+                        if isinstance(w, dict) and w.get("id") not in (None, wine_id)
+                    ),
+                    None,
+                )
+                if other:
+                    other_name = other.get("name") or f"Wine #{other.get('id')}"
+                    await _safe_edit(query,
+                        f"That barcode is already on {html.escape(str(other_name), quote=False)}."
+                    )
+                    return
+                if current != stored:
+                    result = api.update_wine(wine_id, {"barcode": stored})
+                    name = result.get("name") or name
+                pending = self._get_pending(api, barcode)
+                photo = pending.get("photo_data")
+                if photo:
+                    try:
+                        api.upload_wine_image(wine_id, photo)
+                    except Exception as e:
+                        logger.warning(f"[PHOTO] Failed to upload image: {e}")
+                merged = pending.get("grok_merged") or pending.get("off_data") or {}
+                paid = _paid_price(merged)
+                if paid is not None:
+                    self._remember_paid(query.message, wine_id, paid)
+                if pending.get("grok_merged"):
+                    self._reuse_label_lookup(
+                        wine_id, pending.get("grok_merged"), query.message, api,
+                        update.effective_chat.id, name,
+                    )
+                self._update_pending(api, barcode, wine_id=wine_id)
+                self._touch_label_card(
+                    query.message, wine_id=wine_id, wine_name=name,
+                    linked=True, committed=True,
+                )
+                self._resolve_pending(api, barcode)
+                if stored != barcode:
+                    self._resolve_pending(api, stored)
+                await self._prompt_where_to_store(
+                    query, api, context,
+                    wine_id=wine_id, name=name, paid=paid, created=False,
+                )
+            except StoreError:
+                raise
             except Exception as e:
-                await query.edit_message_text(f"Error linking barcode: {e}")
+                await _safe_edit(query,f"Error linking barcode: {e}")
+            finally:
+                self._unclaim_pending(api, barcode)
 
     # --- Photo handler ---
 
@@ -5866,6 +6927,7 @@ class TelegramBotHandler:
         reply = update.message.reply_to_message
         photo_data = await self._download_photo(update, context)
         logger.info(f"[PHOTO] Downloaded {len(photo_data)} bytes, reply={reply is not None}")
+        loop = asyncio.get_running_loop()
 
         # --- Mode 1: Edit wine details (reply to edit message) ---
         edit_wine_id = self._detect_edit_reply(reply)
@@ -5874,7 +6936,22 @@ class TelegramBotHandler:
             await self._handle_edit_photo(update, context, edit_wine_id, photo_data)
             return
 
-        # --- Mode 2: New wine label (reply to barcode message or single pending) ---
+        waiting = getattr(self, "_await_side_photo", {}).get(str(update.effective_chat.id))
+        if waiting and not waiting.get("offer"):
+            if time.time() - waiting.get("time", 0) < PENDING_TIMEOUT_SECONDS:
+                pending_key = waiting["barcode"]
+                detected = await self._decode_photo_barcode(photo_data)
+                if detected and await self._side_barcode_conflicts(
+                    api, pending_key, detected, photo_data, update,
+                ):
+                    return
+                status_msg = await update.message.reply_text("Attaching the other side\u2026")
+                await self._attach_side_photo(
+                    status_msg, pending_key, photo_data, update, detected=detected,
+                )
+                return
+
+        # An explicit reply to a barcode message still wins over pyzbar.
         barcode = None
         if reply:
             barcode = _extract_barcode_from_message(reply)
@@ -5886,7 +6963,54 @@ class TelegramBotHandler:
                 )
                 return
 
+        # A barcode on this photo is this bottle — don't drop it onto another
+        # pending card, and don't abort just because one is already open.
+        detected = None
         if not barcode:
+            logger.info("[PHOTO] trying local barcode reader...")
+            detected = await self._decode_photo_barcode(photo_data)
+            if detected:
+                logger.info(f"[PHOTO] local barcode SUCCESS: barcode={detected}")
+            else:
+                logger.info("[PHOTO] local barcode: no barcode found")
+
+        if detected:
+            pending = self._get_pending(api, detected)
+            if self._is_pending(api, detected) and not pending.get("wine_id"):
+                # Kitchen Pi (or an earlier photo) already opened this barcode —
+                # analyse the label onto that card, don't re-triage as a new scan.
+                logger.info(
+                    "[PHOTO] pyzbar barcode=%s already pending — label flow",
+                    detected,
+                )
+                barcode = detected
+            else:
+                try:
+                    found = api.lookup_barcode(detected)
+                except Exception as e:
+                    logger.warning(f"[PHOTO] barcode lookup failed: {e}")
+                    found = []
+                if found:
+                    status_msg = await update.message.reply_text(
+                        f"📷 Barcode detected: <code>{detected}</code>\nLooking up...",
+                        parse_mode="HTML",
+                    )
+                    await self._handle_barcode_result(status_msg, detected, update=update)
+                    return
+                if not self._is_pending(api, detected):
+                    off_data = None
+                    try:
+                        from integrations.open_food_facts import OpenFoodFactsAPI
+                        off_data = OpenFoodFactsAPI().lookup(detected)
+                    except Exception as e:
+                        logger.warning(f"[PHOTO] OFF lookup failed: {e}")
+                    self._create_pending(api, detected, off_data=off_data)
+                    logger.info(
+                        "[PHOTO] Mode 3: unknown pyzbar barcode=%s — analysing this label",
+                        detected,
+                    )
+        elif not barcode:
+            # --- Mode 2: label photo for a pending scan, only if pyzbar found nothing ---
             with self._lock:
                 active = _active_pendings(self.pending_store, self._hid(api))
             if len(active) == 1:
@@ -5907,7 +7031,7 @@ class TelegramBotHandler:
                 await update.message.reply_text("\n".join(lines), parse_mode="HTML")
                 return
 
-        # If we have a barcode, do the label analysis flow
+        # If we have a barcode from an explicit reply / leftover pending, analyse it.
         if barcode:
             logger.info(f"[PHOTO] Mode 2: label photo for barcode={barcode}")
             await self._handle_label_photo(update, context, barcode, photo_data)
@@ -5916,35 +7040,11 @@ class TelegramBotHandler:
         if await self._maybe_correct_winelist_photo(update, photo_data):
             return
 
-        # --- Mode 3: No barcode context — triage the photo ---
-        logger.info(f"[PHOTO] Mode 3: no barcode context, photo size={len(photo_data)} bytes")
-
-        # Step 1: Try pyzbar locally (free, instant)
-        loop = asyncio.get_running_loop()
-        detected = None
-        if self._local_barcode_reader:
-            logger.info("[PHOTO] Step 1: trying pyzbar local barcode reader...")
-            try:
-                detected = await loop.run_in_executor(
-                    None, functools.partial(self._local_barcode_reader, photo_data),
-                )
-            except Exception as e:
-                logger.warning(f"[PHOTO] pyzbar failed: {e}")
-
-            if detected:
-                logger.info(f"[PHOTO] pyzbar SUCCESS: barcode={detected}")
-            else:
-                logger.info("[PHOTO] pyzbar: no barcode found")
-        else:
-            logger.info("[PHOTO] pyzbar not available, skipping")
-
-        if detected:
-            status_msg = await update.message.reply_text(
-                f"📷 Barcode detected: <code>{detected}</code>\nLooking up...",
-                parse_mode="HTML",
-            )
-            await self._handle_barcode_result(status_msg, detected, update=update)
+        if not reply and await self._maybe_handle_extra_label_photo(update, photo_data):
             return
+
+        # --- Mode 3: No leftover barcode context — triage the photo ---
+        logger.info(f"[PHOTO] Mode 3: no barcode context, photo size={len(photo_data)} bytes")
 
         # Step 2: pyzbar didn't find anything — ask Grok to triage
         if not self._triage_callback:
@@ -5994,7 +7094,10 @@ class TelegramBotHandler:
         # --- Grok says it's a wine label ---
         if photo_type == "label":
             logger.info(f"[PHOTO] Grok label analysis: {result.get('name', '?')}")
-            await self._handle_triage_label(status_msg, result, photo_data, update=update)
+            await self._handle_triage_label(
+                status_msg, result, photo_data, update=update,
+                barcode=detected or "",
+            )
             return
 
         # --- Grok says it's a wine list ---
@@ -6029,7 +7132,7 @@ class TelegramBotHandler:
         return pending
 
     def _start_misread(self, chat_id, *, barcode: str = "", wrong_name: str = "",
-                       context: dict | None = None) -> None:
+                       context: dict | None = None, photo_data: bytes = b"") -> None:
         cid = str(chat_id)
         store = getattr(self, "_misread_corrections", None)
         if store is None:
@@ -6038,6 +7141,7 @@ class TelegramBotHandler:
             "barcode": barcode or "",
             "wrong_name": wrong_name or "",
             "context": dict(context or {}),
+            "photo_data": photo_data or b"",
             "time": time.time(),
         }
 
@@ -6055,6 +7159,244 @@ class TelegramBotHandler:
             return None
         return pending
 
+    async def _maybe_typed_add(self, update, context, text: str) -> bool:
+        """Typed Confirm / Add on an open label card runs the same path as the tap."""
+        if not TYPED_ADD_RE.match(text or ""):
+            return False
+        try:
+            api = self._get_api(update)
+        except Exception:
+            return False
+        cards = self._open_label_cards(
+            api, max_age=TYPED_ADD_TTL, include_complete=True,
+        )
+        if not cards:
+            await update.message.reply_text(
+                "Nothing waiting to add, send me a photo of the label."
+            )
+            return True
+        barcode, _ = cards[0]
+        query = _as_edit_query(update)
+        await self._add_pending_wine(
+            query, api, context, barcode, tap_action="grok",
+        )
+        return True
+
+    async def _maybe_take_producer(self, update, text: str, context=None) -> bool:
+        """Fill a missing producer after 'Who makes this?' and create the wine."""
+        chat_id = str(update.effective_chat.id)
+        pending = getattr(self, "_await_producer", {}).get(chat_id)
+        if not pending:
+            return False
+        if time.time() - pending.get("time", 0) > 30 * 60:
+            self._await_producer.pop(chat_id, None)
+            return False
+        if not _plausible_producer(text):
+            return False
+        try:
+            api = self._get_api(update)
+        except Exception:
+            return False
+        producer = (text or "").strip()
+        barcode = pending.get("barcode") or ""
+        entry = self._get_pending(api, barcode) if barcode else {}
+        merged = dict(entry.get("grok_merged") or {})
+        merged["producer"] = producer
+        if barcode:
+            self._update_pending(api, barcode, grok_merged=merged)
+        self._await_producer.pop(chat_id, None)
+        query = _as_edit_query(update)
+        await self._add_pending_wine(
+            query, api, context, barcode,
+            producer_override=producer, tap_action="grok",
+        )
+        return True
+
+    async def _analyse_photo_bytes(self, photo_data: bytes, update) -> dict | None:
+        chat_id = str(getattr(getattr(update, "effective_chat", None), "id", "") or "")
+        currency = self._chat_id_to_currency.get(chat_id, "USD")
+        country = self._chat_id_to_country.get(chat_id, "")
+        loop = asyncio.get_running_loop()
+        cb = self._label_analyse or self._triage_callback
+        if not cb:
+            return None
+        try:
+            result = await loop.run_in_executor(
+                None, functools.partial(cb, photo_data, currency, country),
+            )
+        except Exception as e:
+            logger.warning("[PHOTO] side-label analyse failed: %s", e)
+            return None
+        if isinstance(result, dict) and result.get("type") in (None, "label", "barcode"):
+            return result
+        return result if isinstance(result, dict) else None
+
+    async def _decode_photo_barcode(self, photo_data: bytes) -> str | None:
+        reader = self._local_barcode_reader
+        if not reader:
+            from integrations.grok_vision import read_barcode_local
+            reader = read_barcode_local
+        loop = asyncio.get_running_loop()
+        try:
+            detected = await loop.run_in_executor(
+                None, functools.partial(reader, photo_data),
+            )
+        except Exception as e:
+            logger.warning("[PHOTO] barcode decode failed: %s", e)
+            return None
+        from integrations.barcodes import accepted_barcode
+        return accepted_barcode(detected) if detected else None
+
+    def _store_side_barcode(self, api, pending_key: str, digits: str) -> None:
+        entry = self._get_pending(api, pending_key)
+        merged = dict(entry.get("grok_merged") or {})
+        if str(merged.get("barcode") or "").strip():
+            return
+        merged["barcode"] = digits
+        self._update_pending(api, pending_key, grok_merged=merged)
+        wine_id = entry.get("wine_id")
+        if wine_id:
+            try:
+                api.update_wine(wine_id, {"barcode": digits})
+            except Exception as e:
+                logger.warning("[PHOTO] could not save barcode on wine #%s: %s", wine_id, e)
+
+    async def _side_barcode_conflicts(
+        self, api, pending_key, detected, photo_data, update,
+    ) -> bool:
+        """True if we asked the user instead of attaching."""
+        try:
+            hits = api.lookup_barcode(detected) or []
+        except Exception as e:
+            logger.warning("[PHOTO] barcode lookup failed: %s", e)
+            hits = []
+        if not isinstance(hits, list):
+            hits = []
+        entry = self._get_pending(api, pending_key)
+        wine_id = entry.get("wine_id")
+        other = next(
+            (w for w in hits if isinstance(w, dict) and w.get("id") not in (None, wine_id)),
+            None,
+        )
+        if other is None:
+            return False
+        chat_id = str(update.effective_chat.id)
+        self._pending_side_bytes[chat_id] = photo_data
+        self._await_side_photo[chat_id] = {
+            "barcode": pending_key, "time": time.time(), "offer": True,
+        }
+        await update.message.reply_text(
+            DIFFERENT_BOTTLE,
+            reply_markup=_different_bottle_keyboard(pending_key),
+        )
+        return True
+
+    async def _ask_different_bottle(self, status_msg, pending_key, photo_data, update):
+        chat_id = str(update.effective_chat.id)
+        self._pending_side_bytes[chat_id] = photo_data
+        self._await_side_photo[chat_id] = {
+            "barcode": pending_key, "time": time.time(), "offer": True,
+        }
+        edit = getattr(status_msg, "edit_text", None)
+        if callable(edit):
+            await edit(DIFFERENT_BOTTLE, reply_markup=_different_bottle_keyboard(pending_key))
+        else:
+            await update.message.reply_text(
+                DIFFERENT_BOTTLE,
+                reply_markup=_different_bottle_keyboard(pending_key),
+            )
+
+    async def _attach_side_photo(self, status_msg, pending_key: str, photo_data: bytes, update,
+                                 force: bool = False, detected: str | None = None) -> None:
+        api = self._get_api(update)
+        entry = self._get_pending(api, pending_key)
+        first = dict(entry.get("grok_merged") or {})
+        first_bytes = entry.get("photo_front") or entry.get("photo_data") or b""
+        second = await self._analyse_photo_bytes(photo_data, update) or {}
+        if not force and _clearly_different_label(first, second):
+            await self._ask_different_bottle(status_msg, pending_key, photo_data, update)
+            return
+        from integrations.barcodes import accepted_barcode
+        digits = detected or accepted_barcode(second.get("barcode"))
+        if digits:
+            second["barcode"] = second.get("barcode") or digits
+            self._store_side_barcode(api, pending_key, digits)
+            first = dict(self._get_pending(api, pending_key).get("grok_merged") or first)
+        first_is_back = _is_classification_name(first.get("name")) or _filled(first.get("barcode"))
+        second_is_front = not _is_classification_name(second.get("name"))
+        if first_is_back and second_is_front:
+            front, back = second, first
+            front_bytes, back_bytes = photo_data, first_bytes
+        else:
+            front, back = first, second
+            front_bytes, back_bytes = first_bytes, photo_data
+        merged = merge_front_back(front, back)
+        self._update_pending(
+            api, pending_key,
+            grok_merged=merged, photo_front=front_bytes, photo_back=back_bytes,
+            photo_data=front_bytes or back_bytes,
+        )
+        chat_id = str(update.effective_chat.id)
+        getattr(self, "_await_side_photo", {}).pop(chat_id, None)
+        getattr(self, "_pending_side_bytes", {}).pop(chat_id, None)
+        if str(pending_key).startswith("_"):
+            await self._handle_triage_label(
+                status_msg, merged,
+                photo_data=front_bytes or back_bytes,
+                update=update, reuse_key=pending_key,
+            )
+        else:
+            await self._show_barcode_label_confirm(status_msg, merged, pending_key, api)
+
+    async def _maybe_handle_extra_label_photo(self, update, photo_data: bytes) -> bool:
+        try:
+            api = self._get_api(update)
+        except Exception:
+            return False
+        cards = self._open_label_cards(api)
+        if len(cards) != 1:
+            return False
+        barcode, data = cards[0]
+        name = (data.get("grok_merged") or {}).get("name") or "that wine"
+        chat_id = str(update.effective_chat.id)
+        self._pending_side_bytes[chat_id] = photo_data
+        self._await_side_photo[chat_id] = {
+            "barcode": barcode, "time": time.time(), "offer": True,
+        }
+        await update.message.reply_text(
+            f"Is this the back of <b>{html.escape(str(name), quote=False)}</b>?",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "Yes, that's the back",
+                    callback_data=_cb("yb", barcode=barcode),
+                )],
+                [InlineKeyboardButton(
+                    "No, it's a different wine",
+                    callback_data=_cb("nd", barcode=barcode),
+                )],
+            ]),
+        )
+        return True
+
+    async def _start_edit_photo_flow(self, query, api, wine_id: int) -> None:
+        try:
+            result = api.update_wine(wine_id, {})
+        except Exception:
+            result = {"name": f"Wine #{wine_id}"}
+        with self._lock:
+            self.pending_store[f"_edit_{wine_id}"] = {
+                "wine_id": wine_id,
+                "time": time.time(),
+            }
+        await _safe_edit(query,
+            f"✏️ <b>Edit: {result.get('name', f'Wine #{wine_id}')}</b>\n\n"
+            f"📸 <b>Reply to this message</b> with a label photo "
+            f"to update this wine's details.\n\n"
+            f"Wine ID: <code>edit:{wine_id}</code>",
+            parse_mode="HTML",
+        )
+
     async def _maybe_identify_misread_text(self, update, text: str) -> bool:
         """Typed correction after a wrong barcode or photo read.
 
@@ -6068,20 +7410,38 @@ class TelegramBotHandler:
         except NotProvisionedError:
             return False
         chat_id = update.effective_chat.id
+        if getattr(self, "_await_producer", {}).get(str(chat_id)):
+            return False
         pending = self._misread_for(chat_id)
         barcode = (pending or {}).get("barcode") or ""
         wrong_name = (pending or {}).get("wrong_name") or ""
         context = dict((pending or {}).get("context") or {})
+        photo = (pending or {}).get("photo_data") or b""
         if pending is None:
+            # Only an explicit "That's the wrong wine" tap enters this flow.
+            # A lone _label_/_edit_ card with grok_merged is waiting for Add.
             active = _active_pendings(self.pending_store, self._hid(api))
             if len(active) != 1:
                 return False
             barcode = next(iter(active))
             entry = active[barcode] or {}
+            key = str(barcode)
+            stored_key = str(entry.get("barcode") or "")
+            is_label_card = (
+                key.startswith("_label_") or key.startswith("_edit_")
+                or stored_key.startswith("_label_") or stored_key.startswith("_edit_")
+            )
+            if entry.get("grok_merged") and not (
+                entry.get("misread") or entry.get("wrong")
+            ):
+                return False
+            if is_label_card:
+                return False
             grok = entry.get("grok_merged") or {}
             off = entry.get("off_data") or {}
             wrong_name = grok.get("name") or (off.get("name") if off else "") or ""
             context = {**(off or {}), **(grok or {}), "barcode": barcode}
+            photo = entry.get("photo_front") or entry.get("photo_data") or b""
         real_barcode = "" if str(barcode).startswith("_") else barcode
         if real_barcode:
             context.setdefault("barcode", real_barcode)
@@ -6211,15 +7571,17 @@ class TelegramBotHandler:
             if not self._is_pending(api, real_barcode):
                 self._create_pending(api, real_barcode)
             self._update_pending(api, real_barcode, grok_merged=data)
+            if photo:
+                self._update_pending(api, real_barcode, photo_data=photo, photo_front=photo)
         await status.edit_text("Found it — checking the cellar\u2026")
-        await self._handle_triage_label(status, data, photo_data=b"", update=update)
+        await self._handle_triage_label(status, data, photo_data=photo, update=update)
         return True
 
     async def _start_winelist_correction(self, query, index: int):
         key = f"{query.message.chat_id}:{query.message.message_id}"
         entry = self._winelists.get(key)
         if not entry:
-            await query.edit_message_text(
+            await _safe_edit(query,
                 "\U0001F4CB That list has expired — send the photo again."
             )
             return
@@ -6513,12 +7875,27 @@ class TelegramBotHandler:
             except Exception as e:
                 logger.warning(f"[BARCODE] OFF lookup failed: {e}")
             self._create_pending(api, barcode, off_data=off_data)
+            suggested = []
+            if off_data and off_data.get("name"):
+                try:
+                    suggested = match_barcode_less_wines(off_data, api.list_all_wines())
+                except Exception:
+                    suggested = []
+            if suggested:
+                await status_msg.edit_text(
+                    _is_this_text(barcode, suggested),
+                    parse_mode="HTML",
+                    reply_markup=_is_this_keyboard(
+                        barcode, suggested, new_action="nn",
+                    ),
+                )
+                return
 
-            text = f"❓ <b>Unknown barcode: <code>{barcode}</code></b>\n\n"
+            text = f"❓ <b>Unknown barcode: <code>{html.escape(barcode, quote=False)}</code></b>\n\n"
             if off_data and off_data.get("name"):
                 text += (
-                    f"OFF found: <b>{off_data['name']}</b>\n"
-                    f"Producer: {off_data.get('producer', 'Unknown')}\n\n"
+                    f"OFF found: <b>{html.escape(str(off_data['name']), quote=False)}</b>\n"
+                    f"Producer: {html.escape(str(off_data.get('producer', 'Unknown')), quote=False)}\n\n"
                 )
             text += (
                 "📸 <b>Reply to this message</b> with a label photo "
@@ -6570,129 +7947,162 @@ class TelegramBotHandler:
             )
 
     def _find_matching_wine(self, grok_data: dict, update=None) -> dict | None:
-        """Check if a Grok-analysed wine already exists in stock.
-        Returns the matching wine dict or None."""
-        grok_name = (grok_data.get("name") or "").lower().strip()
-        if not grok_name:
-            return None
-
+        """Best existing-wine match, or None. Producer/vintage must agree when present."""
         api = self._get_api(update)
         try:
             wines = api.list_all_wines()
         except Exception:
-            logger.warning("[MATCH] Failed to fetch wines for matching, falling back to in-stock")
             try:
                 wines = api.wines_in_stock()
             except Exception:
                 return None
+        hits = find_existing_wines(grok_data, wines, limit=1)
+        return hits[0] if hits else None
 
-        # Try exact-ish match first (name contains or is contained)
-        for wine in wines:
-            existing = wine["name"].lower().strip()
-            if grok_name in existing or existing in grok_name:
-                logger.info(f"[MATCH] Grok '{grok_name}' matched existing '{wine['name']}' (id={wine['id']})")
-                return wine
+    async def _reread_if_classification(self, grok_data: dict, photo_data: bytes, update=None) -> dict:
+        """Back labels often come back as 'Reserva' — ask Grok for the brand."""
+        if not _is_classification_name(grok_data.get("name")):
+            return grok_data
+        if not photo_data or not self._label_analyse:
+            return grok_data
+        chat_id = ""
+        if update is not None:
+            chat_id = str(getattr(getattr(update, "effective_chat", None), "id", "") or "")
+        currency = self._chat_id_to_currency.get(chat_id, "USD")
+        country = self._chat_id_to_country.get(chat_id, "")
+        try:
+            again = await asyncio.get_event_loop().run_in_executor(
+                None,
+                functools.partial(
+                    self._label_analyse, photo_data, currency, country,
+                    "This may be a back label. Read the brand / producer, "
+                    "not only Reserva, Crianza or the appellation.",
+                ),
+            )
+        except Exception as e:
+            logger.info("[MATCH] back-label reread failed: %s", e)
+            return grok_data
+        if not isinstance(again, dict):
+            return grok_data
+        merged = dict(grok_data)
+        for key, value in again.items():
+            if value not in (None, "", [], {}):
+                merged[key] = value
+        return merged
 
-        # Try matching on key words (drop common words)
-        skip = {"wine", "the", "de", "du", "le", "la", "les", "di", "del", "das", "der", "reserve", "reserva"}
-        grok_words = {w for w in grok_name.split() if w not in skip and len(w) > 2}
-        if not grok_words:
-            return None
-
-        best_match = None
-        best_score = 0
-        for wine in wines:
-            existing_words = {w for w in wine["name"].lower().split() if w not in skip and len(w) > 2}
-            overlap = len(grok_words & existing_words)
-            if overlap > best_score and overlap >= 2:
-                best_score = overlap
-                best_match = wine
-
-        if best_match:
-            logger.info(f"[MATCH] Grok '{grok_name}' fuzzy-matched '{best_match['name']}' (id={best_match['id']}, score={best_score})")
-        return best_match
-
-    async def _handle_triage_label(self, status_msg, grok_data: dict, photo_data: bytes = b"", update=None):
+    async def _handle_triage_label(self, status_msg, grok_data: dict, photo_data: bytes = b"", update=None, barcode: str = "", reuse_key: str = ""):
         """Handle a photo that Grok identified as a wine label.
         Grok already did the full analysis in the triage call.
         Checks for existing wines before creating a new one."""
+        if not reuse_key:
+            grok_data = await self._reread_if_classification(grok_data, photo_data, update)
         api = self._get_api(update)
-        # Check if there's a single pending barcode to attach — scoped to this
-        # household, so one tenant's photo can't land on another's scan.
-        barcode = ""
-        with self._lock:
-            active = _active_pendings(self.pending_store, self._hid(api))
-            if len(active) == 1:
-                barcode = next(iter(active))
+        # A pyzbar barcode from this photo wins even if another card is pending.
+        # Otherwise attach only when this household has exactly one pending scan.
+        if reuse_key:
+            barcode = ""
+        elif not barcode:
+            with self._lock:
+                active = _active_pendings(self.pending_store, self._hid(api))
+                if len(active) == 1:
+                    barcode = next(iter(active))
 
         if barcode:
-            # Store Grok data for confirmation, linked to the pending barcode
+            pending = self._get_pending(api, barcode)
+            if photo_data and (pending.get("photo_data") or pending.get("photo_front")):
+                await self._attach_side_photo(status_msg, barcode, photo_data, update)
+                return
             fields = {"grok_merged": grok_data}
             if photo_data:
                 fields["photo_data"] = photo_data
+                fields["photo_front"] = photo_data
             self._update_pending(api, barcode, **fields)
             await self._show_barcode_label_confirm(status_msg, grok_data, barcode, api)
             return
 
         # No pending barcode — check if this wine already exists
-        existing = self._find_matching_wine(grok_data, update=update)
+        hits = []
+        try:
+            hits = find_existing_wines(grok_data, api.list_all_wines())
+        except Exception:
+            hits = []
+        updatable = [h for h in hits if _can_update_wine(grok_data, h)]
+        existing = updatable[0] if len(updatable) == 1 else None
         tag = _paid_price(grok_data)
         if existing is not None and tag is not None:
             self._pending_paid[existing["id"]] = tag
 
         # Store Grok data under a temp key for the confirm buttons
-        temp_key = self._next_label_key()
-        with self._lock:
-            entry = {
-                "grok_merged": grok_data,
-                "time": time.time(),
-            }
-            if photo_data:
-                entry["photo_data"] = photo_data
-            self.pending_store[temp_key] = entry
-
-        suffix = ""
-
-        if existing:
-            # Found a match — ask if they want to update or add new
-            logger.info(f"[TRIAGE] Label matches existing wine: {existing['name']} (id={existing['id']})")
-            suffix = f"\n🍷 This looks like <b>{existing['name']}</b> already in your cellar ({existing['stock_count']}x)."
-            # References we already hold for this wine beat anything the vision
-            # call guessed, and cost nothing to show.
-            _merge_stored_references(grok_data, existing)
-
-            # Store the edit data for the confirm button
-            edit_key = f"_edit_{existing['id']}"
+        if reuse_key:
+            temp_key = reuse_key
+            with self._lock:
+                entry = self.pending_store.get(temp_key) or {
+                    "household_id": self._hid(api),
+                    "barcode": temp_key,
+                }
+                entry["grok_merged"] = grok_data
+                entry["time"] = time.time()
+                self.pending_store[temp_key] = entry
+        else:
+            temp_key = self._next_label_key()
             with self._lock:
                 entry = {
-                    "wine_id": existing["id"],
                     "grok_merged": grok_data,
                     "time": time.time(),
+                    "household_id": self._hid(api),
+                    "barcode": temp_key,
                 }
                 if photo_data:
                     entry["photo_data"] = photo_data
-                self.pending_store[edit_key] = entry
+                    entry["photo_front"] = photo_data
+                self.pending_store[temp_key] = entry
 
-            keyboard = [
-                [InlineKeyboardButton(
-                    f"✏️ Update {existing['name']}",
-                    callback_data=_cb("edc", wine_id=existing["id"]),
-                )],
-                [InlineKeyboardButton("📥 Add stock (+1)", callback_data=_cb("in", wine_id=existing["id"]))],
-                [InlineKeyboardButton(
-                    "\U0001F377 Drank this",
-                    callback_data=_cb("dk", wine_id=existing["id"]),
-                )],
-                [InlineKeyboardButton("🆕 No, it's a different wine", callback_data=_cb("grok", barcode=temp_key))],
-                [InlineKeyboardButton("That's the wrong wine", callback_data=_cb("wr", barcode=temp_key))],
-                [InlineKeyboardButton("❌ Cancel", callback_data=_cb("x"))],
-            ]
+        suffix = ""
+        keyboard = []
+
+        if hits:
+            if existing:
+                _merge_stored_references(grok_data, existing)
+            if _is_classification_name(grok_data.get("name")):
+                suffix = "\n\nWe couldn't read the name, is this one of these?"
+            elif len(hits) == 1 and existing:
+                suffix = (
+                    f"\n🍷 This looks like <b>{html.escape(str(existing.get('name') or 'that wine'), quote=False)}</b>"
+                    f" already in your cellar ({existing.get('stock_count', 0)}x)."
+                )
+            else:
+                suffix = "\n\nIs this one of these?"
+            for wine in hits:
+                label = _wine_choice_label(wine)
+                if _can_update_wine(grok_data, wine):
+                    edit_key = f"_edit_{wine['id']}"
+                    with self._lock:
+                        self.pending_store[edit_key] = {
+                            "wine_id": wine["id"],
+                            "grok_merged": grok_data,
+                            "time": time.time(),
+                            "photo_data": photo_data,
+                        }
+                    keyboard.append([InlineKeyboardButton(
+                        f"✏️ Update {label}",
+                        callback_data=_cb("edc", wine_id=wine["id"]),
+                    )])
+                else:
+                    keyboard.append([InlineKeyboardButton(
+                        label, callback_data=_cb("in", wine_id=wine["id"]),
+                    )])
+            keyboard.append([InlineKeyboardButton(
+                "🆕 No, it's a different wine", callback_data=_cb("grok", barcode=temp_key),
+            )])
+            keyboard.append([InlineKeyboardButton(
+                "That's the wrong wine", callback_data=_cb("wr", barcode=temp_key),
+            )])
+            keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data=_cb("x"))])
         else:
-            # No match — offer to create new
-            # Standing in a shop is a first-class case: you may want the notes
-            # and the price and no intention of owning the bottle.
+            if _is_classification_name(grok_data.get("name")):
+                suffix = "\n\nWe couldn't read the name."
             keyboard = [
-                [InlineKeyboardButton("✅ Add to cellar", callback_data=_cb("grok", barcode=temp_key))],
+                [InlineKeyboardButton(ADD_TO_CELLAR, callback_data=_cb("grok", barcode=temp_key))],
                 [InlineKeyboardButton(
                     "\U0001F377 Drank this",
                     callback_data=_cb("dk", barcode=temp_key),
@@ -6700,6 +8110,12 @@ class TelegramBotHandler:
                 [InlineKeyboardButton("👀 Just looking", callback_data=_cb("look"))],
                 [InlineKeyboardButton("That's the wrong wine", callback_data=_cb("wr", barcode=temp_key))],
             ]
+        pending = self._get_pending(api, temp_key)
+        keyboard.extend(_another_photo_row(temp_key, pending))
+        if not str(grok_data.get("producer") or "").strip():
+            suffix += PRODUCER_HINT
+            extra = _guess_producer_row(temp_key, grok_data.get("name") or "")
+            keyboard = keyboard[:1] + extra + keyboard[1:] if keyboard else extra
 
         markup = InlineKeyboardMarkup(keyboard)
         # The triage vision call answers from the model's own memory and, held
@@ -6728,7 +8144,7 @@ class TelegramBotHandler:
                 "wine": _taste_wine(grok_data),
             }
 
-        if wants_refs:
+        if wants_refs and not reuse_key:
             self._kick_label_refs(
                 status_msg, grok_data, api, suffix, markup, pending_key=temp_key,
             )
@@ -6743,17 +8159,45 @@ class TelegramBotHandler:
         Same live ratings lookup as a shop photo — the vision call almost
         never fills critic/Vivino/price, so we search in the background.
         """
-        suffix = f"\nBarcode: <code>{barcode}</code>"
-        keyboard = [
-            [InlineKeyboardButton("✅ Confirm & add to cellar", callback_data=_cb("grok", barcode=barcode))],
-            [InlineKeyboardButton(
-                "\U0001F377 Drank this",
-                callback_data=_cb("dk", barcode=barcode),
-            )],
-            [InlineKeyboardButton("That's the wrong wine", callback_data=_cb("wr", barcode=barcode))],
-            [InlineKeyboardButton("📸 Try another photo", callback_data=_cb("retry", barcode=barcode))],
-            [InlineKeyboardButton("✏️ Add manually instead", callback_data=_cb("man", barcode=barcode))],
-        ]
+        suffix = ""
+        if barcode and not str(barcode).startswith("_"):
+            suffix = f"\nBarcode: <code>{html.escape(barcode, quote=False)}</code>"
+        hits = []
+        try:
+            hits = match_barcode_less_wines(grok_data, api.list_all_wines())
+        except Exception:
+            hits = []
+        if hits:
+            if _is_classification_name(grok_data.get("name")):
+                suffix += "\n\nWe couldn't read the name, is this one of these?"
+            elif len(hits) == 1:
+                name = html.escape(str(hits[0].get("name") or "that wine"), quote=False)
+                suffix += f"\n\nIs this <b>{name}</b>?"
+            else:
+                suffix += "\n\nIs this one of these?"
+            keyboard = list(_is_this_keyboard(barcode, hits).inline_keyboard)
+            keyboard.append([InlineKeyboardButton(
+                "That's the wrong wine", callback_data=_cb("wr", barcode=barcode),
+            )])
+        else:
+            if _is_classification_name(grok_data.get("name")):
+                suffix += "\n\nWe couldn't read the name."
+            keyboard = [
+                [InlineKeyboardButton(ADD_TO_CELLAR, callback_data=_cb("grok", barcode=barcode))],
+                [InlineKeyboardButton(
+                    "\U0001F377 Drank this",
+                    callback_data=_cb("dk", barcode=barcode),
+                )],
+                [InlineKeyboardButton("That's the wrong wine", callback_data=_cb("wr", barcode=barcode))],
+                [InlineKeyboardButton("📸 Try another photo", callback_data=_cb("retry", barcode=barcode))],
+                [InlineKeyboardButton("✏️ Add manually instead", callback_data=_cb("man", barcode=barcode))],
+            ]
+        pending = self._get_pending(api, barcode)
+        keyboard.extend(_another_photo_row(barcode, pending))
+        if not str(grok_data.get("producer") or "").strip():
+            suffix += PRODUCER_HINT
+            extra = _guess_producer_row(barcode, grok_data.get("name") or "")
+            keyboard = keyboard[:1] + extra + keyboard[1:] if keyboard else extra
         markup = InlineKeyboardMarkup(keyboard)
         wants_refs = _needs_references(grok_data) and hasattr(api, "lookup_references")
         pending_note = REFS_PENDING_NOTE if wants_refs else ""
@@ -6923,7 +8367,13 @@ class TelegramBotHandler:
             )
             return
 
-        self._update_pending(api, barcode, grok_merged=grok_data, photo_data=photo_data)
+        pending = self._get_pending(api, barcode)
+        if pending.get("photo_data") or pending.get("photo_front"):
+            await self._attach_side_photo(status_msg, barcode, photo_data, update)
+            return
+        self._update_pending(
+            api, barcode, grok_merged=grok_data, photo_data=photo_data, photo_front=photo_data,
+        )
         await self._show_barcode_label_confirm(status_msg, grok_data, barcode, api)
 
     async def _handle_edit_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE,
@@ -6955,21 +8405,49 @@ class TelegramBotHandler:
             )
             return
 
-        # Store for confirmation
+        # Store for confirmation — keep the photo so a typed hint can't drop it.
         edit_key = f"_edit_{wine_id}"
         with self._lock:
             if edit_key not in self.pending_store:
                 self.pending_store[edit_key] = {"wine_id": wine_id, "time": time.time()}
             self.pending_store[edit_key]["grok_merged"] = grok_data
+            self.pending_store[edit_key]["photo_data"] = photo_data
 
+        current = {}
+        try:
+            current = api.get_wine_detail(wine_id) or {}
+        except Exception:
+            current = {}
+        incoming = _clean_wine_data(grok_data)
+        grok_bc = grok_data.get("barcode")
+        if grok_bc:
+            incoming["barcode"] = grok_bc
+        fills, overwrites = proposed_wine_update(current, incoming)
         text = "🔍 <b>Update details:</b>\n\n"
         text += _grok_summary(grok_data)
+        if overwrites:
+            text += "\n\nWould change: " + ", ".join(
+                f"{field} {old} → {new}" for field, old, new in overwrites
+            )
 
-        keyboard = [
-            [InlineKeyboardButton("✅ Confirm update", callback_data=_cb("edc", wine_id=wine_id))],
-            [InlineKeyboardButton("📸 Try another photo", callback_data=_cb("ed", wine_id=wine_id))],
-            [InlineKeyboardButton("❌ Cancel", callback_data=_cb("x"))],
-        ]
+        if overwrites:
+            keyboard = [
+                [InlineKeyboardButton(
+                    "Yes, apply those changes",
+                    callback_data=_cb("edc", wine_id=wine_id, original="all"),
+                )],
+                [InlineKeyboardButton(
+                    "Only fill blanks",
+                    callback_data=_cb("edc", wine_id=wine_id, original="fill"),
+                )],
+                [InlineKeyboardButton("❌ Cancel", callback_data=_cb("x"))],
+            ]
+        else:
+            keyboard = [
+                [InlineKeyboardButton("✅ Confirm update", callback_data=_cb("edc", wine_id=wine_id))],
+                [InlineKeyboardButton("📸 Try another photo", callback_data=_cb("ed", wine_id=wine_id))],
+                [InlineKeyboardButton("❌ Cancel", callback_data=_cb("x"))],
+            ]
 
         await status_msg.edit_text(
             text,

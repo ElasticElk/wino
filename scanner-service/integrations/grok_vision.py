@@ -4,10 +4,13 @@ import base64
 import json
 import logging
 import re
+import time
 from datetime import datetime
 from io import BytesIO
 
 import requests
+
+from integrations.chat_models import _responses_text, _trailing_json
 
 logger = logging.getLogger(__name__)
 
@@ -43,33 +46,143 @@ def polish_extracted_fields(data: dict | None) -> dict | None:
         value = data.get(field)
         if isinstance(value, str):
             data[field] = normalise_label_case(value)
+    from integrations.barcodes import accepted_barcode
+    digits = accepted_barcode(data.get("barcode"))
+    if digits:
+        data["barcode"] = digits
+    elif "barcode" in data:
+        data["barcode"] = None
     return data
 
-# pyzbar is optional — used for fast local barcode reading before falling back to Grok
 try:
-    from PIL import Image
+    from PIL import Image, ImageOps
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+    Image = None
+    ImageOps = None
+
+try:
+    import zxingcpp
+    HAS_ZXING = True
+except ImportError:
+    HAS_ZXING = False
+    zxingcpp = None
+    logger.info("zxing-cpp not available — barcode reading will try pyzbar")
+
+try:
     from pyzbar.pyzbar import decode as pyzbar_decode
     HAS_PYZBAR = True
 except ImportError:
     HAS_PYZBAR = False
-    logger.info("pyzbar not available — barcode reading will use Grok only")
+    pyzbar_decode = None
+    logger.info("pyzbar not available — barcode reading will try zxing-cpp")
 
 
-def read_barcode_local(photo_bytes: bytes) -> str | None:
-    """Try to read a barcode from photo bytes using pyzbar. Returns digits or None."""
+def _zxing_formats():
+    fmt = zxingcpp.BarcodeFormat
+    try:
+        return (fmt.EAN13, fmt.EAN8, fmt.UPCA, fmt.UPCE, fmt.ITF)
+    except Exception:
+        return None
+
+
+def _accept_digits(raw) -> str | None:
+    from integrations.barcodes import accepted_barcode
+    if raw is None:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="ignore")
+    return accepted_barcode(str(raw).strip())
+
+
+def _try_zxing(image) -> str | None:
+    if not HAS_ZXING:
+        return None
+    try:
+        src = image
+        if image.mode not in ("RGB", "L"):
+            src = image.convert("RGB")
+        kwargs = {"try_rotate": True, "try_downscale": True}
+        formats = _zxing_formats()
+        if formats:
+            kwargs["formats"] = formats
+        results = zxingcpp.read_barcodes(src, **kwargs)
+    except Exception as e:
+        logger.warning("[PHOTO] zxing decode failed: %s", e)
+        return None
+    for result in results or []:
+        digits = _accept_digits(getattr(result, "text", None))
+        if digits:
+            return digits
+    return None
+
+
+def _try_pyzbar(image) -> str | None:
     if not HAS_PYZBAR:
         return None
     try:
-        image = Image.open(BytesIO(photo_bytes))
         results = pyzbar_decode(image)
-        for result in results:
-            digits = result.data.decode("utf-8").strip()
-            if digits.isdigit() and 8 <= len(digits) <= 14:
-                logger.info(f"pyzbar read barcode: {digits}")
-                return digits
     except Exception as e:
-        logger.warning(f"pyzbar failed: {e}")
+        logger.warning("[PHOTO] pyzbar decode failed: %s", e)
+        return None
+    for result in results or []:
+        digits = _accept_digits(getattr(result, "data", None))
+        if digits:
+            return digits
     return None
+
+
+def _barcode_retry_images(image):
+    """Grayscale + autocontrast 2x, plus centre and lower-half crops."""
+    gray = ImageOps.grayscale(image)
+    contrast = ImageOps.autocontrast(gray)
+    w, h = contrast.size
+    yield contrast.resize((max(1, w * 2), max(1, h * 2)), Image.Resampling.LANCZOS)
+    yield contrast.crop((w // 4, h // 4, max(w // 4 + 1, (w * 3) // 4), max(h // 4 + 1, (h * 3) // 4)))
+    yield contrast.crop((0, h // 2, w, h))
+
+
+def read_barcode_local(photo_bytes: bytes) -> str | None:
+    """Read an EAN/UPC from photo bytes. zxing-cpp, then pyzbar, then retries."""
+    started = time.monotonic()
+    engine = "none"
+    width = height = 0
+    found = None
+    try:
+        if not HAS_PIL:
+            logger.warning("[PHOTO] barcode decode failed: Pillow is not installed")
+        else:
+            image = Image.open(BytesIO(photo_bytes))
+            image.load()
+            width, height = image.size
+            found = _try_zxing(image)
+            if found:
+                engine = "zxing"
+            else:
+                found = _try_pyzbar(image)
+                if found:
+                    engine = "pyzbar"
+                else:
+                    for variant in _barcode_retry_images(image):
+                        found = _try_zxing(variant)
+                        if found:
+                            engine = "zxing"
+                            break
+                        found = _try_pyzbar(variant)
+                        if found:
+                            engine = "pyzbar"
+                            break
+    except Exception as e:
+        logger.warning("[PHOTO] barcode decode failed: %s", e)
+        found = None
+        engine = "none"
+    ms = int((time.monotonic() - started) * 1000)
+    logger.info(
+        "[PHOTO] barcode decode engine=%s size=%sx%s ms=%s",
+        engine, width, height, ms,
+    )
+    return found
 
 REFERENCE_INSTRUCTIONS = """REFERENCE FIELDS — fill each INDEPENDENTLY. You may know one and not the others; that is fine.
 
@@ -116,9 +229,12 @@ def _location_phrase(country: str) -> str:
     return f" in {country}"
 
 
-def build_label_prompt(target_currency: str = "USD", target_country: str = "") -> str:
+def build_label_prompt(target_currency: str = "USD", target_country: str = "",
+                       hint: str = "") -> str:
     location = _location_phrase(target_country)
+    extra = f"\n{hint}\n" if hint else ""
     return f"""You are a sommelier and wine label expert. Analyse this wine bottle label photo and extract as much detail as possible.
+{extra}
 
 Return a JSON object with these fields (use null for anything you can't determine):
 
@@ -149,13 +265,15 @@ Return a JSON object with these fields (use null for anything you can't determin
   "market_price_currency": "{target_currency}",
   "market_price_confidence": "low",
   "market_price_reasoning": null,
-  "list_price": null
+  "list_price": null,
+  "barcode": "EAN/UPC digits printed on the label, or null"
 }}
 
 Wine type codes: RE=Red, WH=White, RO=Rose, SP=Sparkling, DE=Dessert, FO=Fortified, OR=Orange.
 Category codes: DR=Dry, SD=Semi-Dry, MS=Medium Sweet, SW=Sweet. Most wines are DR unless stated otherwise.
 
 For list_price: ONLY a number printed on a shelf sticker, neck tag or price gun label actually visible in the photo. If you cannot see a printed price, this MUST be null. Do not copy market_price into list_price. Do not invent a shop price.
+For barcode: the EAN-8/EAN-13/UPC digits printed under the bars, digits only, or null if you cannot read them. Never guess a barcode.
 
 For the description field: even if tasting notes are not printed on the label, use your wine knowledge to write useful tasting notes based on the grape variety, region, and wine style.
 For food_pairings: suggest 2-4 food pairings based on your wine knowledge.
@@ -176,13 +294,14 @@ def build_triage_prompt(target_currency: str = "USD", target_country: str = "") 
    {{"type": "barcode", "barcode": "the numeric EAN/UPC digits"}}
 
 2. If it shows a WINE LABEL or wine bottle, return a full analysis:
-   {{"type": "label", "name": "Cuvée in title case", "producer": "Winery in title case", "vintage": 2020, "wine_type": "RE/WH/RO/SP/DE/FO/OR", "category": "DR/SD/MS/SW", "country": "Two-letter ISO code", "region": "Wine region", "appellation": "Official appellation", "grape_variety": "Primary grape", "vineyard": "Estate/vineyard name", "abv": 13.5, "size": 0.75, "drink_by": "YYYY-MM-DD or null", "food_pairings": ["Food 1", "Food 2"], "attributes": ["Attribute 1"], "description": "Tasting notes. 2-3 sentences.", "critic_score": null, "critic_score_confidence": "low", "critic_score_reasoning": null, "vivino_rating": null, "vivino_rating_confidence": "low", "vivino_rating_reasoning": null, "market_price": null, "market_price_currency": "{target_currency}", "market_price_confidence": "low", "market_price_reasoning": null, "list_price": null}}
+   {{"type": "label", "name": "Cuvée in title case", "producer": "Winery in title case", "vintage": 2020, "wine_type": "RE/WH/RO/SP/DE/FO/OR", "category": "DR/SD/MS/SW", "country": "Two-letter ISO code", "region": "Wine region", "appellation": "Official appellation", "grape_variety": "Primary grape", "vineyard": "Estate/vineyard name", "abv": 13.5, "size": 0.75, "drink_by": "YYYY-MM-DD or null", "food_pairings": ["Food 1", "Food 2"], "attributes": ["Attribute 1"], "description": "Tasting notes. 2-3 sentences.", "critic_score": null, "critic_score_confidence": "low", "critic_score_reasoning": null, "vivino_rating": null, "vivino_rating_confidence": "low", "vivino_rating_reasoning": null, "market_price": null, "market_price_currency": "{target_currency}", "market_price_confidence": "low", "market_price_reasoning": null, "list_price": null, "barcode": "EAN/UPC digits or null"}}
    {NAME_STYLE}
 
    Wine type codes: RE=Red, WH=White, RO=Rose, SP=Sparkling, DE=Dessert, FO=Fortified, OR=Orange.
    Category: DR=Dry, SD=Semi-Dry, MS=Medium Sweet, SW=Sweet.
    For description: use wine knowledge for tasting notes. For food_pairings: 2-4 suggestions. For attributes: notable traits (organic, old vine, reserve, barrel-aged, etc). For drink_by: estimate peak drinking date. For size: litres (0.75 standard).
    For list_price: ONLY a number printed on a shelf sticker or price tag visible in the photo. Null if you cannot see one. Never copy market_price into list_price.
+   For barcode: EAN/UPC digits printed on the label, or null. Never guess.
    {REFERENCE_INSTRUCTIONS.format(currency=target_currency, location=location)}
    Use null for fields you can't determine.
 
@@ -388,7 +507,8 @@ class GrokVisionAPI:
         self.api_key = api_key
         self.base_url = "https://api.x.ai/v1"
 
-    def analyse_label(self, photo_bytes: bytes, target_currency: str = "USD", target_country: str = "") -> dict | None:
+    def analyse_label(self, photo_bytes: bytes, target_currency: str = "USD", target_country: str = "",
+                      hint: str = "") -> dict | None:
         """Send a label photo to Grok vision and extract wine data.
 
         Returns a dict of wine fields, or None on failure.
@@ -409,7 +529,7 @@ class GrokVisionAPI:
                         },
                         {
                             "type": "text",
-                            "text": build_label_prompt(target_currency, target_country),
+                            "text": build_label_prompt(target_currency, target_country, hint=hint),
                         },
                     ],
                 }
@@ -511,8 +631,9 @@ class GrokVisionAPI:
             logger.info(f"Grok triage: type={photo_type}")
 
             if photo_type == "barcode":
-                digits = re.sub(r"\D", "", data.get("barcode", ""))
-                if 8 <= len(digits) <= 14:
+                from integrations.barcodes import accepted_barcode
+                digits = accepted_barcode(data.get("barcode"))
+                if digits:
                     data["barcode"] = digits
                     return data
                 logger.warning(f"Grok barcode result not valid: {data.get('barcode')!r}")
@@ -588,57 +709,52 @@ class GrokVisionAPI:
         prompt = build_identify_hint_prompt(
             hint, wrong_name, target_currency, target_country, context,
         )
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        # web_search is accepted on /responses only; /chat/completions returns 422.
         payload = {
             "model": GROK_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 1024,
-            "temperature": 0.0,
+            "input": [{"role": "user", "content": prompt}],
             "tools": [{"type": "web_search"}],
+            "max_output_tokens": 1024,
+            "temperature": 0,
         }
         try:
             resp = requests.post(
-                f"{self.base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
+                f"{self.base_url}/responses",
+                headers=headers,
                 json=payload,
                 timeout=90,
             )
             resp.raise_for_status()
-            message = resp.json()["choices"][0]["message"]
-            content = (message.get("content") or "").strip()
-            if not content:
-                raise ValueError("empty identify response")
-            if content.startswith("```"):
-                content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-            data = json.loads(content)
-            data = polish_extracted_fields(data)
+            data = polish_extracted_fields(_trailing_json(_responses_text(resp.json())))
             logger.info(f"Grok re-identified from hint: {data.get('name', '?')}")
             return data
         except requests.RequestException as e:
             logger.error(f"Grok identify-from-hint failed: {e}")
-            if payload.get("tools"):
-                payload.pop("tools", None)
-                try:
-                    resp = requests.post(
-                        f"{self.base_url}/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {self.api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json=payload,
-                        timeout=90,
-                    )
-                    resp.raise_for_status()
-                    content = (resp.json()["choices"][0]["message"].get("content") or "").strip()
-                    if content.startswith("```"):
-                        content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-                    return polish_extracted_fields(json.loads(content))
-                except Exception as retry_err:
-                    logger.error(f"Grok identify-from-hint retry failed: {retry_err}")
+            try:
+                resp = requests.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=headers,
+                    json={
+                        "model": GROK_MODEL,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 1024,
+                        "temperature": 0.0,
+                    },
+                    timeout=90,
+                )
+                resp.raise_for_status()
+                content = (resp.json()["choices"][0]["message"].get("content") or "").strip()
+                if content.startswith("```"):
+                    content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+                return polish_extracted_fields(json.loads(content))
+            except Exception as retry_err:
+                logger.error(f"Grok identify-from-hint retry failed: {retry_err}")
             return None
-        except (json.JSONDecodeError, KeyError, IndexError) as e:
+        except (json.JSONDecodeError, KeyError, IndexError, ValueError, TypeError) as e:
             logger.error(f"Failed to parse Grok identify-from-hint response: {e}")
             return None
 

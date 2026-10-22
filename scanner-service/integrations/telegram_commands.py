@@ -26,6 +26,7 @@ PUBLIC_COMMANDS = [
 ADMIN_COMMANDS = [
     ("admin", "Staff tools"),
     ("stats", "Every cellar at a glance"),
+    ("chatstats", "How chat suggestions are landing"),
     ("households", "List every household"),
     ("members", "Members of a named household"),
     ("whois", "Find someone by name or chat ID"),
