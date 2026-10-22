@@ -47,5 +47,9 @@ wine-cellar/mediafiles/
 *password*.txt
 *credentials*.txt
 
-# Claude Code
+# Claude Code / Cursor
 .claude/
+.cursor/
+
+# Personal working notes, not part of the project
+Wine Fridge Scanner.docx

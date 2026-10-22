@@ -1,4 +1,4 @@
-"""Marc's first bottle: empty producer, silent Add to cellar, typed Confirm.
+"""Add without a producer: empty producer, silent Add to cellar, typed Confirm.
 
 Grok read "G.W.M Grenache Noir" with no producer. Tapping Add stripped the
 keyboard; typing Confirm was stolen by the misread fallback. No wine created.

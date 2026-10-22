@@ -4,8 +4,7 @@ Thin client that POSTs `{barcode, mode, api_key}` to the scanner server on the
 NAS. Telegram, Grok, and the cellar database stay there.
 
 There is no Pi or USB scanner yet. Until there is, the backend is exercised
-with `--ping` / `--once` (or the mock stdin backend). Hillside's
-registered device is **Kitchen Pi** (storage: Big Fridge) — copy its API key
+with `--ping` / `--once` (or the mock stdin backend). Copy the scanner's API key
 from Django Admin → Scanners, or pass `SCANNER_API_KEY`.
 
 ## Without hardware

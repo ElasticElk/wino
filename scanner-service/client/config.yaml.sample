@@ -1,5 +1,5 @@
 # Thin scanner client — copy to config.yaml on the Pi.
-# The API key comes from Django Admin → Scanners (Kitchen Pi for Hillside).
+# The API key comes from Django Admin → Scanners.
 
 server:
   # NAS scanner server. On the home LAN this is the NAS hostname or Tailscale name.

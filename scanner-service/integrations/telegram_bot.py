@@ -4239,7 +4239,7 @@ class TelegramBotHandler:
         self, query, api, context, *, wine_id, name, paid=None, created=True,
         ask_barcode=False,
     ):
-        """Fridge picker after creating a wine — Hillside has several."""
+        """Fridge picker after creating a wine, when the household has several storages."""
         card = self._card_logged_item(query.message)
         if card.get("item_id") and not card.get("drunk") and not card.get("guard"):
             await _safe_edit(
