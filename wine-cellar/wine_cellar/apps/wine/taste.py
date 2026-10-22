@@ -236,7 +236,8 @@ def _summary_from_counts(household, counts: dict) -> str:
 
 
 def record_intent(household, user, kind: str, payload: dict | None) -> TasteIntent | None:
-    if household is None or kind not in (TasteIntent.LOOK, TasteIntent.WINELIST):
+    allowed = (TasteIntent.LOOK, TasteIntent.WINELIST, TasteIntent.ASK)
+    if household is None or kind not in allowed:
         return None
     intent = TasteIntent.objects.create(
         household=household,
@@ -244,7 +245,10 @@ def record_intent(household, user, kind: str, payload: dict | None) -> TasteInte
         kind=kind,
         payload=payload or {},
     )
-    rebuild_snapshot(household)
+    # An ask is a record of a recommendation, not evidence of taste.
+    # Rebuilding here would fold the question into the cellar profile.
+    if kind != TasteIntent.ASK:
+        rebuild_snapshot(household)
     return intent
 
 

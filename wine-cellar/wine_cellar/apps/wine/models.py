@@ -263,6 +263,9 @@ class Wine(UserContentModel):
     )
 
     def save(self, *args, **kwargs):
+        if self.barcode:
+            from wine_cellar.apps.wine.barcodes import normalise_barcode
+            self.barcode = normalise_barcode(self.barcode) or None
         # Computed category_rating from whatever signals are available:
         #   both → 70/30 weighted blend
         #   critic only → critic directly
@@ -529,9 +532,11 @@ class TasteIntent(models.Model):
 
     LOOK = "look"
     WINELIST = "winelist"
+    ASK = "ask"
     KIND_CHOICES = [
         (LOOK, "Just looking"),
         (WINELIST, "Wine list"),
+        (ASK, "Asked for a recommendation"),
     ]
 
     household = models.ForeignKey(

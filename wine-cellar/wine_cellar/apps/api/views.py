@@ -1,7 +1,10 @@
+import uuid
 from datetime import timedelta
 
 from django.contrib.auth.decorators import login_not_required
-from django.db.models import Count, Exists, OuterRef, Q
+from django.core.cache import cache
+from django.db import transaction
+from django.db.models import Count, Exists, F, OuterRef, Q
 from django.http import FileResponse
 from django.urls import reverse
 from django.utils import timezone
@@ -40,6 +43,7 @@ def _refresh_taste(household):
 
 from .serializers import (
     StockAddSerializer,
+    StockBulkSerializer,
     StockMoveSerializer,
     StockRemoveSerializer,
     StockSetSerializer,
@@ -127,10 +131,23 @@ class ScannerAPIView(APIView):
 
 class WineByBarcodeView(ScannerAPIView):
     def get(self, request, ean):
+        from wine_cellar.apps.wine.barcodes import (
+            barcode_lookup_variants,
+            normalise_barcode,
+        )
+
         household = self.get_household(request)
-        wines = wine_queryset(household).filter(barcode=ean)
-        serializer = WineSerializer(wines, many=True)
-        return Response({"count": wines.count(), "wines": serializer.data})
+        wanted = normalise_barcode(ean)
+        variants = barcode_lookup_variants(ean)
+        wines = wine_queryset(household).exclude(barcode__isnull=True).exclude(barcode="")
+        matches = list(wines.filter(barcode__in=variants))
+        if not matches and wanted:
+            matches = [
+                wine for wine in wines
+                if normalise_barcode(wine.barcode) == wanted
+            ]
+        serializer = WineSerializer(matches, many=True)
+        return Response({"count": len(matches), "wines": serializer.data})
 
 
 class StockAddView(ScannerAPIView):
@@ -208,62 +225,365 @@ class StockAddView(ScannerAPIView):
         return Response(payload, status=status.HTTP_201_CREATED)
 
 
+def _wine_label(wine):
+    return f"{wine.name} {wine.vintage or ''}".strip()
+
+
+def _soft_delete_item(item):
+    taken_from = item.storage
+    taken_row = item.row
+    item.deleted = True
+    item.save()
+    return {
+        "item_id": item.id,
+        "wine_id": item.wine_id,
+        "wine_name": _wine_label(item.wine),
+        "stock_count": item.wine.total_stock,
+        "storage": taken_from.name if taken_from else "",
+        "storage_id": item.storage_id,
+        "row": taken_row,
+        "drawers": taken_from.rows if taken_from else 0,
+        "action": "removed",
+    }
+
+
 class StockRemoveView(ScannerAPIView):
     def post(self, request):
         serializer = StockRemoveSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         household = self.get_household(request)
-        wine_id = serializer.validated_data["wine_id"]
+        wine_id = serializer.validated_data.get("wine_id")
+        item_id = serializer.validated_data.get("item_id")
         storage_name = serializer.validated_data.get("storage_name", "")
 
-        try:
-            wine = Wine.objects.get(id=wine_id, household=household)
-        except Wine.DoesNotExist:
-            return Response(
-                {"error": "Wine not found"}, status=status.HTTP_404_NOT_FOUND
+        if item_id:
+            item = (
+                StorageItem.objects.filter(
+                    id=item_id, wine__household=household, deleted=False,
+                )
+                .select_related("wine", "storage")
+                .first()
             )
-
-        items = StorageItem.objects.filter(
-            wine=wine, wine__household=household, deleted=False
-        )
-        item = None
-        if storage_name:
-            item = items.filter(storage__name=storage_name).order_by("-created").first()
             if item is None:
                 return Response(
-                    {"error": f"No stock of this wine in {storage_name}"},
-                    status=status.HTTP_409_CONFLICT,
+                    {"error": "Item not found"}, status=status.HTTP_404_NOT_FOUND
+                )
+            if wine_id and item.wine_id != wine_id:
+                return Response(
+                    {"error": "Item not found"}, status=status.HTTP_404_NOT_FOUND
                 )
         else:
-            item = items.order_by("-created").first()
+            try:
+                wine = Wine.objects.get(id=wine_id, household=household)
+            except Wine.DoesNotExist:
+                return Response(
+                    {"error": "Wine not found"}, status=status.HTTP_404_NOT_FOUND
+                )
 
-        if not item:
+            items = StorageItem.objects.filter(
+                wine=wine, wine__household=household, deleted=False
+            )
+            if storage_name:
+                item = items.filter(storage__name=storage_name).order_by("-created").first()
+                if item is None:
+                    return Response(
+                        {"error": f"No stock of this wine in {storage_name}"},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+            else:
+                item = items.order_by("-created").first()
+
+            if not item:
+                return Response(
+                    {"error": "No stock remaining for this wine"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+        payload = _soft_delete_item(item)
+        _refresh_taste(household)
+        return Response(payload)
+
+
+RESTORE_WINDOW = timedelta(minutes=10)
+BULK_UNDO_TTL = int(RESTORE_WINDOW.total_seconds())
+
+
+def _bulk_cache_key(household_id, batch_id):
+    return f"stock_bulk:{household_id}:{batch_id}"
+
+
+class BulkConflict(Exception):
+    def __init__(self, payload, code=status.HTTP_409_CONFLICT):
+        self.payload = payload
+        self.code = code
+        super().__init__(payload.get("error") if isinstance(payload, dict) else payload)
+
+
+def _item_removed_at(item):
+    return item.removed_at or item.modified
+
+
+def _restore_payload(item):
+    wine = item.wine
+    return {
+        "item_id": item.id,
+        "wine_id": wine.id,
+        "wine_name": f"{wine.name} {wine.vintage or ''}".strip(),
+        "stock_count": wine.total_stock,
+        "storage": item.storage.name if item.storage_id else "",
+        "storage_id": item.storage_id,
+        "row": item.row,
+    }
+
+
+def _restore_item(item, household, *, refresh=True):
+    payload = _restore_payload(item)
+    if not item.deleted:
+        payload["error"] = "already_restored"
+        return payload, status.HTTP_409_CONFLICT
+    if _item_removed_at(item) < timezone.now() - RESTORE_WINDOW:
+        payload["error"] = "too_late"
+        return payload, status.HTTP_409_CONFLICT
+    item.deleted = False
+    item.save()
+    if refresh:
+        _refresh_taste(household)
+    payload["stock_count"] = item.wine.total_stock
+    payload["action"] = "restored"
+    return payload, status.HTTP_200_OK
+
+
+class StockRestoreView(ScannerAPIView):
+    """Undo a recent remove/drink by undeleting the same StorageItem.
+
+    The 10-minute window is measured from ``removed_at`` (when the bottle
+    left), not ``modified`` — a taste vote must not restart the clock.
+    Undoing a Drank puts the bottle back; it does not revoke a badge
+    ``award_for_add`` already created (those are get_or_create, keep).
+    """
+
+    def post(self, request, pk):
+        household = self.get_household(request)
+        item = (
+            StorageItem.objects.filter(id=pk, wine__household=household)
+            .select_related("wine", "storage")
+            .first()
+        )
+        if item is None:
             return Response(
-                {"error": "No stock remaining for this wine"},
+                {"error": "Item not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+        payload, code = _restore_item(item, household)
+        return Response(payload, status=code)
+
+
+class StockRestoreLatestView(ScannerAPIView):
+    """Restore the newest removed bottle of a wine, if still in the window."""
+
+    def post(self, request):
+        household = self.get_household(request)
+        try:
+            wine_id = int(request.data.get("wine_id"))
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "wine_id required"}, status=status.HTTP_400_BAD_REQUEST
+            )
+        item = (
+            StorageItem.objects.filter(
+                wine_id=wine_id, wine__household=household, deleted=True,
+            )
+            .select_related("wine", "storage")
+            .order_by(F("removed_at").desc(nulls_last=True), "-modified")
+            .first()
+        )
+        if item is None:
+            return Response(
+                {"error": "nothing_to_restore", "wine_id": wine_id},
                 status=status.HTTP_409_CONFLICT,
             )
+        payload, code = _restore_item(item, household)
+        return Response(payload, status=code)
 
-        taken_from = item.storage
-        taken_row = item.row
-        item_id = item.id
-        item.deleted = True
-        item.save()
-        _refresh_taste(household)
+
+def _row_allowed(storage, row):
+    # A drawer fridge may hold a bottle with no drawer ("not sure which").
+    if row is None:
+        return None
+    if storage.rows == 0 or row < 1 or row > storage.rows:
+        return "row_not_allowed"
+    return None
+
+
+class StockBulkView(ScannerAPIView):
+    """Apply a catch-up batch: moves first, then removes, one transaction.
+
+    Each op names an item_id. Put-back is undo of this batch, not add-stock.
+    """
+
+    def post(self, request):
+        serializer = StockBulkSerializer(data=request.data)
+        if not serializer.is_valid():
+            errors = serializer.errors.get("ops") or serializer.errors
+            code = "duplicate_item" if errors == ["duplicate_item"] else None
+            if not code and isinstance(errors, list):
+                joined = " ".join(str(e) for e in errors)
+                if "duplicate_item" in joined:
+                    code = "duplicate_item"
+                elif "cap_exceeded" in joined:
+                    code = "cap_exceeded"
+            if code:
+                return Response({"error": code}, status=status.HTTP_409_CONFLICT)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        household = self.get_household(request)
+        ops = serializer.validated_data["ops"]
+        ids = [op["item_id"] for op in ops]
+
+        try:
+            with transaction.atomic():
+                found = {
+                    item.id: item
+                    for item in StorageItem.objects.select_for_update()
+                    .select_related("wine", "storage")
+                    .filter(id__in=ids, wine__household=household)
+                }
+                missing = [item_id for item_id in ids if item_id not in found]
+                if missing:
+                    raise BulkConflict(
+                        {"error": "Item not found"}, status.HTTP_404_NOT_FOUND
+                    )
+
+                ordered = [op for op in ops if op["op"] == "move"] + [
+                    op for op in ops if op["op"] == "remove"
+                ]
+                snapshots = []
+                for op in ordered:
+                    item = found[op["item_id"]]
+                    if item.deleted:
+                        raise BulkConflict(
+                            {"error": "stale_item", "item_id": item.id}
+                        )
+                    expected_storage = op.get("expected_storage") or ""
+                    storage_name = item.storage.name if item.storage_id else ""
+                    if expected_storage and storage_name != expected_storage:
+                        raise BulkConflict(
+                            {"error": "stale_item", "item_id": item.id}
+                        )
+                    if "expected_row" in op and item.row != op.get("expected_row"):
+                        raise BulkConflict(
+                            {"error": "stale_item", "item_id": item.id}
+                        )
+
+                    snap = {
+                        "op": op["op"],
+                        "item_id": item.id,
+                        "wine_id": item.wine_id,
+                        "wine_name": _wine_label(item.wine),
+                        "from_storage": storage_name,
+                        "from_row": item.row,
+                    }
+                    if op["op"] == "move":
+                        dest_name = op.get("storage_name") or storage_name
+                        dest = Storage.objects.filter(
+                            household=household, name=dest_name,
+                        ).first()
+                        if dest is None:
+                            raise BulkConflict({"error": "storage_not_found"})
+                        dest_row = op["row"] if "row" in op else item.row
+                        bad = _row_allowed(dest, dest_row)
+                        if bad:
+                            raise BulkConflict({"error": bad})
+                        snap["to_storage"] = dest.name
+                        snap["to_row"] = dest_row
+                        item.storage = dest
+                        item.row = dest_row
+                        item.save()
+                    else:
+                        item.deleted = True
+                        item.save()
+                    snapshots.append(snap)
+
+                batch_id = str(uuid.uuid4())
+                cache.set(
+                    _bulk_cache_key(household.id, batch_id),
+                    snapshots,
+                    timeout=BULK_UNDO_TTL,
+                )
+                transaction.on_commit(lambda: _refresh_taste(household))
+        except BulkConflict as exc:
+            return Response(exc.payload, status=exc.code)
 
         return Response(
             {
-                "item_id": item_id,
-                "wine_id": wine.id,
-                "wine_name": f"{wine.name} {wine.vintage or ''}".strip(),
-                "stock_count": wine.total_stock,
-                "storage": taken_from.name,
-                "storage_id": taken_from.id,
-                "row": taken_row,
-                "drawers": taken_from.rows,
-                "action": "removed",
+                "batch_id": batch_id,
+                "applied": len(snapshots),
+                "ops": snapshots,
             }
         )
+
+
+class StockBulkUndoView(ScannerAPIView):
+    """Reverse a catch-up batch. Removes undelete; moves PATCH location back.
+
+    Does not stretch RESTORE_WINDOW. A missing batch is too_late.
+    """
+
+    def post(self, request, batch_id):
+        household = self.get_household(request)
+        key = _bulk_cache_key(household.id, str(batch_id))
+        snapshots = cache.get(key)
+        if not snapshots:
+            return Response(
+                {"error": "too_late"}, status=status.HTTP_409_CONFLICT,
+            )
+
+        try:
+            with transaction.atomic():
+                for snap in reversed(snapshots):
+                    item = (
+                        StorageItem.objects.select_for_update()
+                        .select_related("wine", "storage")
+                        .filter(id=snap["item_id"], wine__household=household)
+                        .first()
+                    )
+                    if item is None:
+                        raise BulkConflict(
+                            {"error": "Item not found"}, status.HTTP_404_NOT_FOUND
+                        )
+                    if snap["op"] == "remove":
+                        payload, code = _restore_item(
+                            item, household, refresh=False,
+                        )
+                        if code != status.HTTP_200_OK:
+                            raise BulkConflict(payload, code)
+                        if item.vote:
+                            item.vote = None
+                            item.save(update_fields=["vote"])
+                    else:
+                        here = item.storage.name if item.storage_id else ""
+                        if (
+                            item.deleted
+                            or here != snap.get("to_storage")
+                            or item.row != snap.get("to_row")
+                        ):
+                            raise BulkConflict(
+                                {"error": "stale_item", "item_id": item.id}
+                            )
+                        dest = Storage.objects.filter(
+                            household=household, name=snap["from_storage"],
+                        ).first()
+                        if dest is None:
+                            raise BulkConflict({"error": "storage_not_found"})
+                        item.storage = dest
+                        item.row = snap.get("from_row")
+                        item.save()
+                cache.delete(key)
+                transaction.on_commit(lambda: _refresh_taste(household))
+        except BulkConflict as exc:
+            return Response(exc.payload, status=exc.code)
+
+        return Response({"undone": len(snapshots), "batch_id": str(batch_id)})
 
 
 class StockHistoryView(ScannerAPIView):
@@ -427,7 +747,9 @@ class WineInStockView(ScannerAPIView):
 
         items = StorageItem.objects.filter(
             wine__household=household, deleted=False
-        ).select_related("wine", "wine__region", "storage").prefetch_related("wine__grapes")
+        ).select_related("wine", "wine__region", "storage").prefetch_related(
+            "wine__grapes", "wine__attributes", "wine__food_pairings",
+        )
 
         if storage_filter:
             items = items.filter(storage__name=storage_filter)
@@ -438,7 +760,7 @@ class WineInStockView(ScannerAPIView):
             wine = item.wine
             if wine.id not in wine_map:
                 producer = wine.producer
-                grapes = wine.grapes.all()
+                grapes = list(wine.grapes.all())
                 grape = grapes[0].name if grapes else ""
 
                 wine_map[wine.id] = {
@@ -449,6 +771,20 @@ class WineInStockView(ScannerAPIView):
                     "producer": producer,
                     "country": wine.country or "",
                     "grape": grape,
+                    "vintage": wine.vintage,
+                    "region": wine.region.name if wine.region_id else "",
+                    "grapes": [g.name for g in grapes],
+                    "comment": wine.comment or "",
+                    "price": None if wine.price is None else float(wine.price),
+                    "drink_by": wine.drink_by.isoformat() if wine.drink_by else None,
+                    "rating": wine.rating,
+                    "critic_score": wine.critic_score,
+                    "vivino_rating": (
+                        None if wine.vivino_rating is None else float(wine.vivino_rating)
+                    ),
+                    "attributes": [str(a) for a in wine.attributes.all()],
+                    "food_pairings": [str(f) for f in wine.food_pairings.all()],
+                    "votes": {"up": 0, "meh": 0, "down": 0},
                     "stock_count": 0,
                     "market_price": (
                         None if wine.market_price is None else float(wine.market_price)
@@ -461,7 +797,22 @@ class WineInStockView(ScannerAPIView):
                 "item_id": item.id,
                 "storage": item.storage.name,
                 "drawer": item.row,
+                "price": None if item.price is None else float(item.price),
             })
+
+        if wine_map:
+            # Thumbs already given on bottles this household has drunk.
+            # In-stock bottles have not been voted, so they must not count.
+            for row in (
+                StorageItem.objects.filter(
+                    wine_id__in=wine_map.keys(), deleted=True, vote__isnull=False,
+                )
+                .values("wine_id", "vote")
+                .annotate(n=Count("id"))
+            ):
+                bucket = wine_map[row["wine_id"]]["votes"]
+                if row["vote"] in bucket:
+                    bucket[row["vote"]] = row["n"]
 
         wines_in_stock = sorted(wine_map.values(), key=lambda w: w["name"])
         return Response({"count": len(wines_in_stock), "wines": wines_in_stock})

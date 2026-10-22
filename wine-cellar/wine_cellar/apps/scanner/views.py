@@ -25,7 +25,8 @@ from wine_cellar.apps.wine.achievements import (
     progress,
     serialize_achievement,
 )
-from wine_cellar.apps.wine.models import CellarAchievement, Wine
+from wine_cellar.apps.wine.chat_stats import chat_stats
+from wine_cellar.apps.wine.models import CellarAchievement, TasteIntent, Wine
 from wine_cellar.apps.wine.taste import record_intent, serialize_snapshot
 
 from .models import (
@@ -1108,7 +1109,13 @@ class HouseholdTasteView(APIView):
             )
         kind = (request.data.get("kind") or "").strip().lower()
         payload = request.data.get("payload")
-        if not isinstance(payload, dict):
+        if kind == "ask":
+            if not isinstance(payload, dict):
+                return Response(
+                    {"error": "payload must be an object"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif not isinstance(payload, dict):
             payload = {}
             wine = request.data.get("wine")
             if isinstance(wine, dict):
@@ -1123,10 +1130,56 @@ class HouseholdTasteView(APIView):
         intent = record_intent(household, request.user, kind, payload)
         if intent is None:
             return Response(
-                {"error": "kind must be look or winelist"},
+                {"error": "kind must be look, winelist or ask"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        return Response(serialize_snapshot(household), status=status.HTTP_201_CREATED)
+        body = serialize_snapshot(household)
+        body["intent_id"] = intent.id
+        return Response(body, status=status.HTTP_201_CREATED)
+
+
+_ASK_PATCH_KEYS = ("outcome", "shown", "rejected", "place", "model", "latency_ms", "fallback")
+_ASK_OUTCOMES = ("pending", "accepted", "rejected", "abandoned")
+
+
+@method_decorator(login_not_required, name="dispatch")
+class HouseholdTasteIntentView(APIView):
+    """Update one recommendation record. Look and winelist rows are not writable."""
+
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        household = _household_for_request(request)
+        if household is None:
+            return Response(
+                {"error": "No household found"}, status=status.HTTP_404_NOT_FOUND,
+            )
+        unknown = [key for key in request.data if key not in _ASK_PATCH_KEYS]
+        if unknown:
+            return Response(
+                {"error": "unknown key", "keys": unknown},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if "outcome" in request.data and request.data["outcome"] not in _ASK_OUTCOMES:
+            return Response(
+                {"error": "outcome must be pending, accepted, rejected or abandoned"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        intent = TasteIntent.objects.filter(
+            pk=pk, household=household, kind=TasteIntent.ASK,
+        ).first()
+        if intent is None:
+            return Response(
+                {"error": "Recommendation not found"}, status=status.HTTP_404_NOT_FOUND,
+            )
+        payload = dict(intent.payload or {})
+        for key in _ASK_PATCH_KEYS:
+            if key in request.data:
+                payload[key] = request.data[key]
+        intent.payload = payload
+        intent.save(update_fields=["payload"])
+        return Response({"id": intent.id, "payload": payload})
 
 
 @method_decorator(login_not_required, name="dispatch")
@@ -1200,6 +1253,25 @@ class ScannerStatsView(APIView):
             ).count(),
             "scanners": scanners,
         })
+
+
+@method_decorator(login_not_required, name="dispatch")
+class ScannerChatStatsView(APIView):
+    """Staff-only: how chat recommendations landed. Sentences, no user names."""
+
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        try:
+            days = int(request.query_params.get("days") or 30)
+        except ValueError:
+            return Response({"error": "days must be a number"}, status=status.HTTP_400_BAD_REQUEST)
+        days = max(1, min(days, 365))
+        household_id = request.query_params.get("household")
+        if household_id is not None and not str(household_id).isdigit():
+            return Response({"error": "household must be an id"}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(chat_stats(days, int(household_id) if household_id else None))
 
 
 COUNTRY_CURRENCY = {

@@ -1,4 +1,5 @@
 from datetime import timedelta
+from pathlib import Path
 from io import StringIO
 from unittest.mock import MagicMock, patch
 
@@ -126,3 +127,31 @@ def test_backfill_dry_run_queues_nothing(wine):
         call_command("backfill_references", "--dry-run", stdout=out)
     delay.assert_not_called()
     assert str(wine.id) in out.getvalue()
+
+
+def test_web_start_always_migrates():
+    """Autoreload does not migrate. Only web applies schema; workers wait."""
+    root = Path(__file__).resolve().parents[1]
+    for name in ("entrypoint.sh", "entrypoint.prod.sh"):
+        text = (root / name).read_text()
+        assert "set -e" in text.splitlines()[:3], name
+        role_at = text.index("CONTAINER_ROLE")
+        apply_at = text.index("python manage.py migrate --noinput")
+        check_at = text.index("python manage.py migrate --check")
+        assert apply_at > role_at, name
+        assert check_at > apply_at, name
+    compose = (root / "docker-compose.yml").read_text()
+    assert "python manage.py migrate --noinput" in compose
+    assert compose.split("celery:")[1].count("migrate --noinput") == 0
+
+
+def test_worker_migrate_wait_times_out():
+    """A stuck schema must fail loud — not hang celery/beat forever."""
+    root = Path(__file__).resolve().parents[1]
+    for name in ("entrypoint.sh", "entrypoint.prod.sh"):
+        text = (root / name).read_text()
+        wait_block = text.split("else")[-1]
+        assert "MIGRATE_WAIT_SECS:-300" in wait_block, name
+        assert "Last migrate --check" in wait_block, name
+        assert "exit 1" in wait_block, name
+        assert ">/dev/null" not in wait_block, name

@@ -108,7 +108,10 @@ def test_join_then_first_drank_awards_and_guards_a_double_tap(
 
     again = user_client.post(
         reverse("api-stock-add"),
-        data={"wine_id": wine_id, "storage_name": "Fridge", "drank": True},
+        data={
+            "wine_id": wine_id, "storage_name": "Fridge", "drank": True,
+            "check_duplicate": True,
+        },
         content_type="application/json",
     )
     assert again.status_code == 409

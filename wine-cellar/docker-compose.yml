@@ -3,8 +3,15 @@ name: wine-cellar-dev
 services:
   web:
     build: .
-    command: >
-      sh -c "npm run watch & exec python manage.py runserver 0.0.0.0:8000"
+    # migrate is also in entrypoint.sh. Kept here so a skipped entrypoint
+    # (or a runserver-only override) cannot serve against a stale schema.
+    command:
+      - sh
+      - -ec
+      - |
+        python manage.py migrate --noinput
+        npm run watch &
+        exec python manage.py runserver 0.0.0.0:8000
     volumes:
       - .:/usr/src/app
       # The bind mount above masks whatever the image built at these paths.

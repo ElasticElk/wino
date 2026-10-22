@@ -15,6 +15,22 @@ urlpatterns = [
     ),
     path("stock/add/", views.StockAddView.as_view(), name="api-stock-add"),
     path("stock/remove/", views.StockRemoveView.as_view(), name="api-stock-remove"),
+    path("stock/bulk/", views.StockBulkView.as_view(), name="api-stock-bulk"),
+    path(
+        "stock/bulk/<uuid:batch_id>/undo/",
+        views.StockBulkUndoView.as_view(),
+        name="api-stock-bulk-undo",
+    ),
+    path(
+        "stock/restore-latest/",
+        views.StockRestoreLatestView.as_view(),
+        name="api-stock-restore-latest",
+    ),
+    path(
+        "stock/<int:pk>/restore/",
+        views.StockRestoreView.as_view(),
+        name="api-stock-restore",
+    ),
     path("stock/set/", views.StockSetView.as_view(), name="api-stock-set"),
     path(
         "stock/history/",

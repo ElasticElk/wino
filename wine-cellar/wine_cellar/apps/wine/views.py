@@ -307,8 +307,27 @@ class WineScannedView(HouseholdScopedMixin, TemplateView):
     template_name = "scanned_wine.html"
 
     def dispatch(self, request, *args, **kwargs):
+        from wine_cellar.apps.wine.barcodes import (
+            barcode_lookup_variants,
+            normalise_barcode,
+        )
+
         code = self.kwargs["code"]
-        wine = self.scoped(Wine.objects.filter(barcode=code)).first()
+        variants = barcode_lookup_variants(code)
+        wine = self.scoped(Wine.objects.filter(barcode__in=variants)).first()
+        if wine is None:
+            wanted = normalise_barcode(code)
+            if wanted:
+                wine = next(
+                    (
+                        row
+                        for row in self.scoped(
+                            Wine.objects.exclude(barcode__isnull=True).exclude(barcode="")
+                        )
+                        if normalise_barcode(row.barcode) == wanted
+                    ),
+                    None,
+                )
         if wine:
             return redirect(reverse("wine-detail", kwargs={"pk": wine.pk}))
 

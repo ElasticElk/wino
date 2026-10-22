@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils import timezone
 
 from wine_cellar.apps.wine.models import UserContentModel, Wine
 
@@ -54,6 +55,7 @@ class StorageItem(UserContentModel):
     row = models.PositiveIntegerField(null=True, blank=True)
     column = models.PositiveIntegerField(null=True, blank=True)
     deleted = models.BooleanField(default=False)
+    removed_at = models.DateTimeField(null=True, blank=True)
     price = models.DecimalField(max_digits=6, decimal_places=2, null=True)
     vote = models.CharField(
         max_length=8, choices=VOTE_CHOICES, null=True, blank=True,
@@ -66,3 +68,11 @@ class StorageItem(UserContentModel):
                 name="storageitem_wine_deleted_idx",
             ),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.deleted:
+            if self.removed_at is None:
+                self.removed_at = timezone.now()
+        else:
+            self.removed_at = None
+        super().save(*args, **kwargs)

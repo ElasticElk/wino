@@ -286,8 +286,37 @@ class StockVoteSerializer(serializers.Serializer):
 
 
 class StockRemoveSerializer(serializers.Serializer):
-    wine_id = serializers.IntegerField()
+    wine_id = serializers.IntegerField(required=False)
+    item_id = serializers.IntegerField(required=False)
     storage_name = serializers.CharField(max_length=100, required=False, default="")
+
+    def validate(self, data):
+        if not data.get("wine_id") and not data.get("item_id"):
+            raise serializers.ValidationError("wine_id or item_id required")
+        return data
+
+
+class StockBulkOpSerializer(serializers.Serializer):
+    op = serializers.ChoiceField(choices=["remove", "move"])
+    item_id = serializers.IntegerField()
+    expected_storage = serializers.CharField(max_length=100, required=False, default="")
+    expected_row = serializers.IntegerField(required=False, allow_null=True)
+    storage_name = serializers.CharField(max_length=100, required=False)
+    row = serializers.IntegerField(required=False, allow_null=True)
+
+
+class StockBulkSerializer(serializers.Serializer):
+    ops = StockBulkOpSerializer(many=True)
+
+    def validate_ops(self, ops):
+        if not ops:
+            raise serializers.ValidationError("ops required")
+        if len(ops) > 30:
+            raise serializers.ValidationError("cap_exceeded")
+        ids = [op["item_id"] for op in ops]
+        if len(ids) != len(set(ids)):
+            raise serializers.ValidationError("duplicate_item")
+        return ops
 
 
 class StockSetSerializer(serializers.Serializer):

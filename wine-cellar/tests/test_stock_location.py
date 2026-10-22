@@ -261,3 +261,131 @@ def test_stock_history_has_image_and_hides_other_households(client, cellar):
     assert not any("Secret" in n for n in names)
     ours = next(item for item in body["items"] if item["wine_id"] == wine.id)
     assert ours["has_image"] is True
+
+
+def test_restore_undeletes_the_same_item_and_storage(client, cellar):
+    user, household, wine, big, kitchen, token = cellar
+    item = StorageItem.objects.create(
+        storage=big, wine=wine, user=user, row=4,
+    )
+    _auth(client, token, household)
+    removed = client.post(
+        reverse("api-stock-remove"),
+        data={"wine_id": wine.id, "storage_name": "Big Fridge"},
+        content_type="application/json",
+    )
+    assert removed.status_code == 200
+    assert removed.json()["item_id"] == item.id
+    item.refresh_from_db()
+    assert item.deleted is True
+
+    restored = client.post(reverse("api-stock-restore", args=[item.id]))
+    assert restored.status_code == 200, restored.content
+    body = restored.json()
+    assert body["item_id"] == item.id
+    assert body["storage"] == "Big Fridge"
+    assert body["row"] == 4
+    assert body["action"] == "restored"
+    item.refresh_from_db()
+    assert item.deleted is False
+    assert item.storage_id == big.id
+    assert item.row == 4
+    assert StorageItem.objects.filter(wine=wine, deleted=False).count() == 1
+
+
+def test_restore_after_ten_minutes_is_refused(client, cellar):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    user, household, wine, big, kitchen, token = cellar
+    item = StorageItem.objects.create(
+        storage=big, wine=wine, user=user, deleted=True,
+    )
+    StorageItem.objects.filter(pk=item.pk).update(
+        removed_at=timezone.now() - timedelta(minutes=11),
+        modified=timezone.now(),
+    )
+    _auth(client, token, household)
+    response = client.post(reverse("api-stock-restore", args=[item.id]))
+    assert response.status_code == 409
+    assert response.json()["error"] == "too_late"
+    item.refresh_from_db()
+    assert item.deleted is True
+
+
+def test_restore_window_uses_removed_at_not_modified(client, cellar):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    user, household, wine, big, kitchen, token = cellar
+    item = StorageItem.objects.create(
+        storage=big, wine=wine, user=user, deleted=True,
+    )
+    StorageItem.objects.filter(pk=item.pk).update(
+        removed_at=timezone.now() - timedelta(minutes=11),
+        modified=timezone.now(),
+        vote="up",
+    )
+    _auth(client, token, household)
+    response = client.post(reverse("api-stock-restore", args=[item.id]))
+    assert response.status_code == 409
+    assert response.json()["error"] == "too_late"
+
+
+def test_restore_latest_puts_back_the_newest_removed_bottle(client, cellar):
+    user, household, wine, big, kitchen, token = cellar
+    older = StorageItem.objects.create(
+        storage=kitchen, wine=wine, user=user, deleted=True,
+    )
+    newer = StorageItem.objects.create(
+        storage=big, wine=wine, user=user, row=2, deleted=True,
+    )
+    _auth(client, token, household)
+    response = client.post(
+        reverse("api-stock-restore-latest"),
+        data={"wine_id": wine.id},
+        content_type="application/json",
+    )
+    assert response.status_code == 200, response.content
+    body = response.json()
+    assert body["item_id"] == newer.id
+    assert body["storage"] == "Big Fridge"
+    newer.refresh_from_db()
+    older.refresh_from_db()
+    assert newer.deleted is False
+    assert older.deleted is True
+
+
+def test_restore_already_put_back_is_refused(client, cellar):
+    user, household, wine, big, kitchen, token = cellar
+    item = StorageItem.objects.create(storage=big, wine=wine, user=user)
+    _auth(client, token, household)
+    client.post(
+        reverse("api-stock-remove"),
+        data={"wine_id": wine.id},
+        content_type="application/json",
+    )
+    first = client.post(reverse("api-stock-restore", args=[item.id]))
+    assert first.status_code == 200
+    second = client.post(reverse("api-stock-restore", args=[item.id]))
+    assert second.status_code == 409
+    assert second.json()["error"] == "already_restored"
+    assert StorageItem.objects.filter(pk=item.pk, deleted=False).count() == 1
+
+
+def test_restore_cannot_touch_another_household(client, cellar):
+    user, household, wine, big, kitchen, token = cellar
+    other = UserFactory()
+    other_hh = get_user_household(other)
+    away = StorageFactory(user=other, household=other_hh, name="Away")
+    secret = WineFactory(user=other, household=other_hh, name="Secret Bottle")
+    item = StorageItem.objects.create(
+        storage=away, wine=secret, user=other, deleted=True,
+    )
+    _auth(client, token, household)
+    response = client.post(reverse("api-stock-restore", args=[item.id]))
+    assert response.status_code == 404
+    item.refresh_from_db()
+    assert item.deleted is True
