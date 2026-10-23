@@ -68,7 +68,6 @@ try:
 except ImportError:
     HAS_ZXING = False
     zxingcpp = None
-    logger.info("zxing-cpp not available — barcode reading will try pyzbar")
 
 try:
     from pyzbar.pyzbar import decode as pyzbar_decode
@@ -76,7 +75,19 @@ try:
 except ImportError:
     HAS_PYZBAR = False
     pyzbar_decode = None
-    logger.info("pyzbar not available — barcode reading will try zxing-cpp")
+
+
+def log_barcode_engines(log=None):
+    """Log whether zxing-cpp and pyzbar imported. Call after logging is configured."""
+    log = log or logger
+    if HAS_ZXING:
+        log.info("zxing-cpp imported successfully")
+    else:
+        log.info("zxing-cpp not available — barcode reading will try pyzbar")
+    if HAS_PYZBAR:
+        log.info("pyzbar imported successfully")
+    else:
+        log.info("pyzbar not available — barcode reading will try zxing-cpp")
 
 
 def _zxing_formats():

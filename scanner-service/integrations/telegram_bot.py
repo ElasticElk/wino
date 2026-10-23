@@ -105,6 +105,11 @@ CARD_FINISHED = (
     "That card's finished — send the photo again if you still want to add it."
 )
 BARCODE_FINISHED = "This barcode was already handled or expired."
+UNREADABLE_LABEL = "I couldn't read this label, try a clearer photo"
+SIDE_PHOTO_GONE = (
+    "That card is gone or already added — send a new photo if you still want "
+    "to attach one."
+)
 
 
 def _finished_copy(barcode: str = "") -> str:
@@ -832,8 +837,11 @@ def _needs_references(data: dict) -> bool:
     """True when the ratings are worth a live search.
 
     Both ratings present means the vision call already produced something for
-    each; a missing one is what the web search is for.
+    each; a missing one is what the web search is for. An empty name cannot
+    be looked up — POST /api/references/lookup/ is a 400 without one.
     """
+    if not str(data.get("name") or "").strip():
+        return False
     return data.get("critic_score") is None or data.get("vivino_rating") is None
 
 
@@ -1327,6 +1335,19 @@ def find_existing_wines(query: dict, wines: list[dict], limit: int = 3) -> list[
         scored.append((score, wine))
     scored.sort(key=lambda row: row[0], reverse=True)
     return [wine for _, wine in scored[:limit]]
+
+
+def wines_to_link(query: dict, wines: list[dict], limit: int = 3) -> list[dict]:
+    """Barcode-less cellar wines this scan may already be.
+
+    Same matcher as shop-label photos. Wines that already have a barcode are
+    skipped — linking another code onto them is refused later.
+    """
+    barcode_less = [
+        wine for wine in wines
+        if not str(wine.get("barcode") or "").strip()
+    ]
+    return find_existing_wines(query, barcode_less, limit=limit)
 
 
 def _wine_choice_label(wine: dict, limit: int = 50) -> str:
@@ -4488,7 +4509,7 @@ class TelegramBotHandler:
             if not str(barcode).startswith("_"):
                 if original != "new":
                     try:
-                        hits = match_barcode_less_wines(
+                        hits = wines_to_link(
                             merged, api.list_all_wines(),
                         )
                     except Exception:
@@ -7310,6 +7331,16 @@ class TelegramBotHandler:
                                  force: bool = False, detected: str | None = None) -> None:
         api = self._get_api(update)
         entry = self._get_pending(api, pending_key)
+        chat_id = str(update.effective_chat.id)
+        if entry.get("wine_id") or not self._is_pending(api, pending_key):
+            getattr(self, "_await_side_photo", {}).pop(chat_id, None)
+            getattr(self, "_pending_side_bytes", {}).pop(chat_id, None)
+            edit = getattr(status_msg, "edit_text", None)
+            if callable(edit):
+                await edit(SIDE_PHOTO_GONE)
+            else:
+                await update.message.reply_text(SIDE_PHOTO_GONE)
+            return
         first = dict(entry.get("grok_merged") or {})
         first_bytes = entry.get("photo_front") or entry.get("photo_data") or b""
         second = await self._analyse_photo_bytes(photo_data, update) or {}
@@ -7336,7 +7367,6 @@ class TelegramBotHandler:
             grok_merged=merged, photo_front=front_bytes, photo_back=back_bytes,
             photo_data=front_bytes or back_bytes,
         )
-        chat_id = str(update.effective_chat.id)
         getattr(self, "_await_side_photo", {}).pop(chat_id, None)
         getattr(self, "_pending_side_bytes", {}).pop(chat_id, None)
         if str(pending_key).startswith("_"):
@@ -7878,7 +7908,7 @@ class TelegramBotHandler:
             suggested = []
             if off_data and off_data.get("name"):
                 try:
-                    suggested = match_barcode_less_wines(off_data, api.list_all_wines())
+                    suggested = wines_to_link(off_data, api.list_all_wines())
                 except Exception:
                     suggested = []
             if suggested:
@@ -8012,6 +8042,12 @@ class TelegramBotHandler:
             if photo_data and (pending.get("photo_data") or pending.get("photo_front")):
                 await self._attach_side_photo(status_msg, barcode, photo_data, update)
                 return
+
+        if not reuse_key and not str(grok_data.get("name") or "").strip():
+            await status_msg.edit_text(UNREADABLE_LABEL)
+            return
+
+        if barcode:
             fields = {"grok_merged": grok_data}
             if photo_data:
                 fields["photo_data"] = photo_data
@@ -8159,12 +8195,15 @@ class TelegramBotHandler:
         Same live ratings lookup as a shop photo — the vision call almost
         never fills critic/Vivino/price, so we search in the background.
         """
+        if not str(grok_data.get("name") or "").strip():
+            await status_msg.edit_text(UNREADABLE_LABEL)
+            return
         suffix = ""
         if barcode and not str(barcode).startswith("_"):
             suffix = f"\nBarcode: <code>{html.escape(barcode, quote=False)}</code>"
         hits = []
         try:
-            hits = match_barcode_less_wines(grok_data, api.list_all_wines())
+            hits = wines_to_link(grok_data, api.list_all_wines())
         except Exception:
             hits = []
         if hits:
@@ -8247,21 +8286,25 @@ class TelegramBotHandler:
         """
         key = self._card_key(status_msg)
         loop = asyncio.get_running_loop()
+        name = str(grok_data.get("name") or "").strip()
         try:
-            result = await loop.run_in_executor(
-                None,
-                functools.partial(
-                    api.lookup_references,
-                    grok_data.get("name", ""),
-                    grok_data.get("producer") or "",
-                    grok_data.get("vintage"),
-                    country=grok_data.get("country") or "",
-                    region=grok_data.get("region") or "",
-                    appellation=grok_data.get("appellation") or "",
-                    grape=grok_data.get("grape_variety") or "",
-                    vineyard=grok_data.get("vineyard") or "",
-                ),
-            )
+            if not name:
+                result = {"updated": False}
+            else:
+                result = await loop.run_in_executor(
+                    None,
+                    functools.partial(
+                        api.lookup_references,
+                        name,
+                        grok_data.get("producer") or "",
+                        grok_data.get("vintage"),
+                        country=grok_data.get("country") or "",
+                        region=grok_data.get("region") or "",
+                        appellation=grok_data.get("appellation") or "",
+                        grape=grok_data.get("grape_variety") or "",
+                        vineyard=grok_data.get("vineyard") or "",
+                    ),
+                )
         except Exception as e:
             logger.warning(f"[label-refs] lookup failed: {e}")
             result = {"updated": False}
