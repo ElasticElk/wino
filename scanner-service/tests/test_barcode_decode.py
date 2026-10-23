@@ -47,6 +47,28 @@ def test_read_barcode_local_quatrino_back_label(caplog):
     assert "ms=" in caplog.text
 
 
+def test_startup_logs_whether_zxing_and_pyzbar_imported(caplog):
+    from integrations.grok_vision import HAS_PYZBAR, HAS_ZXING, log_barcode_engines
+
+    with caplog.at_level(logging.INFO, logger="integrations.grok_vision"):
+        log_barcode_engines()
+    if HAS_ZXING:
+        assert "zxing-cpp imported successfully" in caplog.text
+    else:
+        assert "zxing-cpp not available" in caplog.text
+    if HAS_PYZBAR:
+        assert "pyzbar imported successfully" in caplog.text
+    else:
+        assert "pyzbar not available" in caplog.text
+
+
+def test_server_logs_barcode_engines_at_startup():
+    import inspect
+    import server
+
+    assert "log_barcode_engines" in inspect.getsource(server.lifespan)
+
+
 def test_zxing_mocked_out_still_tries_pyzbar_and_retry(monkeypatch):
     photo = FIXTURE.read_bytes()
     calls = {"retry": 0, "pyzbar": 0, "zxing": 0}

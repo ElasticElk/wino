@@ -23,14 +23,16 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from integrations.card_store import CardStore
-from integrations.grok_vision import GrokVisionAPI, merge_wine_data, read_barcode_local
+from integrations.grok_vision import (
+    GrokVisionAPI, merge_wine_data, read_barcode_local, log_barcode_engines,
+)
 from integrations.open_food_facts import OpenFoodFactsAPI
 from integrations.barcodes import normalise_barcode
 from integrations.telegram_bot import (
     TelegramBotHandler,
     TelegramNotifier,
-    match_barcode_less_wines,
     pending_key,
+    wines_to_link,
 )
 from integrations.wine_cellar_api import WineCellarAPI
 
@@ -454,6 +456,7 @@ async def lifespan(app: FastAPI):
     })
 
     off = OpenFoodFactsAPI()
+    log_barcode_engines(logger)
 
     # Grok vision
     grok_key = svc.get("grok_api_key", file_config.get("grok", {}).get("api_key", ""))
@@ -815,7 +818,7 @@ def _handle_unknown(barcode: str, api: WineCellarAPI,
     suggested = None
     if off_data and off_data.get("name"):
         try:
-            suggested = match_barcode_less_wines(off_data, api.list_all_wines())
+            suggested = wines_to_link(off_data, api.list_all_wines())
         except Exception as e:
             logger.info(f"Barcode-less match skipped: {e}")
 

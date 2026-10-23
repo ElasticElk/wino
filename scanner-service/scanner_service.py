@@ -5,6 +5,7 @@ Main entry point. Reads barcodes, checks the toggle switch, and manages
 wine inventory via the Wine Cellar API. Sends notifications via Telegram.
 """
 
+import logging
 import threading
 import time
 
@@ -12,7 +13,9 @@ import yaml
 
 from hardware.barcode_reader import create_reader
 from hardware.gpio_controls import ScanMode, create_controls
-from integrations.grok_vision import GrokVisionAPI, merge_wine_data, read_barcode_local
+from integrations.grok_vision import (
+    GrokVisionAPI, merge_wine_data, read_barcode_local, log_barcode_engines,
+)
 from integrations.open_food_facts import OpenFoodFactsAPI
 from integrations.telegram_bot import TelegramBotHandler, TelegramNotifier
 from integrations.wine_cellar_api import WineCellarAPI
@@ -245,6 +248,11 @@ def _make_photo_handler(grok, off, store):
 
 def main():
     config = load_config()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    log_barcode_engines()
 
     # Init components
     reader = create_reader(config)

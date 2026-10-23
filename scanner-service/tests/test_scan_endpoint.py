@@ -208,6 +208,35 @@ async def test_unknown_barcode_in_goes_pending(kitchen_pi):
     assert any(BARCODE in str(k) for k in server.pending_store)
 
 
+class ContinoOFF:
+    def lookup(self, barcode):
+        return {"name": "Contino Rioja", "producer": "Viñedos Del Contino"}
+
+
+@pytest.mark.asyncio
+async def test_unknown_barcode_suggests_barcode_less_existing_wine(kitchen_pi):
+    api, notifier = kitchen_pi
+    api.wines = []
+    api.all_wines = [
+        {"id": 97, "name": "Contino Rioja", "producer": "Viñedos del Contino",
+         "barcode": "8410591003359"},
+        {"id": 67, "name": "Contino Reserva 2021", "producer": "Viñedos del Contino",
+         "barcode": ""},
+        {"id": 52, "name": "Calamin Grand Cru Epesses",
+         "producer": "Pierre Fonjallaz", "barcode": ""},
+    ]
+    server.off = ContinoOFF()
+
+    result = await handle_scan(ScanRequest(barcode=BARCODE, mode="in", api_key=KEY))
+
+    assert result.status == "unknown"
+    kind, barcode, off_data, suggested = notifier.calls[0]
+    assert kind == "new_wine"
+    assert barcode == BARCODE
+    assert off_data["name"] == "Contino Rioja"
+    assert [w["id"] for w in suggested] == [67]
+
+
 @pytest.mark.asyncio
 async def test_ambiguous_barcode_asks_telegram(kitchen_pi):
     api, notifier = kitchen_pi

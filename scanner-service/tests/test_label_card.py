@@ -24,8 +24,11 @@ from integrations.telegram_bot import (
     ADD_ANOTHER_PHOTO,
     ADD_PHOTO_INFO,
     JUST_LOOKING_NOTE,
+    PENDING_TIMEOUT_SECONDS,
     REFS_PENDING_NOTE,
     RESEND_PHOTO,
+    SIDE_PHOTO_GONE,
+    UNREADABLE_LABEL,
     VIEW_WINE,
     BrowseSession,
     TelegramBotHandler,
@@ -41,6 +44,7 @@ from integrations.telegram_bot import (
     find_existing_wines,
     merge_front_back,
     proposed_wine_update,
+    wines_to_link,
 )
 
 LABEL = {
@@ -139,6 +143,31 @@ async def test_label_card_gains_ratings_from_the_live_lookup():
     assert "92" in final and "4.1" in final
     assert REFS_PENDING_NOTE.strip() not in final
     assert "Old Vine Chenin Blanc" in final
+
+
+@pytest.mark.asyncio
+async def test_unnamed_label_does_not_lookup_and_asks_for_a_clearer_photo():
+    """A None/empty Grok name used to POST /api/references/lookup/ and 400."""
+    api = MagicMock()
+    api.household_id = 1
+    api.list_all_wines.return_value = []
+    handler = _handler(api)
+    for name in (None, "", "  "):
+        status_msg = _status_msg()
+        await handler._handle_triage_label(status_msg, {"type": "label", "name": name})
+        await _drain()
+        api.lookup_references.assert_not_called()
+        assert status_msg.edit_text.call_args.args[0] == UNREADABLE_LABEL
+        assert status_msg.edit_text.call_args.kwargs.get("reply_markup") is None
+        assert not any(str(k).startswith("_label_") for k in handler.pending_store)
+
+    status_msg = _status_msg()
+    await handler._show_barcode_label_confirm(
+        status_msg, {"type": "label", "name": None}, "8411543235217", api,
+    )
+    await _drain()
+    api.lookup_references.assert_not_called()
+    assert status_msg.edit_text.call_args.args[0] == UNREADABLE_LABEL
 
 
 @pytest.mark.asyncio
@@ -940,9 +969,12 @@ def test_apply_vote_choice_keeps_other_buttons():
 
 
 def test_needs_references_only_when_a_rating_is_missing():
-    assert _needs_references({"critic_score": None, "vivino_rating": None})
-    assert _needs_references({"critic_score": 92, "vivino_rating": None})
-    assert not _needs_references({"critic_score": 92, "vivino_rating": 4.1})
+    assert _needs_references({"name": "Chenin", "critic_score": None, "vivino_rating": None})
+    assert _needs_references({"name": "Chenin", "critic_score": 92, "vivino_rating": None})
+    assert not _needs_references({"name": "Chenin", "critic_score": 92, "vivino_rating": 4.1})
+    assert not _needs_references({"name": None, "critic_score": None, "vivino_rating": None})
+    assert not _needs_references({"name": "", "critic_score": None})
+    assert not _needs_references({"name": "  ", "critic_score": None})
 
 
 def test_stored_references_win_over_the_vision_guess():
@@ -1220,6 +1252,21 @@ def test_match_barcode_less_wine_ignores_wines_that_already_have_a_barcode():
     assert match["id"] == 67
 
 
+def test_wines_to_link_uses_find_existing_and_skips_barcoded():
+    wines = [
+        {"id": 97, "name": "Contino Rioja", "producer": "Viñedos del Contino",
+         "barcode": "8410591003359"},
+        {"id": 67, "name": "Contino Reserva 2021", "producer": "Viñedos del Contino",
+         "barcode": ""},
+        {"id": 52, "name": "Calamin Grand Cru Epesses",
+         "producer": "Pierre Fonjallaz", "barcode": ""},
+    ]
+    hits = wines_to_link(
+        {"name": "Contino Rioja", "producer": "Viñedos Del Contino"}, wines,
+    )
+    assert [w["id"] for w in hits] == [67]
+
+
 def test_invalid_12_digit_barcode_is_not_padded_as_upc_a():
     from integrations.barcodes import normalise_barcode
     assert normalise_barcode("506558704244") == "506558704244"
@@ -1252,6 +1299,72 @@ async def test_label_on_unknown_barcode_asks_to_link_barcode_less_wine():
     ]
     assert any(t.startswith("Yes, link") for t in labels)
     assert "No, new wine" in labels
+
+
+@pytest.mark.asyncio
+async def test_barcode_confirm_does_not_offer_a_wine_that_already_has_a_barcode():
+    api = MagicMock()
+    api.household_id = 1
+    api.list_all_wines.return_value = [
+        {"id": 97, "name": "Contino Rioja", "producer": "Viñedos del Contino",
+         "barcode": "8410591003359", "stock_count": 1},
+        {"id": 67, "name": "Contino Reserva 2021", "producer": "Viñedos del Contino",
+         "barcode": "", "stock_count": 2},
+        {"id": 52, "name": "Calamin Grand Cru Epesses",
+         "producer": "Pierre Fonjallaz", "barcode": "", "stock_count": 1},
+    ]
+    handler = _handler(api)
+    status_msg = _status_msg()
+    grok = {
+        "type": "label", "name": "Contino Rioja",
+        "producer": "Viñedos Del Contino",
+        "vintage": 2019, "wine_type": "RE", "country": "ES",
+    }
+    await handler._show_barcode_label_confirm(status_msg, grok, "4000000000000", api)
+    await _drain()
+    text = status_msg.edit_text.call_args.args[0]
+    assert "Contino Reserva 2021" in text
+    assert "Calamin" not in text
+    labels = [
+        b.text
+        for row in status_msg.edit_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    assert any("Yes, link" in t and "Contino Reserva" in t for t in labels)
+    assert not any("8410591003359" in t for t in labels)
+
+
+@pytest.mark.asyncio
+async def test_unknown_barcode_photo_suggests_existing_via_find_existing_wines():
+    from unittest.mock import patch
+
+    api = MagicMock()
+    api.household_id = 1
+    api.lookup_barcode.return_value = []
+    api.list_all_wines.return_value = [
+        {"id": 97, "name": "Contino Rioja", "producer": "Viñedos del Contino",
+         "barcode": "8410591003359"},
+        {"id": 67, "name": "Contino Reserva 2021", "producer": "Viñedos del Contino",
+         "barcode": ""},
+        {"id": 52, "name": "Calamin Grand Cru Epesses",
+         "producer": "Pierre Fonjallaz", "barcode": ""},
+    ]
+    handler = _handler(api)
+    status_msg = _status_msg()
+    with patch("integrations.open_food_facts.OpenFoodFactsAPI") as off:
+        off.return_value.lookup.return_value = {
+            "name": "Contino Rioja", "producer": "Viñedos Del Contino",
+        }
+        await handler._handle_barcode_result(status_msg, "4000000000000")
+    text = status_msg.edit_text.call_args.args[0]
+    assert "Contino Reserva 2021" in text
+    assert "Calamin" not in text
+    labels = [
+        b.text
+        for row in status_msg.edit_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    assert any(t.startswith("Yes, link") for t in labels)
 
 
 @pytest.mark.asyncio
@@ -1767,7 +1880,7 @@ def test_reserva_without_producer_offers_cepa_lebrel_not_other_vintages():
 
 
 @pytest.mark.asyncio
-async def test_classification_name_confirm_card_asks_is_this_one_of_these():
+async def test_classification_name_confirm_card_says_couldnt_read_the_name():
     api = MagicMock()
     api.household_id = 1
     api.list_all_wines.return_value = [CEPA]
@@ -1782,14 +1895,15 @@ async def test_classification_name_confirm_card_asks_is_this_one_of_these():
     )
     await _drain()
     text = status_msg.edit_text.call_args.args[0]
-    assert "We couldn't read the name, is this one of these?" in text
+    assert "We couldn't read the name." in text
     assert "Who makes this?" in text
     labels = [
         b.text
         for row in status_msg.edit_text.call_args.kwargs["reply_markup"].inline_keyboard
         for b in row
     ]
-    assert any("Cepa Lebrel" in t for t in labels)
+    assert not any("Cepa Lebrel" in t for t in labels)
+    assert not any(t.startswith("Yes, link") for t in labels)
 
 
 @pytest.mark.asyncio
@@ -2183,6 +2297,41 @@ async def test_front_and_back_photos_create_one_wine_with_both_images():
     types = [c.kwargs.get("image_type") for c in api.upload_wine_image.call_args_list]
     assert types == ["LF", "LB"]
     assert api.upload_wine_image.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_attach_side_photo_refuses_missing_expired_or_confirmed():
+    api = MagicMock()
+    api.household_id = 1
+    handler = _handler(api)
+    handler._analyse_photo_bytes = AsyncMock()
+    status = _status_msg()
+    update = MagicMock()
+    update.effective_chat.id = 4242
+    update.message.reply_text = AsyncMock()
+
+    await handler._attach_side_photo(status, "_label_1", b"BACK", update)
+    assert status.edit_text.call_args.args[0] == SIDE_PHOTO_GONE
+    handler._analyse_photo_bytes.assert_not_awaited()
+
+    handler.pending_store["_label_1"] = {
+        "grok_merged": {"name": "Old Vine Chenin Blanc"},
+        "time": time.time() - PENDING_TIMEOUT_SECONDS - 1,
+    }
+    status.edit_text.reset_mock()
+    await handler._attach_side_photo(status, "_label_1", b"BACK", update)
+    assert status.edit_text.call_args.args[0] == SIDE_PHOTO_GONE
+    handler._analyse_photo_bytes.assert_not_awaited()
+
+    handler.pending_store["_label_1"] = {
+        "grok_merged": {"name": "Old Vine Chenin Blanc"},
+        "time": time.time(),
+        "wine_id": 9,
+    }
+    status.edit_text.reset_mock()
+    await handler._attach_side_photo(status, "_label_1", b"BACK", update)
+    assert status.edit_text.call_args.args[0] == SIDE_PHOTO_GONE
+    handler._analyse_photo_bytes.assert_not_awaited()
 
 
 @pytest.mark.asyncio
