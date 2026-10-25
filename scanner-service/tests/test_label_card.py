@@ -23,6 +23,7 @@ from telegram.error import BadRequest
 from integrations.telegram_bot import (
     ADD_ANOTHER_PHOTO,
     ADD_PHOTO_INFO,
+    DRANK_THIS_LABEL,
     JUST_LOOKING_NOTE,
     PENDING_TIMEOUT_SECONDS,
     REFS_PENDING_NOTE,
@@ -2405,7 +2406,9 @@ async def test_added_card_has_view_wine_add_photo_and_web_url():
     tap, query = _tap(handler, _cb("grok", barcode="_label_1"))
     await handler._handle_callback(tap, MagicMock())
     text = query.edit_message_text.call_args.args[0]
+    assert "Open in Whiney Wino" in text
     assert "https://cellar.test/wine/200" in text
+    assert '<a href="https://cellar.test/wine/200">' in text
     labels = [
         b.text
         for row in query.edit_message_text.call_args.kwargs["reply_markup"].inline_keyboard
@@ -2436,7 +2439,9 @@ def test_detail_card_has_add_photo_info_and_web_url():
         "wine_type": "WH", "stock_count": 1, "items": [],
     }
     text, kb = handler._build_detail_card(wine, api=api)
+    assert "Open in Whiney Wino" in text
     assert "https://cellar.test/wine/109" in text
+    assert '<a href="https://cellar.test/wine/109">' in text
     labels = [b.text for row in kb.inline_keyboard for b in row]
     assert ADD_PHOTO_INFO in labels
     add = next(b for row in kb.inline_keyboard for b in row if b.text == ADD_PHOTO_INFO)
@@ -2543,3 +2548,163 @@ async def test_add_photo_info_starts_edit_flow():
     assert "Edit:" in text
     assert "L'Originelle" in text
     assert "_edit_200" in handler.pending_store
+
+
+EXISTING_CHENIN = {
+    "id": 68, "name": "Old Vine Chenin Blanc", "producer": "Bosman",
+    "vintage": 2020, "stock_count": 2, "barcode": "6001246543210",
+    "items": [{"storage": "Fridge", "item_id": 4}],
+}
+
+
+@pytest.mark.asyncio
+async def test_existing_wine_card_offers_drank_this():
+    api = MagicMock()
+    api.household_id = 1
+    api.list_all_wines.return_value = [EXISTING_CHENIN]
+    api.lookup_references.return_value = {"updated": False}
+    handler = _handler(api)
+    status = _status_msg()
+    await handler._handle_triage_label(status, dict(LABEL), photo_data=b"FRONT")
+    await _drain()
+    labels = [
+        b.text
+        for row in status.edit_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    assert any(t.startswith("✏️ Update") for t in labels)
+    assert DRANK_THIS_LABEL in labels
+    drank = next(
+        b
+        for row in status.edit_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for b in row
+        if b.text == DRANK_THIS_LABEL
+    )
+    assert "a:dx," in drank.callback_data
+    assert "w:68" in drank.callback_data
+
+
+@pytest.mark.asyncio
+async def test_match_card_offers_drank_this():
+    neighbour = {
+        "id": 70, "name": "Old Vine Chenin", "producer": "Bosman Family",
+        "vintage": 2020, "stock_count": 1, "barcode": "",
+        "items": [{"storage": "Cellar", "item_id": 8}],
+    }
+    api = MagicMock()
+    api.household_id = 1
+    api.list_all_wines.return_value = [EXISTING_CHENIN, neighbour]
+    api.lookup_references.return_value = {"updated": False}
+    handler = _handler(api)
+    status = _status_msg()
+    await handler._handle_triage_label(status, dict(LABEL), photo_data=b"FRONT")
+    await _drain()
+    text = status.edit_text.call_args.args[0]
+    assert "Is this one of these" in text or "already in your cellar" in text
+    labels = [
+        b.text
+        for row in status.edit_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    assert DRANK_THIS_LABEL in labels
+
+
+@pytest.mark.asyncio
+async def test_label_add_offers_existing_wine_instead_of_creating():
+    api = MagicMock()
+    api.household_id = 1
+    api.list_all_wines.return_value = [EXISTING_CHENIN]
+    handler = _handler(api)
+    handler.pending_store["_label_3"] = {
+        "grok_merged": dict(LABEL),
+        "time": time.time(),
+        "household_id": 1,
+        "barcode": "_label_3",
+    }
+    update, query = _grok_query("_label_3")
+    await handler._handle_callback(update, MagicMock())
+    api.create_wine.assert_not_called()
+    text = query.edit_message_text.call_args.args[0]
+    assert "Old Vine Chenin" in text
+    labels = [
+        b.text
+        for row in query.edit_message_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    assert any(t.startswith("Yes, that's") for t in labels)
+
+
+@pytest.mark.asyncio
+async def test_label_add_uses_existing_wine_when_create_returns_409():
+    api = MagicMock()
+    api.household_id = 1
+    api.list_all_wines.return_value = []
+    api.create_wine.return_value = {
+        "error": "duplicate_wine", "id": 68, "name": "Old Vine Chenin Blanc",
+    }
+    api.list_storages.return_value = [
+        {"id": 2, "name": "Fridge", "bottles": 1, "drawers": 0},
+        {"id": 3, "name": "Kitchen", "bottles": 0, "drawers": 0},
+    ]
+    handler = _handler(api)
+    handler.pending_store["_label_4"] = {
+        "grok_merged": dict(LABEL),
+        "time": time.time(),
+        "household_id": 1,
+        "barcode": "_label_4",
+    }
+    update, query = _grok_query("_label_4")
+    await handler._handle_callback(update, MagicMock())
+    api.create_wine.assert_called_once()
+    text = query.edit_message_text.call_args.args[0]
+    assert "Where are you storing" in text or "Old Vine Chenin" in text
+    assert "Error creating wine" not in text
+
+
+@pytest.mark.asyncio
+async def test_drank_this_on_existing_wine_removes_from_its_only_storage():
+    api = MagicMock()
+    api.household_id = 1
+    api.get_wine_detail.return_value = EXISTING_CHENIN
+    api.remove_stock.return_value = {
+        "wine_name": "Old Vine Chenin Blanc", "stock_count": 1, "item_id": 4,
+    }
+    handler = _handler(api)
+    tap, query = _tap(handler, _cb("dx", wine_id=68))
+    await handler._handle_callback(tap, MagicMock())
+    api.remove_stock.assert_called_once()
+    assert api.remove_stock.call_args.args[0] == 68
+    assert api.remove_stock.call_args.kwargs.get("storage_name") == "Fridge"
+    text = query.edit_message_text.call_args.args[0]
+    assert "Drank" in text
+
+
+@pytest.mark.asyncio
+async def test_drank_this_asks_which_storage_when_wine_is_in_two():
+    split = {
+        **EXISTING_CHENIN,
+        "items": [
+            {"storage": "Fridge", "item_id": 4},
+            {"storage": "Cellar", "item_id": 9},
+        ],
+    }
+    api = MagicMock()
+    api.household_id = 1
+    api.get_wine_detail.return_value = split
+    api.list_storages.return_value = [
+        {"id": 2, "name": "Fridge"},
+        {"id": 3, "name": "Cellar"},
+    ]
+    handler = _handler(api)
+    tap, query = _tap(handler, _cb("dx", wine_id=68))
+    await handler._handle_callback(tap, MagicMock())
+    api.remove_stock.assert_not_called()
+    text = query.edit_message_text.call_args.args[0]
+    assert "fridge" in text.lower() or "Fridge" in text
+    labels = [
+        b.text
+        for row in query.edit_message_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    assert "Fridge" in labels
+    assert "Cellar" in labels

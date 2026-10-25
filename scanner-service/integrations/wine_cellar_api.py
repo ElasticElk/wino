@@ -169,6 +169,16 @@ class WineCellarAPI:
         resp = self.session.post(
             f"{self.base_url}/api/wines/", json=wine_data, timeout=10,
         )
+        if resp.status_code == 409:
+            body = {}
+            try:
+                body = resp.json() if resp.content else {}
+            except ValueError:
+                body = {}
+            if isinstance(body, dict) and body.get("id"):
+                body.setdefault("error", "duplicate_wine")
+                logger.info("[API] create_wine duplicate id=%s", body.get("id"))
+                return body
         if resp.status_code >= 400:
             logger.error(f"[API] create_wine failed: {resp.status_code} {resp.text}")
         resp.raise_for_status()
