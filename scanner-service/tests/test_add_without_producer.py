@@ -131,6 +131,8 @@ def test_plausible_producer_rejects_questions_and_long_text():
     assert not _plausible_producer("one two three four five")
     assert not _plausible_producer("Confirm")
     assert not _plausible_producer("add to cellar")
+    assert not _plausible_producer("Drank this")
+    assert not _plausible_producer("gedrink")
 
 
 @pytest.mark.asyncio

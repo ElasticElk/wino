@@ -3,7 +3,7 @@ from datetime import timedelta
 
 from django.contrib.auth.decorators import login_not_required
 from django.core.cache import cache
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Exists, F, OuterRef, Q
 from django.http import FileResponse
 from django.urls import reverse
@@ -27,7 +27,7 @@ from wine_cellar.apps.wine.achievements import (
     month_tally,
     serialize_achievement,
 )
-from wine_cellar.apps.wine.models import CellarAchievement, ImageType, Wine, WineImage
+from wine_cellar.apps.wine.models import CellarAchievement, ImageType, Size, Wine, WineImage
 from wine_cellar.apps.wine.taste import rebuild_snapshot
 
 import logging
@@ -714,6 +714,28 @@ class WineStockView(ScannerAPIView):
         )
 
 
+def _existing_wine_for_create(household, validated, user):
+    """The row the unique-wine-per-household constraint would collide with."""
+    size_obj = None
+    size_litres = validated.get("size")
+    if size_litres is not None:
+        size_obj = Size.objects.filter(name=size_litres, user=user).first()
+    match = Wine.objects.filter(
+        household=household,
+        name=validated.get("name"),
+        wine_type=validated.get("wine_type", "RE"),
+        abv=validated.get("abv"),
+        size=size_obj,
+        vintage=validated.get("vintage"),
+        country=validated.get("country", "CH"),
+    ).first()
+    if match is not None:
+        return match
+    return Wine.objects.filter(
+        household=household, name=validated.get("name") or "",
+    ).first()
+
+
 class WineCreateView(ScannerAPIView):
     def post(self, request):
         household = self.get_household(request)
@@ -721,7 +743,25 @@ class WineCreateView(ScannerAPIView):
             data=request.data, context={"request": request, "household": household}
         )
         serializer.is_valid(raise_exception=True)
-        wine = serializer.save()
+        try:
+            wine = serializer.save()
+        except IntegrityError:
+            existing = _existing_wine_for_create(
+                household, serializer.validated_data, request.user,
+            )
+            if existing is None:
+                raise
+            return Response(
+                {
+                    "error": "duplicate_wine",
+                    "id": existing.id,
+                    "name": existing.name,
+                    "vintage": existing.vintage,
+                    "barcode": existing.barcode,
+                    "url": request.build_absolute_uri(f"/wine/{existing.id}"),
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
 
         return Response(
             {

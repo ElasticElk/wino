@@ -15,6 +15,7 @@ from integrations.chat_models import _responses_text, _trailing_json
 logger = logging.getLogger(__name__)
 
 GROK_MODEL = "grok-4.3"
+TRIAGE_TIMEOUT = 60
 
 # Italian and Australian labels are often set in capitals. A cellar entry is not.
 NAME_STYLE = (
@@ -617,49 +618,59 @@ class GrokVisionAPI:
             "temperature": 0.0,
         }
 
-        try:
-            resp = requests.post(
-                f"{self.base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=30,
-            )
-            resp.raise_for_status()
-            result = resp.json()
+        last_error = None
+        for attempt in range(2):
+            try:
+                resp = requests.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=TRIAGE_TIMEOUT,
+                )
+                resp.raise_for_status()
+                result = resp.json()
 
-            content = result["choices"][0]["message"]["content"]
-            content = content.strip()
-            if content.startswith("```"):
-                content = content.split("\n", 1)[1]
-                content = content.rsplit("```", 1)[0]
+                content = result["choices"][0]["message"]["content"]
                 content = content.strip()
+                if content.startswith("```"):
+                    content = content.split("\n", 1)[1]
+                    content = content.rsplit("```", 1)[0]
+                    content = content.strip()
 
-            data = json.loads(content)
-            photo_type = data.get("type", "other")
-            logger.info(f"Grok triage: type={photo_type}")
+                data = json.loads(content)
+                photo_type = data.get("type", "other")
+                logger.info(f"Grok triage: type={photo_type}")
 
-            if photo_type == "barcode":
-                from integrations.barcodes import accepted_barcode
-                digits = accepted_barcode(data.get("barcode"))
-                if digits:
-                    data["barcode"] = digits
-                    return data
-                logger.warning(f"Grok barcode result not valid: {data.get('barcode')!r}")
-                return {"type": "other"}
+                if photo_type == "barcode":
+                    from integrations.barcodes import accepted_barcode
+                    digits = accepted_barcode(data.get("barcode"))
+                    if digits:
+                        data["barcode"] = digits
+                        return data
+                    logger.warning(f"Grok barcode result not valid: {data.get('barcode')!r}")
+                    return {"type": "other"}
 
-            if photo_type == "label":
-                data = polish_extracted_fields(data)
-            return data
+                if photo_type == "label":
+                    data = polish_extracted_fields(data)
+                return data
 
-        except requests.RequestException as e:
-            logger.error(f"Grok triage failed: {e}")
-            return None
-        except (json.JSONDecodeError, KeyError, IndexError) as e:
-            logger.error(f"Failed to parse Grok triage response: {e}")
-            return None
+            except requests.Timeout as e:
+                last_error = e
+                logger.error(f"Grok triage timed out (attempt {attempt + 1}/2): {e}")
+                if attempt == 0:
+                    continue
+                return None
+            except requests.RequestException as e:
+                logger.error(f"Grok triage failed: {e}")
+                return None
+            except (json.JSONDecodeError, KeyError, IndexError) as e:
+                logger.error(f"Failed to parse Grok triage response: {e}")
+                return None
+        logger.error(f"Grok triage failed: {last_error}")
+        return None
 
 
     def analyse_wine_list(self, photo_bytes: bytes, cellar_summary: str = "",
