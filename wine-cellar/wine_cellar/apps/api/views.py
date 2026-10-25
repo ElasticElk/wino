@@ -744,7 +744,8 @@ class WineCreateView(ScannerAPIView):
         )
         serializer.is_valid(raise_exception=True)
         try:
-            wine = serializer.save()
+            with transaction.atomic():
+                wine = serializer.save()
         except IntegrityError:
             existing = _existing_wine_for_create(
                 household, serializer.validated_data, request.user,

@@ -14,6 +14,7 @@ PAYLOAD = {
     "wine_type": "WH",
     "country": "ZA",
     "abv": 13.5,
+    "size": 0.75,
 }
 
 
