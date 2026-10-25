@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 
 from telegram import (
     Bot,
@@ -62,6 +63,8 @@ PHOTO_TRIAGE_FAILED = (
     "a closer, brighter shot of the label usually works."
 )
 DRANK_THIS_LABEL = "\U0001F377 Drank this"
+WINE_SITE_LINK = "Open in Whiney Wino"
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
 
 
 def parse_typed_stock(text: str) -> tuple[str, str] | None:
@@ -877,8 +880,27 @@ def _callback_status(query):
     return _Status()
 
 
+def _public_web_base(api) -> str:
+    """Public site URL for Telegram links; empty when unset or loopback.
+
+    WineCellarAPI falls back to the internal API base_url when web_url is
+    missing, so a phone would otherwise see http://127.0.0.1:8000/wine/5.
+    """
+    raw = getattr(api, "web_url", None)
+    if raw is None:
+        return ""
+    base = str(raw).strip().rstrip("/")
+    if not base:
+        return ""
+    parsed = urlparse(base if "://" in base else f"https://{base}")
+    host = (parsed.hostname or "").rstrip(".").lower()
+    if not host or host in _LOOPBACK_HOSTS:
+        return ""
+    return base
+
+
 def _wine_url(api, wine_id) -> str:
-    base = (getattr(api, "web_url", None) or "").rstrip("/")
+    base = _public_web_base(api)
     if not base or not wine_id:
         return ""
     return f"{base}/wine/{wine_id}"
@@ -893,9 +915,13 @@ def _wine_followup_rows(wine_id) -> list:
 
 def _append_wine_url(text: str, api, wine_id) -> str:
     url = _wine_url(api, wine_id)
-    if not url or url in (text or ""):
+    if not url:
         return text
-    return f"{text.rstrip()}\n\n{url}"
+    href = html.escape(url, quote=True)
+    link = f'<a href="{href}">{html.escape(WINE_SITE_LINK)}</a>'
+    if link in (text or "") or url in (text or ""):
+        return text
+    return f"{text.rstrip()}\n\n{link}"
 
 REFERENCE_FIELDS = (
     "critic_score", "vivino_rating", "category_rating",
@@ -3169,13 +3195,16 @@ class TelegramBotHandler:
             )
             return
 
+        # Drink/remove-one-of-my-X must beat country/region browse and the
+        # wine-detail lookup — those used to list every Italian wine or open
+        # a card for "I drank one of my barolos" / "Remove one of my barolos".
+        if await self._maybe_typed_stock(update, context, text):
+            return
+
         if await self._maybe_correct_winelist_text(update, text):
             return
 
         if await self._maybe_typed_add(update, context, text):
-            return
-
-        if await self._maybe_typed_stock(update, context, text):
             return
 
         if await self._maybe_take_producer(update, text, context):
@@ -3319,6 +3348,9 @@ class TelegramBotHandler:
         await self._do_search(update, query)
 
     async def _do_search(self, update: Update, query: str):
+        if parse_typed_stock(query):
+            if await self._maybe_typed_stock(update, None, query):
+                return
         api = self._get_api(update)
         try:
             wines = api.search_wines(query)
@@ -4018,9 +4050,7 @@ class TelegramBotHandler:
                 if drawer is not None:
                     loc += f", Drawer {drawer}"
                 text += loc + "\n"
-        url = _wine_url(api or self.api, wine_id)
-        if url:
-            text += f"\n{url}"
+        text = _append_wine_url(text, api or self.api, wine_id)
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("\U0001F4E5 +1", callback_data=_cb("in", wine_id=wine_id)),

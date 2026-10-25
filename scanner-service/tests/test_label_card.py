@@ -2406,7 +2406,9 @@ async def test_added_card_has_view_wine_add_photo_and_web_url():
     tap, query = _tap(handler, _cb("grok", barcode="_label_1"))
     await handler._handle_callback(tap, MagicMock())
     text = query.edit_message_text.call_args.args[0]
+    assert "Open in Whiney Wino" in text
     assert "https://cellar.test/wine/200" in text
+    assert '<a href="https://cellar.test/wine/200">' in text
     labels = [
         b.text
         for row in query.edit_message_text.call_args.kwargs["reply_markup"].inline_keyboard
@@ -2437,7 +2439,9 @@ def test_detail_card_has_add_photo_info_and_web_url():
         "wine_type": "WH", "stock_count": 1, "items": [],
     }
     text, kb = handler._build_detail_card(wine, api=api)
+    assert "Open in Whiney Wino" in text
     assert "https://cellar.test/wine/109" in text
+    assert '<a href="https://cellar.test/wine/109">' in text
     labels = [b.text for row in kb.inline_keyboard for b in row]
     assert ADD_PHOTO_INFO in labels
     add = next(b for row in kb.inline_keyboard for b in row if b.text == ADD_PHOTO_INFO)

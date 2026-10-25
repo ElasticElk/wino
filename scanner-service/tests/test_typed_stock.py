@@ -15,17 +15,36 @@ from integrations.telegram_bot import (
 
 BAROLO = {
     "id": 11, "name": "Barolo Cannubi 2018", "producer": "Brezza",
+    "country": "IT", "region": "Piedmont",
     "stock_count": 2, "items": [{"storage": "Fridge", "item_id": 4}],
 }
 BAROLO_B = {
     "id": 12, "name": "Barolo Brunate 2016", "producer": "Vietti",
+    "country": "IT", "region": "Piedmont",
     "stock_count": 1, "items": [{"storage": "Cellar", "item_id": 5}],
+}
+BAROLO_C = {
+    "id": 5, "name": "Barolo Terre del Barolo 2021", "producer": "Terre del Barolo",
+    "country": "IT", "region": "Piedmont",
+    "stock_count": 2, "items": [{"storage": "Big Fridge", "item_id": 6}],
+}
+CHIANTI = {
+    "id": 20, "name": "Chianti Classico Riserva 2020", "producer": "Antinori",
+    "country": "IT", "region": "Tuscany",
+    "stock_count": 1, "items": [{"storage": "Fridge", "item_id": 8}],
+}
+SASSICAIA = {
+    "id": 21, "name": "Sassicaia 2019", "producer": "Tenuta San Guido",
+    "country": "IT", "region": "Tuscany",
+    "stock_count": 1, "items": [{"storage": "Cellar", "item_id": 9}],
 }
 CHENIN = {
     "id": 9, "name": "Old Vine Chenin Blanc", "producer": "Bosman",
     "stock_count": 1,
     "items": [{"storage": "Fridge", "item_id": 3}],
 }
+
+ITALIANS = [BAROLO, BAROLO_B, BAROLO_C, CHIANTI, SASSICAIA]
 
 
 def _handler(api):
@@ -102,27 +121,107 @@ async def test_typed_drank_this_after_a_match_card_removes_stock():
     assert "Old Vine Chenin" in text
 
 
-@pytest.mark.asyncio
-async def test_typed_drank_one_of_my_barolos_asks_which_then_confirms():
-    api = MagicMock()
-    api.household_id = 1
-    api.wines_in_stock.return_value = [BAROLO, BAROLO_B]
-    handler = _handler(api)
-    update = _text_update("I drank one of my barolos")
+def _spy_fallthrough(handler):
+    """Country browse, search listings and detail cards must not run."""
+    handler._do_search = AsyncMock(wraps=handler._do_search)
+    handler._cmd_stock = AsyncMock(wraps=handler._cmd_stock)
+    handler._build_detail_card = MagicMock(wraps=handler._build_detail_card)
+    handler._router = MagicMock()
+    handler._router.handle_text = AsyncMock(return_value=True)
+    return handler
+
+
+def _pick_labels(update):
+    markup = update.message.reply_text.call_args.kwargs["reply_markup"]
+    return [b.text for row in markup.inline_keyboard for b in row]
+
+
+def _pick_buttons(update):
+    markup = update.message.reply_text.call_args.kwargs["reply_markup"]
+    return [b for row in markup.inline_keyboard for b in row]
+
+
+async def _assert_barolo_picks_then_confirm(handler, api, phrase):
+    api.wines_in_stock.return_value = list(ITALIANS)
+    api.search_wines.return_value = list(ITALIANS)
+    api.get_wine_detail.return_value = BAROLO
+    handler = _spy_fallthrough(handler)
+    update = _text_update(phrase)
     await handler._unknown_text(update, MagicMock())
+
     api.remove_stock.assert_not_called()
+    api.search_wines.assert_not_called()
+    handler._do_search.assert_not_called()
+    handler._cmd_stock.assert_not_called()
+    handler._build_detail_card.assert_not_called()
+    handler._router.handle_text.assert_not_called()
+
     text = update.message.reply_text.call_args.args[0]
     assert "Which one" in text
-    labels = [
-        b.text
-        for row in update.message.reply_text.call_args.kwargs["reply_markup"].inline_keyboard
-        for b in row
-    ]
+    labels = _pick_labels(update)
     assert any("Cannubi" in t for t in labels)
     assert any("Brunate" in t for t in labels)
-    assert all("a:dc," in b.callback_data or b.text == "❌ Cancel"
-               for row in update.message.reply_text.call_args.kwargs["reply_markup"].inline_keyboard
-               for b in row)
+    assert any("Terre del Barolo" in t for t in labels)
+    assert not any("Chianti" in t for t in labels)
+    assert not any("Sassicaia" in t for t in labels)
+    buttons = _pick_buttons(update)
+    assert all("a:dc," in b.callback_data or b.text == "❌ Cancel" for b in buttons)
+    picked = next(b for b in buttons if "w:11" in b.callback_data)
+
+    query = AsyncMock()
+    query.data = picked.callback_data
+    query.message = MagicMock()
+    query.message.chat_id = 4242
+    query.message.message_id = 7
+    tap = MagicMock()
+    tap.callback_query = query
+    tap.effective_chat.id = 4242
+    await handler._handle_callback(tap, MagicMock())
+    api.remove_stock.assert_not_called()
+    confirm = query.edit_message_text.call_args.args[0]
+    assert "Remove 1" in confirm
+    assert "Cannubi" in confirm
+    confirm_labels = [
+        b.text
+        for row in query.edit_message_text.call_args.kwargs["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    assert any("drank it" in t.lower() for t in confirm_labels)
+
+
+@pytest.mark.asyncio
+async def test_i_drank_one_of_my_barolos_picks_then_confirms():
+    api = MagicMock()
+    api.household_id = 1
+    await _assert_barolo_picks_then_confirm(
+        _handler(api), api, "I drank one of my barolos",
+    )
+
+
+@pytest.mark.asyncio
+async def test_remove_one_of_my_barolos_picks_then_confirms():
+    api = MagicMock()
+    api.household_id = 1
+    await _assert_barolo_picks_then_confirm(
+        _handler(api), api, "Remove one of my barolos",
+    )
+
+
+@pytest.mark.asyncio
+async def test_do_search_does_not_list_drank_one_of_my_barolos():
+    api = MagicMock()
+    api.household_id = 1
+    api.wines_in_stock.return_value = list(ITALIANS)
+    api.search_wines.return_value = list(ITALIANS)
+    handler = _handler(api)
+    update = _text_update("I drank one of my barolos")
+    await handler._do_search(update, "I drank one of my barolos")
+    api.search_wines.assert_not_called()
+    text = update.message.reply_text.call_args.args[0]
+    assert "Which one" in text
+    labels = _pick_labels(update)
+    assert any("Cannubi" in t for t in labels)
+    assert not any("Chianti" in t for t in labels)
 
 
 @pytest.mark.asyncio
