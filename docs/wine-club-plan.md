@@ -8,7 +8,7 @@ Design for a social layer on Whiney, grounded in the current Django apps and Tel
 
 **Out of scope:** Vivino integration (no public API).
 
-**Revision (Carel):** cellar sharing is a **club-level** policy set by the owner, not a per-member opt-in — joining means you share at that club’s level, and the invite/join card must say so. **Lists** (a “To drink” wishlist, not stock) are in scope; they can ship as an early standalone adoption win and later hook into clubs.
+**Revision (Carel):** cellar sharing is a **club-level** policy set by the owner, not a per-member opt-in — joining means you share at that club’s level, and the invite/join card must say so. **Lists** (a “To drink” wishlist, not stock) are in scope; they can ship as an early standalone adoption win and later hook into clubs. Cellar sharing exists **only inside clubs** — there is no standalone sharing or friends feature. When a household member joins a club that peeks the cellar, other people in that household are **not** given a veto and are **not** told which club (or who joined); they get one gentle heads-up that the cellar is now shared with a club.
 
 ---
 
@@ -27,6 +27,8 @@ A wine club is the opposite social shape: **friends who each have their own cell
 - break `/fridge`, catch-up, scanners, and badges, which all assume one cellar
 
 **Decision:** clubs are a new overlay on `User` / `TelegramUser`. Each membership points at *which household* that person is representing (their default cellar, switchable). Households stay the cellar. Clubs stay the social graph. **Sharing rules live on `Club`, not on `ClubMembership`.** Joining is consent to that club’s current policy.
+
+**No sharing outside clubs.** There is no friends list, follow, public cellar, or “share with this person” toggle. The only way anyone outside a household sees stock (or badges) is by being in a club whose policy says so. A household with no club memberships shares nothing.
 
 ```
 User ──< HouseholdMembership >── Household (cellar, stock, badges, lists)
@@ -60,7 +62,7 @@ User ──< HouseholdMembership >── Household (cellar, stock, badges, lists
 
 - **Thursday reds is set to “summary”.** Alex opens Dewald’s card and sees six Merlots, two Chenins — counts by type and grape. No purchase price, no drawer, no notes. If the owner had picked **full cellar**, he would see the wine list (still no prices or locations). If **none**, members are names and a drink feed only.
 - **Alex is bringing wine.** He can see Dewald already has Merlot covered and bring something else.
-- **Dewald’s partner shares that household.** Peek is the household’s in-stock list, labelled as that cellar, because Dewald joined. The partner did not tap Join. The join card must name the household being shared (open question: notify or veto for the other members).
+- **Dewald’s partner shares that household.** Peek is the household’s in-stock list, labelled as that cellar, because Dewald joined. The partner did not tap Join and has **no veto**. They are **not** told the club’s name or that it was Dewald. They get one gentle DM the first time this cellar becomes visible to any club (wording in §4). If two people from Hillside join the same club, Hillside still appears once.
 
 ### Badges in the club
 
@@ -254,6 +256,23 @@ Club preview cards — **consent is the join tap**, so the policy is on this car
 - **Already a member:** idempotent, like `already_member` on household redeem.
 
 `/club invite cancel` — drop the newest unused club invite for this club (copy `HouseholdInviteCancelView`).
+
+### Household heads-up (not a veto)
+
+When someone joins a club with `cellar_visibility` of `summary` or `full`, other active `TelegramUser`s on that household (everyone except the joiner) get a DM **if this household was not already visible to a club**. No buttons. No club name, no member name, no “Thursday reds”, no “Dewald”. Not sent when the club is feed-only (`none`). Not sent again when a second club is joined or a second household member joins — that would leak “another one.” If every sharing membership later drops away, the next new one may ping once more (same idea as `empty_nudge_sent_at` on `Household`).
+
+Suggested copy (warm, short; HTML via `esc()` only if a household name is interpolated — this draft uses none):
+
+```
+Just so you know — this cellar is now shared
+inside a wine club.
+
+Only people in the club can see it, and only
+what the club allows. Whiney never shares a
+cellar any other way.
+```
+
+That is the whole message. No `/club` (they may not be in one). `/household` is optional if we want a single next step; default is no button so it doesn’t feel like an action they missed. The joiner does not get this; they already saw the consent card.
 
 ### Feed (automatic)
 
@@ -456,7 +475,7 @@ A **club list** (phase 3) is `kind=club`, visible to members at the club’s cel
 4. **Mute** stops feed delivery, not peek and not recording.
 5. **Leave** stops peek, new events **from** and **to** that user. Historical feed lines keep the denormalised name.
 6. **Widening the policy** (none→summary, summary→full, badges off→on) increments `sharing_version` and must not silently expand what already-joined people share. Suggested: DM every member; peek at the *new* level only after they tap Stay (writes `accepted_sharing_version`). Until then they stay visible at the **previous** level (encode previous on the club or treat unacked as `none` for peek — pick one, see §11). Narrowing applies immediately and auto-acks.
-7. **Shared households.** Peek is the whole cellar of `membership.household`, including bottles a partner added. The join card names that household. Other members of that household who are not in the club did not tap Join (see §11).
+7. **Shared households.** Peek is the whole cellar of `membership.household`, including bottles a partner added. The **joiner’s** consent card names that household. Other people in the household are not asked, have no veto, and are not told which club or who joined. They get the one-line heads-up in §4 the first time this cellar is visible to any club. Cellar sharing does not exist outside clubs.
 8. **Staff/global clubs** do not bypass the club policy. Proposed: `kind=global` forces `cellar_visibility=none` (feed and maybe badges only).
 9. API: every club endpoint uses the caller’s `User`, never `X-Household` as the club id. Peek of another member checks the **club** policy and that member’s `accepted_sharing_version`, not a personal share flag.
 10. Cross-household `wine_id` in events is a snapshot aid for the actor’s own undo, not a permission to read that wine.
@@ -606,7 +625,7 @@ The social product, including peek, because the join card is a consent contract.
 | **Notification fatigue** | Drink-by + empty-cellar + badge GIFs already DM people. A chatty club will train them to mute the bot. | Phase 1: one line per open, no badge spam, mute one tap, no peek pings. Later: daily digest if any member is in >2 clubs. |
 | **Privacy leak** | Household is the hard wall. A club peek that reuses `WineInStockView` would ship prices, drawers, comments, critic scores. Join-time consent makes a leak worse (people think they know what they agreed to). | Dedicated serializer; tests that forbidden keys are absent. Policy on the join card must match the serializer. |
 | **Widening after join** | Owner turns summary → full; existing members never tapped that. | `sharing_version` + re-consent DMs. Do not silently expand. |
-| **Partner / shared cellar** | Two `HouseholdMembership`s, one stock. Peek is the whole fridge. Feed is the Telegram actor. Partner may not be in the club. | Join card names the household. Notify other household members (suggested). Veto is an open question. |
+| **Partner / shared cellar** | Two `HouseholdMembership`s, one stock. Peek is the whole fridge. Feed is the Telegram actor. Partner may not be in the club. | Joiner’s consent card names the household. Other members: one anonymous heads-up, no veto, no club/member names. Ping at most once until sharing fully stops. |
 | **To-drink becomes fake stock** | Fastest implementation is a “Wishlist” `Storage` or `StorageItem(deleted=True)`. That pollutes `/fridge`, catch-up, badges, drink-by. | Separate models. Tests that list items never appear in `WineInStockView`. |
 | **Conflating club with household** | Fastest implementation is `kind=club` on `HouseholdInvite` or a household named “Thursday reds”. | New app; code review gate. |
 | **Invite 500 / expiry** | Stated current pain. Clubs that reuse a broken `/start` don’t grow. | Phase 0 first. |
@@ -621,12 +640,14 @@ The social product, including peek, because the join card is a consent contract.
 
 ## 11. Open questions
 
+**Decided (Carel).** Households with several people: no veto; no club or member names in the heads-up; cellar sharing exists only inside clubs (no friends/public-share feature). Copy is in §4. If two members join the same club, show that household once.
+
 1. **Household invite TTL** — extend to 30 days, or keep 7 and rely on remint? Club default proposed 30 days / multi-use cap 20.
 2. **Thumbs vs 1–5 for taste-offs.** Feed should stay 👎/—/👍 because that’s what people already tap on drank cards. Scoring a flight may want 1–5. Don’t invent a third scale (`Wine.rating` 0–10) without a reason.
 3. **Catch-up Drunk** — emit one event per bottle when Apply succeeds (consistent with bulk transaction), not per tap in the staging UI.
 4. **Should `/switch` silently move which cellar the club peeks?** Proposed: no, ask. The policy is already consented; this only changes *which* fridge.
 5. **Owner widens sharing later.** Re-consent, notify-only (Leave if you hate it), or freeze peek until ack? Unacked members: hide from peek vs keep previous level?
-6. **Households with several people.** If Dewald joins Thursday reds (summary of Hillside), his partner’s bottles show. Notify the partner? Household-owner veto? Duplicate peek if both join (same household twice)?
+6. *(decided — see above)*
 7. **Digest vs per-open** after the first club has more than ~15 members.
 8. **Badge unlocks in the feed** — proposed off. They’re about *adding* bottles, not drinking, and they already GIF the household.
 9. **Global club cellar peek** — joining a public club would publish inventory. Proposed: force `cellar_visibility=none` on `kind=global`.
@@ -651,7 +672,7 @@ These are defaults to argue with, not shipped behaviour:
 | 3 | Events on Apply, not on staging taps. |
 | 4 | Confirm before peek household follows `/switch`. |
 | 5 | Widen → DM + Stay/Leave. Peek at the **new** level only after Stay (`accepted_sharing_version`). Unacked members stay visible at the **previous** level (store `previous_cellar_visibility` on the club, or treat unacked as `none` if that’s simpler — prefer previous level so a widen isn’t a hide). Narrowing applies now. |
-| 6 | Notify other household members (not a veto in MVP). If two people from Hillside join, show Hillside once, not twice. Join card names the household. |
+| 6 | **Decided.** No veto. Heads-up only, no club/member names, once per household until sharing stops. Show a household once in a club even if two members joined. Sharing exists only inside clubs. |
 | 7 | Per-open until a club has 15 members, then offer digest. |
 | 8 | No badge events in the feed. |
 | 9 | No cellar peek on global clubs. |
@@ -675,6 +696,7 @@ These are defaults to argue with, not shipped behaviour:
 - Keep `CLAUDE.md` in sync when this ships (invite POST vs GET, new `/api/clubs/`, `/api/lists/`, `/club`, `/list`).
 - Presence: `set_bot_presence` + `telegram_commands.PUBLIC_COMMANDS` together or the `/` menu lies.
 - Label-card tests in `test_label_card.py` already lock Just looking and Add to cellar — extend them rather than a new photo path.
+- Household club-share heads-up: a timestamp on `Household` (same once-pattern as `empty_nudge_sent_at`). Never interpolate club or user names into that message.
 
 ---
 
