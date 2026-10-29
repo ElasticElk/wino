@@ -91,7 +91,7 @@ def serialize_event(event: ClubEvent, *, public=True) -> dict:
         "created": created,
         "retracted": event.retracted,
     }
-    if event.kind == ClubEvent.KIND_TASTEOFF:
+    if event.kind in (ClubEvent.KIND_TASTEOFF, ClubEvent.KIND_STAFF_NOTE):
         body["payload"] = event.payload or {}
     if not public:
         body["actor_id"] = event.actor_id
@@ -113,6 +113,9 @@ def serialize_club_list_item(membership: ClubMembership) -> dict:
         "badges_visible": club.badges_visible,
         "member_count": club.memberships.count(),
         "is_last_used": membership.is_last_used,
+        "kind": club.kind,
+        "frozen": club.frozen,
+        "description": club.description,
     }
 
 
@@ -142,8 +145,9 @@ def serialize_club_home(membership: ClubMembership, *, events=None) -> dict:
         "previous_cellar_visibility": club.previous_cellar_visibility,
         "feed_muted": membership.feed_muted,
         "frozen": club.frozen,
+        "description": club.description,
         "member_count": club.memberships.count(),
-        "household": household,
+        "household": None if club.kind == Club.KIND_GLOBAL else household,
         "events": [serialize_event(event) for event in events],
     }
 
@@ -168,14 +172,22 @@ def serialize_vote(vote: ClubDismantleVote) -> dict:
     }
 
 
-def create_club(user, name, cellar_visibility="full", badges_visible=True, household=None):
+def create_club(
+    user, name, cellar_visibility="full", badges_visible=True, household=None,
+    kind=None, description="",
+):
     cleaned = validate_club_name(name)
     if cleaned is None:
         return None, "name_length"
     if Club.objects.filter(created_by=user, name=cleaned).exists():
         return None, "name_taken"
-    vis = cellar_visibility if cellar_visibility in VISIBILITY_RANK else "full"
-    badges = True if badges_visible is None else bool(badges_visible)
+    kind = kind or Club.KIND_PRIVATE
+    if kind == Club.KIND_GLOBAL:
+        vis = "none"
+        badges = False
+    else:
+        vis = cellar_visibility if cellar_visibility in VISIBILITY_RANK else "full"
+        badges = True if badges_visible is None else bool(badges_visible)
     try:
         with transaction.atomic():
             club = Club.objects.create(
@@ -183,6 +195,8 @@ def create_club(user, name, cellar_visibility="full", badges_visible=True, house
                 created_by=user,
                 cellar_visibility=vis,
                 badges_visible=badges,
+                kind=kind,
+                description=description or "",
             )
             membership = ClubMembership.objects.create(
                 club=club,
@@ -322,6 +336,8 @@ def maybe_queue_share_notice(household, exclude_user_id):
 
 
 def create_dismantle_vote(club: Club, proposer):
+    if club.kind == Club.KIND_GLOBAL:
+        return None, "global"
     if club.memberships.count() <= 1:
         return None, "sole_member"
     if club.open_dismantle_vote() is not None:

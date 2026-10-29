@@ -56,6 +56,8 @@ MESSAGES = {
         "club.to.n_scores": "{n} scores",
         "club.to.close": "Close tasting",
         "club.to.host_open": "Scoring is open. Close when you're done.",
+        "club.global.kicked": "You've been removed from {name}.",
+        "club.global.frozen": "This club is paused.",
     },
     "af": {
         "club.feed.opened": "{name} het 'n {vintage} {wine} oopgemaak",
@@ -106,6 +108,8 @@ MESSAGES = {
         "club.to.n_scores": "{n} tellings",
         "club.to.close": "Sluit die proe",
         "club.to.host_open": "Telling is oop. Sluit as julle klaar is.",
+        "club.global.kicked": "Jy is uit {name} verwyder.",
+        "club.global.frozen": "Hierdie klub is gepouseer.",
     },
 }
 

@@ -57,6 +57,20 @@ def clubs_enabled(handler) -> bool:
     return bool((getattr(handler, "flags", None) or {}).get("feature_clubs"))
 
 
+def global_clubs_enabled(handler) -> bool:
+    if not clubs_enabled(handler):
+        return False
+    flag_on = getattr(handler, "flag_on", None)
+    if callable(flag_on):
+        return bool(flag_on("feature_global_clubs"))
+    return bool((getattr(handler, "flags", None) or {}).get("feature_global_clubs"))
+
+
+def _is_staff(handler, update) -> bool:
+    chat_id = str(getattr(getattr(update, "effective_chat", None), "id", "") or "")
+    return chat_id in [str(c) for c in (getattr(handler, "admin_chat_ids", None) or [])]
+
+
 def locale_for(handler, update=None, chat_id=None, language_code=None) -> str:
     getter = getattr(handler, "locale_for", None)
     if callable(getter):
@@ -104,6 +118,9 @@ def _wine_line(event: dict, loc: str) -> str:
     vintage = event.get("vintage") or ""
     if kind == "joined":
         return t(loc, "club.feed.joined", name=esc(name))
+    if kind == "staff_note":
+        note = ((event.get("payload") or {}).get("text") or event.get("wine_name") or "")
+        return f"\U0001F30D {esc(note)}"
     if kind == "tasteoff":
         title = event.get("wine_name") or "Tasting"
         return f"\U0001F3C6 {esc(title)}"
@@ -116,6 +133,14 @@ def _wine_line(event: dict, loc: str) -> str:
     return f"{body} {glyph}".rstrip()
 
 
+def _discover_row(loc, flags) -> list:
+    if not (flags or {}).get("feature_global_clubs"):
+        return []
+    return [InlineKeyboardButton(
+        t(loc, "club.discover.btn"), callback_data=club_cb("dc"),
+    )]
+
+
 def build_home(payload: dict, loc: str, flags=None) -> tuple[str, InlineKeyboardMarkup]:
     name = payload.get("name") or "Club"
     members = payload.get("member_count") or 1
@@ -123,11 +148,20 @@ def build_home(payload: dict, loc: str, flags=None) -> tuple[str, InlineKeyboard
     badges = payload.get("badges_visible")
     policy = _visibility_label(loc, vis)
     badge_bit = t(loc, "club.share.badges_on" if badges else "club.share.badges_off")
+    is_global = payload.get("kind") == "global"
+    prefix = "\U0001F30D " if is_global else "\U0001F377 "
     lines = [
-        f"\U0001F377 <b>{esc(name)}</b> · {t(loc, 'club.home.n_members', n=members)}",
-        f"{esc(policy)} · {esc(badge_bit)}",
-        "",
+        f"{prefix}<b>{esc(name)}</b> · {t(loc, 'club.home.n_members', n=members)}",
     ]
+    if is_global:
+        desc = (payload.get("description") or "").strip()
+        if desc:
+            lines.append(esc(desc))
+        if payload.get("frozen"):
+            lines.append(t(loc, "club.global.frozen"))
+        lines.append("")
+    else:
+        lines.extend([f"{esc(policy)} · {esc(badge_bit)}", ""])
     events = [e for e in (payload.get("events") or []) if not e.get("retracted")]
     if not events:
         lines.append(t(loc, "club.feed.empty"))
@@ -135,11 +169,16 @@ def build_home(payload: dict, loc: str, flags=None) -> tuple[str, InlineKeyboard
         for event in events[:5]:
             lines.append(_wine_line(event, loc))
     flags = flags or {}
-    keyboard = [
-        [
+    first = []
+    if not is_global:
+        first.append(
             InlineKeyboardButton(t(loc, "club.home.invite"), callback_data=club_cb("i", payload["id"])),
-            InlineKeyboardButton(t(loc, "club.home.members"), callback_data=club_cb("m", payload["id"])),
-        ],
+        )
+    first.append(
+        InlineKeyboardButton(t(loc, "club.home.members"), callback_data=club_cb("m", payload["id"])),
+    )
+    keyboard = [
+        first,
         [
             InlineKeyboardButton(t(loc, "club.home.feed"), callback_data=club_cb("fd", payload["id"], 0)),
             InlineKeyboardButton(
@@ -159,16 +198,18 @@ def build_home(payload: dict, loc: str, flags=None) -> tuple[str, InlineKeyboard
         ))
     if extra:
         keyboard.append(extra)
-    keyboard.append([
-        InlineKeyboardButton(t(loc, "club.home.leave"), callback_data=club_cb("l", payload["id"])),
-    ])
-    if payload.get("role") == "owner":
-        keyboard[-1].insert(
-            0,
-            InlineKeyboardButton(
-                t(loc, "club.home.settings"), callback_data=club_cb("s", payload["id"]),
-            ),
-        )
+    last = []
+    if payload.get("role") == "owner" and not is_global:
+        last.append(InlineKeyboardButton(
+            t(loc, "club.home.settings"), callback_data=club_cb("s", payload["id"]),
+        ))
+    last.append(InlineKeyboardButton(
+        t(loc, "club.home.leave"), callback_data=club_cb("l", payload["id"]),
+    ))
+    keyboard.append(last)
+    discover = _discover_row(loc, flags)
+    if discover:
+        keyboard.append(discover)
     return "\n".join(lines), InlineKeyboardMarkup(keyboard)
 
 
@@ -250,6 +291,12 @@ class ClubFlow:
         if sub == "tasteoff":
             await self._start_tasteoff(update)
             return
+        if sub == "discover":
+            await self._show_discover(update)
+            return
+        if sub == "post":
+            await self.cmd_clubpost(update, context)
+            return
         await self._entry(update)
 
     async def _entry(self, update):
@@ -268,12 +315,16 @@ class ClubFlow:
             await update.message.reply_text(t(loc, "club.err"))
             return
         clubs = data.get("clubs") or []
+        flags = self._flags()
+        discover = _discover_row(loc, flags)
         if not clubs:
-            keyboard = InlineKeyboardMarkup([[
+            rows = [[
                 InlineKeyboardButton(t(loc, "club.found.btn"), callback_data=club_cb("f")),
-            ]])
+            ]]
+            if discover:
+                rows.append(discover)
             await update.message.reply_text(
-                t(loc, "club.pitch"), reply_markup=keyboard,
+                t(loc, "club.pitch"), reply_markup=InlineKeyboardMarkup(rows),
             )
             return
         if len(clubs) == 1:
@@ -282,11 +333,14 @@ class ClubFlow:
         rows = []
         for club in clubs:
             mark = "\u2705 " if club.get("is_last_used") else ""
+            prefix = "\U0001F30D " if club.get("kind") == "global" else ""
             rows.append([InlineKeyboardButton(
-                f"{mark}{club.get('name') or 'Club'}",
+                f"{mark}{prefix}{club.get('name') or 'Club'}",
                 callback_data=club_cb("x", club["id"]),
             )])
         rows.append([InlineKeyboardButton(t(loc, "club.found.btn"), callback_data=club_cb("f"))])
+        if discover:
+            rows.append(discover)
         await update.message.reply_text(
             t(loc, "club.picker.title"),
             reply_markup=InlineKeyboardMarkup(rows),
@@ -351,6 +405,8 @@ class ClubFlow:
             return await self._tasteoff_add_typed(update, text)
         if step == "club_list_add":
             return await self._club_list_add_typed(update, text)
+        if step == "club_post":
+            return await self._submit_club_post(update, text)
         return False
 
     async def on_location(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -453,6 +509,14 @@ class ClubFlow:
         if not club_id:
             await self._reply(update, t(loc, "club.err"), query=query)
             return
+        home = {}
+        try:
+            home = api.get_club(club_id) or {}
+        except Exception:
+            home = {}
+        if home.get("kind") == "global":
+            await self._show_home(update, club_id, query=query)
+            return
         try:
             result = api.mint_club_invite(club_id)
         except Exception as e:
@@ -530,11 +594,7 @@ class ClubFlow:
             else:
                 await update.message.reply_text(text)
             return
-        flags = {
-            "feature_lists": self.handler.flag_on("feature_lists"),
-            "feature_tasteoffs": self.handler.flag_on("feature_tasteoffs"),
-            "feature_club_comments": self.handler.flag_on("feature_club_comments"),
-        }
+        flags = self._flags()
         text, markup = build_home(payload, loc, flags=flags)
         if query is not None:
             from integrations.telegram_bot import _safe_edit
@@ -577,7 +637,7 @@ class ClubFlow:
             label = member.get("display_name") or "Member"
             if member.get("role") == "owner":
                 label = f"\U0001F451 {label}"
-            if hh_id:
+            if hh_id and home.get("kind") != "global":
                 shown_hh.add(hh_id)
                 hh = next((h for h in households if h.get("household_id") == hh_id), None)
                 if hh and len(hh.get("user_ids") or []) > 1:
@@ -785,6 +845,9 @@ class ClubFlow:
         loc = self.locale(update)
         api = self._api(update)
         home = api.get_club(club_id)
+        if home.get("kind") == "global":
+            await self._show_home(update, club_id, query=query)
+            return
         if home.get("role") != "owner":
             from integrations.telegram_bot import _safe_edit
             await _safe_edit(query, t(loc, "club.forbidden"))
@@ -1133,9 +1196,219 @@ class ClubFlow:
             await self._close_tasteoff(update, int(rest[0]), query)
         elif action == "tx":
             await self._cancel_tasteoff_setup(update, int(rest[0]), query)
+        elif action == "dc":
+            await self._show_discover(update, query=query)
+        elif action == "dj":
+            await self._discover_consent(update, int(rest[0]) if rest else 0, query)
+        elif action == "jj":
+            await self._do_global_join(update, int(rest[0]) if rest else 0, query)
+        elif action == "gp":
+            await self._start_club_post(update, int(rest[0]) if rest else 0, query=query)
         else:
             return True
         return True
+
+    async def cmd_clubpost(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        loc = self.locale(update)
+        if not _is_staff(self.handler, update):
+            await update.message.reply_text(t(loc, "club.global.staff_only"))
+            return
+        if not global_clubs_enabled(self.handler):
+            await update.message.reply_text(t(loc, "club.global.off"))
+            return
+        api = self._api(update)
+        try:
+            data = api.discover_clubs()
+        except Exception as e:
+            logger.warning("[club] discover for post failed: %s", e)
+            await update.message.reply_text(t(loc, "club.err"))
+            return
+        if data.get("status_code") == 404:
+            await update.message.reply_text(t(loc, "club.global.off"))
+            return
+        clubs = data.get("clubs") or []
+        needle = " ".join(list(context.args or [])).strip().lower()
+        if needle:
+            match = next(
+                (c for c in clubs if (c.get("name") or "").strip().lower() == needle),
+                None,
+            )
+            if match:
+                await self._start_club_post(update, match["id"])
+                return
+        if not clubs:
+            await update.message.reply_text(t(loc, "club.discover.empty"))
+            return
+        rows = [[InlineKeyboardButton(
+            f"\U0001F30D {c.get('name') or 'Club'}",
+            callback_data=club_cb("gp", c["id"]),
+        )] for c in clubs]
+        await update.message.reply_text(
+            t(loc, "club.discover.title"),
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    async def _start_club_post(self, update, club_id, query=None):
+        loc = self.locale(update)
+        api = self._api(update)
+        chat_id = str(update.effective_chat.id)
+        name = "club"
+        try:
+            clubs = (api.discover_clubs() or {}).get("clubs") or []
+            match = next((c for c in clubs if c.get("id") == club_id), None)
+            if match:
+                name = match.get("name") or name
+            else:
+                home = api.get_club(club_id) or {}
+                name = home.get("name") or name
+        except Exception:
+            pass
+        self.remember(chat_id, step="club_post", club_id=club_id, club_name=name)
+        text = t(loc, "club.global.post.prompt", name=esc(name))
+        if query is not None:
+            from integrations.telegram_bot import _safe_edit
+            await _safe_edit(query, text, parse_mode="HTML")
+        else:
+            await update.message.reply_text(text, parse_mode="HTML")
+
+    async def _submit_club_post(self, update, text: str) -> bool:
+        loc = self.locale(update)
+        chat_id = str(update.effective_chat.id)
+        state = self.state_for(chat_id) or {}
+        club_id = state.get("club_id")
+        name = state.get("club_name") or "club"
+        body = (text or "").strip()
+        if not body:
+            await update.message.reply_text(t(loc, "club.global.post.prompt", name=esc(name)))
+            return True
+        api = self._api(update)
+        try:
+            result = api.post_club_note(club_id, body)
+        except Exception:
+            logger.exception("[club] staff note failed")
+            await update.message.reply_text(t(loc, "club.err"))
+            return True
+        self.clear(chat_id)
+        if result.get("error") == "frozen" or result.get("status_code") == 409:
+            await update.message.reply_text(t(loc, "club.global.frozen"))
+            return True
+        if result.get("error") or (
+            isinstance(result.get("status_code"), int) and result["status_code"] >= 400
+        ):
+            await update.message.reply_text(t(loc, "club.err"))
+            return True
+        await update.message.reply_text(t(loc, "club.global.posted", name=esc(name)))
+        return True
+
+    async def _show_discover(self, update, query=None):
+        loc = self.locale(update)
+        if not global_clubs_enabled(self.handler):
+            text = t(loc, "club.global.off")
+            if query is not None:
+                from integrations.telegram_bot import _safe_edit
+                await _safe_edit(query, text)
+            else:
+                await update.message.reply_text(text)
+            return
+        api = self._api(update)
+        try:
+            data = api.discover_clubs()
+        except Exception as e:
+            logger.warning("[club] discover failed: %s", e)
+            data = {"error": str(e)}
+        if data.get("status_code") == 404:
+            text = t(loc, "club.global.off")
+            if query is not None:
+                from integrations.telegram_bot import _safe_edit
+                await _safe_edit(query, text)
+            else:
+                await update.message.reply_text(text)
+            return
+        clubs = data.get("clubs") or []
+        lines = [f"\U0001F30D <b>{esc(t(loc, 'club.discover.title'))}</b>", ""]
+        keyboard = []
+        if not clubs:
+            lines.append(t(loc, "club.discover.empty"))
+        for club in clubs:
+            name = club.get("name") or "Club"
+            desc = (club.get("description") or "").strip()
+            lines.append(f"\U0001F30D <b>{esc(name)}</b>")
+            if desc:
+                lines.append(esc(desc))
+            if club.get("frozen"):
+                lines.append(t(loc, "club.global.frozen"))
+            lines.append("")
+            if club.get("joined"):
+                keyboard.append([InlineKeyboardButton(
+                    name, callback_data=club_cb("x", club["id"]),
+                )])
+            elif not club.get("frozen"):
+                keyboard.append([InlineKeyboardButton(
+                    t(loc, "club.join.btn", name=name),
+                    callback_data=club_cb("dj", club["id"]),
+                )])
+        text = "\n".join(lines).rstrip()
+        markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+        if query is not None:
+            from integrations.telegram_bot import _safe_edit
+            await _safe_edit(query, text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _discover_consent(self, update, club_id, query):
+        loc = self.locale(update)
+        from integrations.telegram_bot import _safe_edit
+        api = self._api(update)
+        try:
+            data = api.discover_clubs()
+        except Exception:
+            data = {}
+        club = next(
+            (c for c in (data.get("clubs") or []) if c.get("id") == club_id),
+            None,
+        )
+        if club is None:
+            await _safe_edit(query, t(loc, "club.err"))
+            return
+        if club.get("joined"):
+            await self._show_home(update, club_id, query=query)
+            return
+        if club.get("frozen"):
+            await _safe_edit(query, t(loc, "club.global.frozen"))
+            return
+        name = club.get("name") or "Club"
+        text = t(loc, "club.global.consent", name=esc(name))
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                t(loc, "club.global.join"), callback_data=club_cb("jj", club_id),
+            ),
+            InlineKeyboardButton(
+                t(loc, "club.global.not_now"), callback_data=club_cb("dc"),
+            ),
+        ]])
+        await _safe_edit(query, text, parse_mode="HTML", reply_markup=keyboard)
+
+    async def _do_global_join(self, update, club_id, query):
+        loc = self.locale(update)
+        from integrations.telegram_bot import _safe_edit
+        api = self._api(update)
+        try:
+            result = api.join_club(club_id)
+        except Exception:
+            logger.exception("[club] global join failed")
+            await _safe_edit(query, t(loc, "club.err"))
+            return
+        status = result.get("status_code")
+        if result.get("error") == "frozen" or status == 409:
+            await _safe_edit(query, t(loc, "club.global.frozen"))
+            return
+        if result.get("error") == "invite_only" or status == 403:
+            await _safe_edit(query, t(loc, "club.forbidden"))
+            return
+        if result.get("error") or (isinstance(status, int) and status >= 400):
+            await _safe_edit(query, t(loc, "club.err"))
+            return
+        await self._show_home(update, club_id, query=query)
 
     async def _dismantle_confirm(self, update, club_id, query):
         loc = self.locale(update)
@@ -1238,6 +1511,7 @@ class ClubFlow:
             "feature_lists": self.handler.flag_on("feature_lists"),
             "feature_tasteoffs": self.handler.flag_on("feature_tasteoffs"),
             "feature_club_comments": self.handler.flag_on("feature_club_comments"),
+            "feature_global_clubs": self.handler.flag_on("feature_global_clubs"),
         }
 
     def _default_tasteoff_title(self, club_name: str) -> str:

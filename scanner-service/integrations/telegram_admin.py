@@ -88,6 +88,7 @@ def register_admin_handlers(app, handler) -> None:
     app.add_handler(CommandHandler("adduser", bind(cmd_adduser), filters=admin_filter))
     app.add_handler(CommandHandler("removeuser", bind(cmd_removeuser), filters=admin_filter))
     app.add_handler(CommandHandler("welcome", bind(cmd_welcome), filters=admin_filter))
+    app.add_handler(CommandHandler("clubpost", bind(cmd_clubpost), filters=admin_filter))
     logger.info(f"[admin] staff commands registered for {len(admin_ids)} chat(s)")
 
 
@@ -502,6 +503,10 @@ def format_chat_stats(data: dict) -> str:
 
 def _seconds(ms) -> str:
     return "—" if ms is None else f"{ms / 1000:.1f}s"
+
+
+async def cmd_clubpost(update: Update, context: ContextTypes.DEFAULT_TYPE, handler) -> None:
+    await handler._club_flow().cmd_clubpost(update, context)
 
 
 async def cmd_chatstats(update: Update, context: ContextTypes.DEFAULT_TYPE, handler) -> None:

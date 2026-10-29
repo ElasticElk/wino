@@ -35,6 +35,7 @@ ADMIN_COMMANDS = [
     ("adduser", "Add a member to a named household"),
     ("removeuser", "Remove a member from a named household"),
     ("welcome", "Resend the welcome to a chat ID"),
+    ("clubpost", "Post to a global club"),
 ]
 
 

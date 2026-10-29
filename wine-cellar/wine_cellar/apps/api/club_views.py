@@ -186,24 +186,55 @@ class ClubDetailView(ClubsEnabledMixin, ScannerAPIView):
         return Response(serialize_club_home(membership))
 
     def patch(self, request, pk):
-        membership, error = _member_or_404(request, pk)
-        if error:
-            return error
+        data = request.data if isinstance(request.data, dict) else {}
+        membership = membership_of(request.user, pk)
+        club = membership.club if membership is not None else Club.objects.filter(id=pk).first()
+        if club is None:
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        if "kind" in data:
+            return Response(
+                {"error": "kind_locked"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if "frozen" in data and request.user.is_staff:
+            club.frozen = bool(data.get("frozen"))
+            club.save(update_fields=["frozen"])
+            if membership is None:
+                return Response(
+                    {
+                        "id": club.id,
+                        "name": club.name,
+                        "frozen": club.frozen,
+                        "kind": club.kind,
+                    }
+                )
+            membership.refresh_from_db()
+            if (
+                data.get("cellar_visibility") in (None, "")
+                and data.get("badges_visible") is None
+            ):
+                return Response(serialize_club_home(membership))
+        if membership is None:
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
         if membership.role != ClubMembership.ROLE_OWNER:
             return Response(
                 {"error": "forbidden"},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        club = membership.club
         if club.kind == Club.KIND_GLOBAL:
-            vis = request.data.get("cellar_visibility")
+            vis = data.get("cellar_visibility")
             if vis not in (None, "", "none"):
                 return Response(
                     {"error": "global_clubs_are_feed_only"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-        vis = request.data.get("cellar_visibility")
-        badges = request.data.get("badges_visible")
+            if data.get("badges_visible") is True:
+                return Response(
+                    {"error": "global_clubs_are_feed_only"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        vis = data.get("cellar_visibility")
+        badges = data.get("badges_visible")
         if vis is None and badges is None:
             return Response(serialize_club_home(membership))
         change, club = apply_policy(club, vis, badges)
@@ -356,21 +387,32 @@ class ClubMembersView(ClubsEnabledMixin, ScannerAPIView):
         households = {}
         viewer_vis = effective_visibility(membership.club, membership)
         viewer_badges = effective_badges(membership.club, membership)
+        global_club = membership.club.kind == Club.KIND_GLOBAL
         for row in rows:
             members.append(
                 {
                     "user_id": row.user_id,
                     "display_name": display_name(row.user),
                     "role": row.role,
-                    "household_id": row.household_id,
-                    "household_name": row.household.name if row.household_id else "",
-                    "peek": tighter_visibility(
-                        viewer_vis, effective_visibility(row.club, row),
+                    "household_id": None if global_club else row.household_id,
+                    "household_name": (
+                        "" if global_club else (
+                            row.household.name if row.household_id else ""
+                        )
                     ),
-                    "badges": viewer_badges and effective_badges(row.club, row),
+                    "peek": (
+                        "none" if global_club else tighter_visibility(
+                            viewer_vis, effective_visibility(row.club, row),
+                        )
+                    ),
+                    "badges": (
+                        False if global_club else (
+                            viewer_badges and effective_badges(row.club, row)
+                        )
+                    ),
                 }
             )
-            if row.household_id:
+            if not global_club and row.household_id:
                 bucket = households.setdefault(
                     row.household_id,
                     {
@@ -390,6 +432,11 @@ class ClubPeekView(ClubsEnabledMixin, ScannerAPIView):
         membership, error = _member_or_404(request, pk)
         if error:
             return error
+        if membership.club.kind == Club.KIND_GLOBAL:
+            return Response(
+                {"error": "not_visible"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
         target = (
             ClubMembership.objects.select_related("club", "household")
             .filter(club=membership.club, user_id=user_id)
@@ -419,6 +466,11 @@ class ClubBadgesView(ClubsEnabledMixin, ScannerAPIView):
         membership, error = _member_or_404(request, pk)
         if error:
             return error
+        if membership.club.kind == Club.KIND_GLOBAL:
+            return Response(
+                {"error": "not_visible"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
         target = (
             ClubMembership.objects.select_related("club", "household")
             .filter(club=membership.club, user_id=user_id)
@@ -459,6 +511,11 @@ class ClubInviteCreateView(ClubsEnabledMixin, ScannerAPIView):
         membership, error = _member_or_404(request, pk)
         if error:
             return error
+        if membership.club.kind == Club.KIND_GLOBAL:
+            return Response(
+                {"error": "global_clubs_are_feed_only"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if membership.club.open_dismantle_vote() is not None:
             return Response(
                 {"error": "dismantle_in_progress"},
@@ -539,6 +596,11 @@ class ClubDismantleView(ClubsEnabledMixin, ScannerAPIView):
         if membership.role != ClubMembership.ROLE_OWNER:
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
         vote, err = create_dismantle_vote(membership.club, request.user)
+        if err == "global":
+            return Response(
+                {"error": "global"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if err == "sole_member":
             return Response({"error": "sole_member"}, status=status.HTTP_409_CONFLICT)
         if err == "vote_open":
