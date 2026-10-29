@@ -10,11 +10,10 @@ from django.utils.crypto import get_random_string
 from django.utils.decorators import method_decorator
 from rest_framework import status
 from rest_framework.authentication import TokenAuthentication
+from rest_framework.authtoken.models import Token
 from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-
-from rest_framework.authtoken.models import Token
 
 from wine_cellar.apps.scanner.households import get_user_household
 from wine_cellar.apps.storage.models import Storage, StorageItem
@@ -31,7 +30,13 @@ from wine_cellar.apps.wine.taste import record_intent, serialize_snapshot
 
 from .models import (
     INVITE_TTL,
-    Household, HouseholdInvite, HouseholdMembership, Scanner, ServiceConfig, TelegramUser,
+    Household,
+    HouseholdInvite,
+    HouseholdMembership,
+    Scanner,
+    ServiceConfig,
+    TelegramUser,
+    mint_unique_code,
 )
 
 User = get_user_model()
@@ -187,7 +192,7 @@ def _resolve_join_household(request):
         except (ValueError, TypeError):
             return None, Response(
                 {"error": "No household found"},
-                status=status.HTTP_404_NOT_FOUND,
+                status=status.HTTP_400_BAD_REQUEST,
             )
         membership = HouseholdMembership.objects.filter(
             user=request.user, household_id=hid,
@@ -195,8 +200,15 @@ def _resolve_join_household(request):
     else:
         header_id = request.META.get("HTTP_X_HOUSEHOLD")
         if header_id:
+            try:
+                header_household_id = int(header_id)
+            except (ValueError, TypeError):
+                return None, Response(
+                    {"error": "No household found"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             membership = HouseholdMembership.objects.filter(
-                user=request.user, household_id=int(header_id),
+                user=request.user, household_id=header_household_id,
             ).select_related("household").first()
         else:
             membership = HouseholdMembership.objects.filter(
@@ -734,17 +746,36 @@ class HouseholdsListView(APIView):
 
 
 def _mint_invite(user, kind, household=None):
+    """Create an invite, or None if a unique code could not be minted.
+
+    Callers must turn None into HTTP 503 — never let IntegrityError 500.
+    """
     for _ in range(5):
+        code = mint_unique_code()
+        if not code:
+            break
         try:
             return HouseholdInvite.objects.create(
                 kind=kind,
                 household=household,
                 created_by=user,
+                code=code,
                 expires_at=timezone.now() + INVITE_TTL,
             )
         except IntegrityError:
             continue
-    raise IntegrityError("could not mint a unique invite code")
+    logger.error("could not mint a unique invite code")
+    return None
+
+
+def _mint_invite_response(user, kind, household=None):
+    invite = _mint_invite(user, kind, household)
+    if invite is None:
+        return Response(
+            {"error": "could not mint a unique invite code"},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    return Response(_serialize_invite(invite), status=status.HTTP_201_CREATED)
 
 
 @method_decorator(login_not_required, name="dispatch")
@@ -762,8 +793,7 @@ class HouseholdInviteCreateView(APIView):
                     {"error": "Only staff can mint a new-cellar invite"},
                     status=status.HTTP_403_FORBIDDEN,
                 )
-            invite = _mint_invite(request.user, HouseholdInvite.KIND_NEW)
-            return Response(_serialize_invite(invite), status=status.HTTP_201_CREATED)
+            return _mint_invite_response(request.user, HouseholdInvite.KIND_NEW)
 
         if kind != HouseholdInvite.KIND_JOIN:
             return Response(
@@ -774,8 +804,9 @@ class HouseholdInviteCreateView(APIView):
         household, error = _resolve_join_household(request)
         if error is not None:
             return error
-        invite = _mint_invite(request.user, HouseholdInvite.KIND_JOIN, household)
-        return Response(_serialize_invite(invite), status=status.HTTP_201_CREATED)
+        return _mint_invite_response(
+            request.user, HouseholdInvite.KIND_JOIN, household,
+        )
 
 
 @method_decorator(login_not_required, name="dispatch")

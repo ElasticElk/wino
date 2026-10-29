@@ -61,7 +61,7 @@ Auth: `Authorization: Token <token>` header. Optional `X-Household: <id>` header
 - `GET /api/households/` — All user's households
 - `POST /api/household/add-member/` — Add member to household
 - `POST /api/household/remove-member/` — Remove member from household
-- `POST /api/scanner/invites/` — Mint a one-time invite (`kind=join` any member, `kind=new` staff). 7-day expiry. Staff join requires `household_id`; the bot sends it even when there is only one cellar
+- `POST /api/scanner/invites/` — Mint a one-time invite (`kind=join` any member, `kind=new` staff). 30-day expiry. Staff join requires `household_id`; the bot sends it even when there is only one cellar
 - `GET /api/scanner/invites/<code>/` — Preview a code without burning it. **Staff only** — the bot calls it with its admin client (`handler.api`)
 - `POST /api/scanner/invites/redeem/` — Provision from a code (join=member, new=owner + storage named Cellar). Returns the token of the user for the posted `chat_id`, so **staff only**. A taken name is `409` with `error` "That name's taken — pick another" and a free `suggested_name` (never the taken one; names are global, so the taken name is not echoed)
 - `POST /api/scanner/invites/cancel/` — Drop the caller's newest **unexpired** unused invite. Optional `household_id` prefers that cellar, then a staff `new` invite. Returns `code`, `kind`, `household_name`
