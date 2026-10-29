@@ -26,7 +26,7 @@ Staff: `/stats` lines `clubs: 2 (7 members), feed events 7d: 12`. Admin changeli
 
 ### J2.1 Found a club
 
-Alex `/club` (no clubs) → pitch + `Found a club`.
+Riley `/club` (no clubs) → pitch + `Found a club`.
 
 EN:
 
@@ -102,7 +102,7 @@ Lee `/start K9m2Pq4r` → club preview (staff). Card:
 EN:
 
 ```
-Alex invited you to Thursday reds.
+Riley invited you to Thursday reds.
 
 Joining shares a type-and-count summary of Hillside,
 including bottles anyone in that cellar added, and
@@ -561,7 +561,7 @@ Staff preview/redeem: `IsAdminUser`, like household (token in body).
   "expires_at": "...",
   "expired": false,
   "used": false,
-  "inviter_display_name": "Alex"
+  "inviter_display_name": "Riley"
 }
 ```
 

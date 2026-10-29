@@ -6,7 +6,7 @@ Planning only. Implementation lives in `scanner-service/integrations/copy.py`.
 
 Resolve locale: `UserSettings.language` if set → else Telegram `language_code` for unprovisioned chats → else `en`. Map `en* → en`, `af* → af`.
 
-`{name}`, `{club}`, `{household}`, `{wine}`, `{vintage}`, `{link}`, `{date}`, `{n}`, `{inviter}`, `{policy}`, `{level}`, `{old}`, `{host}`, `{title}` are interpolations. Do not put real people’s names in fixtures; use Alex / Sam / Lee / Pat, Hillside, Thursday reds.
+`{name}`, `{club}`, `{household}`, `{wine}`, `{vintage}`, `{link}`, `{date}`, `{n}`, `{inviter}`, `{policy}`, `{level}`, `{old}`, `{host}`, `{title}` are interpolations. Do not put real people’s names in fixtures; use Riley / Sam / Lee / Pat, Hillside, Thursday reds.
 
 ---
 

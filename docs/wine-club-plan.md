@@ -17,4 +17,4 @@ This plan was expanded into an implementation spec:
 
 Planning only — no application code in these files.
 
-Example people in copy: Alex, Sam, Lee, Pat. Example cellar: Hillside. Example club: Thursday reds.
+Example people in copy: Riley, Sam, Lee, Pat. Example cellar: Hillside. Example club: Thursday reds.

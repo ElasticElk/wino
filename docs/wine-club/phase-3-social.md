@@ -57,7 +57,7 @@ Host (any member in MVP; recommended: any member, owner can close):
 1. `/club tasteoff` → `Name this tasting?` (type, default `Thursday reds · 5 Nov`).
 2. Add bottles: from club list, from a member’s **full** peek (404 if summary/none — copy: `This club only shares a summary — type a name instead.`), or type `Producer Name 2019`.
 3. Min 2, max 8 bottles. `[Open scoring]`.
-4. Club gets a DM: `Alex is running a taste-off: Thursday reds · 5 Nov. Score 1–5.` Buttons: one card per wine, `1 2 3 4 5`. Changeable until close.
+4. Club gets a DM: `Riley is running a taste-off: Thursday reds · 5 Nov. Score 1–5.` Buttons: one card per wine, `1 2 3 4 5`. Changeable until close.
 5. Host `[Close]`. Results event:
 
 ```
@@ -233,7 +233,7 @@ Response:
   "kind": "club",
   "club_id": 3,
   "items": [
-    {"id": 70, "name": "Chenin Blanc", "vintage": 2022, "producer": "Coastal Cellars", "added_by_name": "Alex"}
+    {"id": 70, "name": "Chenin Blanc", "vintage": 2022, "producer": "Coastal Cellars", "added_by_name": "Riley"}
   ]
 }
 ```

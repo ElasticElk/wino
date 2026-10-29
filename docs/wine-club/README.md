@@ -23,7 +23,7 @@ This spec is the build plan for a social layer (clubs) and a To-drink list. It i
 
 Old pointer: [`docs/wine-club-plan.md`](../wine-club-plan.md) redirects here.
 
-Example people in copy: **Alex**, **Sam**, **Lee**, **Pat**. Example cellar: **Hillside**. Example club: **Thursday reds**. Do not put real people’s names in this spec, in tests, or in help examples.
+Example people in copy: **Riley**, **Sam**, **Lee**, **Pat**. Example cellar: **Hillside**. Example club: **Thursday reds**. Do not put real people’s names in this spec, in tests, or in help examples.
 
 ## Why not households?
 
@@ -215,7 +215,7 @@ Never Telegram I/O in gunicorn. Retry Telegram 429 once with backoff; store `err
 
 ## Natural language chat
 
-Do **not** route “what did Alex open?” or “add this to my list” through `ChatRouter` in these phases. Parser + `cellar_facts` are household-scoped. `/club` and `/list` are the interface so we don’t invent commands in `wine_chat`. A later PR can add `club` / `list` intents; it is not in 0–4.
+Do **not** route “what did Riley open?” or “add this to my list” through `ChatRouter` in these phases. Parser + `cellar_facts` are household-scoped. `/club` and `/list` are the interface so we don’t invent commands in `wine_chat`. A later PR can add `club` / `list` intents; it is not in 0–4.
 
 ## Risks
 
