@@ -115,7 +115,7 @@ Optional `ClubEvent.kind=staff_note`.
 
 Private clubs stay invite-only. Do not add self-join to private.
 
-**`POST /api/clubs/global/`** staff. Body `{ "name": "New World Cab", "description": "Cabs that drink well now." }`. Forces `kind=global`, `cellar_visibility=none`, `badges_visible=false`. 201 club object (phase 2 create shape). 403 non-staff. 409 if this staff user already founded that name.
+**`POST /api/clubs/global/`** staff. Body `{ "name": "New World Cab", "description": "Cabs that drink well now." }`. Forces `kind=global`, `cellar_visibility=none`, `badges_visible=false` — does **not** use the private-club default `full` (open-q #16). 201 club object (phase 2 create shape). 403 non-staff. 409 if this staff user already founded that name.
 
 **`GET /api/clubs/discover/`** any provisioned user:
 

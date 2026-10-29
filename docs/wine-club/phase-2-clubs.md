@@ -48,15 +48,15 @@ Nie 'n gedeelde yskas nie — elkeen hou sy eie.
 [Begin 'n klub]
 ```
 
-Tap → `What should we call it?` (type, 2–40 chars, same `NAME_MIN`/`NAME_MAX` as household). Then **sharing step** (required — open-q #16 decided: must pick; UI default **Type and count** + badges on):
+Tap → `What should we call it?` (type, 2–40 chars, same `NAME_MIN`/`NAME_MAX` as household). Then **sharing step** (required — open-q #16 decided: must pick; model/UI default **Full cellar** + badges on; creator can lower):
 
 ```
 What does Thursday reds share?
 
 Everyone who joins shares this with the club.
 
-[Type and count]     ← default, selected
-[Full cellar]
+[Full cellar]        ← default, selected
+[Type and count]
 [Drink feed only]
 
 Badges: [On]  [Off]
@@ -77,8 +77,8 @@ EN:
 ```
 Join Thursday reds on Whiney.
 
-Joining shares a type-and-count summary of your cellar
-and your badges with the other members. Drink-opens
+Joining shares the names and vintages in your cellar
+(no prices or drawers) and your badges. Drink-opens
 are posted automatically. Not a shared fridge.
 
 Tap this, then Start:
@@ -89,7 +89,7 @@ Forward this, or tap Share.
 Works until 28 Nov, up to 20 uses.
 ```
 
-AF: `Sluit by Thursday reds aan op Whiney.` + `Aansluit deel 'n tipe-en-aantal opsomming van jou kelder en jou kentekens met die ander lede.`
+AF: `Sluit by Thursday reds aan op Whiney.` + `Aansluit deel die name en oesjare in jou kelder (geen pryse of laaie nie) en jou kentekens met die ander lede.`
 
 Button: `Share invite`.
 
@@ -104,10 +104,10 @@ EN:
 ```
 Riley invited you to Thursday reds.
 
-Joining shares a type-and-count summary of Hillside,
-including bottles anyone in that cellar added, and
-your badges. Drink-opens are posted to the club.
-Not a shared fridge.
+Joining shares the names and vintages in Hillside
+(no prices or drawers), including bottles anyone
+in that cellar added, and your badges. Drink-opens
+are posted to the club. Not a shared fridge.
 
 [Join Thursday reds]  [Not now]
 ```
@@ -150,7 +150,7 @@ Join event: `Lee joined` to the others (not to Lee).
 
 ```
 🍷 Thursday reds · 4 members
-Summary · badges on
+Full cellar · badges on
 
 Lee opened a 2019 Merlot 👎
 Sam opened a 2022 Chenin 👍
@@ -163,7 +163,23 @@ Owner also `[Settings]`.
 
 `[Members]`: names, owner crown. Policy line under the title, **not** per-row ticks. Tap Lee → profile: latest open, `[Show cellar]` if visibility is summary/full **and** Lee’s `accepted_sharing_version` matches (or previous level — see widen), `[Badges]` if club badges on and that household’s `gamification_enabled`.
 
-**Summary peek:**
+**Full peek** (default club policy):
+
+```
+Hillside · full cellar
+
+Merlot 2019 · Stellenbosch · ×2
+Chenin Blanc 2022 · Stellenbosch · ×1
+…
+
+and 8 more
+
+[Back]
+```
+
+Up to 30 lines. Never prices, drawers, notes, barcodes, critic/Vivino.
+
+**Summary peek** (owner lowered the club to type-and-count):
 
 ```
 Hillside · summary
@@ -173,8 +189,6 @@ Merlot ×6 · Chenin ×2 · Chardonnay ×2
 
 [Back]
 ```
-
-**Full peek:** up to 30 lines `Merlot 2019 · Stellenbosch · ×2`, then `and 8 more`. Never prices, drawers, notes, barcodes, critic/Vivino.
 
 Two Hillside members in the club: one Hillside card, not two.
 
@@ -220,11 +234,9 @@ No buttons. No club name. No member name. Set `club_share_notice_sent_at=now()`.
 
 Feed-only clubs (`none`): no heads-up.
 
-### J2.9 Owner widens sharing — **OPEN (open-q #5)**
+### J2.9 Owner widens sharing (decided, open-q #5)
 
-Do **not** implement this journey until the owner closes #5. The copy below is the previous suggested call only, not a decision.
-
-Summary → full, or badges off → on, or none → summary: increment `sharing_version`, store previous visibility on the club. DM members (not the owner):
+None → summary, summary → full, none → full, or badges off → on: increment `sharing_version`, store previous visibility on the club. DM members (not the owner):
 
 EN:
 
@@ -367,7 +379,7 @@ Module: `scanner-service/integrations/telegram_clubs.py`. Invite `/start` dispat
 | `cl:u:<club_id>` | mute/unmute toggle |
 | `cl:l:<club_id>` | leave confirm |
 | `cl:s:<club_id>` | owner settings |
-| `cl:w:<club_id>:stay` | re-consent stay (**blocked** until open-q #5) |
+| `cl:w:<club_id>:stay` | re-consent stay (open-q #5) |
 | `cl:fd:<club_id>:<page>` | feed page |
 | `cl:x:<club_id>` | picker / switch last-used |
 | `cl:z:<club_id>` | owner confirm dismantle |
@@ -482,7 +494,7 @@ class Club(models.Model):
     )
     created = models.DateTimeField(auto_now_add=True)
     description = models.TextField(blank=True, default="")
-    cellar_visibility = models.CharField(max_length=8, choices=CELLAR_VISIBILITY, default="summary")
+    cellar_visibility = models.CharField(max_length=8, choices=CELLAR_VISIBILITY, default="full")  # open-q #16; global create forces none
     badges_visible = models.BooleanField(default=True)
     sharing_version = models.PositiveIntegerField(default=1)
     previous_cellar_visibility = models.CharField(max_length=8, blank=True, default="")
@@ -656,7 +668,7 @@ Staff preview/redeem: `IsAdminUser`, like household (token in body).
 
 ### Shapes
 
-**`POST /api/clubs/`** body `{ "name": "Thursday reds", "cellar_visibility": "summary", "badges_visible": true }` → 201:
+**`POST /api/clubs/`** body `{ "name": "Thursday reds", "cellar_visibility": "full", "badges_visible": true }` (omit visibility → model default `full`; omit badges → `true`). Creator may send `summary` or `none`. → 201:
 
 ```json
 {
@@ -664,7 +676,7 @@ Staff preview/redeem: `IsAdminUser`, like household (token in body).
   "name": "Thursday reds",
   "kind": "private",
   "role": "owner",
-  "cellar_visibility": "summary",
+  "cellar_visibility": "full",
   "badges_visible": true,
   "sharing_version": 1,
   "member_count": 1
@@ -683,7 +695,7 @@ Staff preview/redeem: `IsAdminUser`, like household (token in body).
   "name": "Thursday reds",
   "kind": "private",
   "role": "member",
-  "cellar_visibility": "summary",
+  "cellar_visibility": "full",
   "badges_visible": true,
   "sharing_version": 1,
   "accepted_sharing_version": 1,
@@ -710,7 +722,7 @@ Staff preview/redeem: `IsAdminUser`, like household (token in body).
 
 404 if not a member. 404 `not_enabled` if flag off.
 
-**`PATCH /api/clubs/<id>/`** owner only. Body visibility/badges. **Widening is blocked until open-q #5 is closed** — if a widen is posted before that, 400 `{ "error": "widen_not_enabled" }`. Narrowing (full→summary, summary→none, badges on→off) may ship: apply immediately, auto-ack `accepted_sharing_version`. 403 member.
+**`PATCH /api/clubs/<id>/`** owner only. Body visibility/badges. **Widening** (none→summary, summary→full, none→full, badges off→on): bump `sharing_version`, set `previous_*`, queue `club_widen_notice` (J2.9). Peek at the new level only for members with `accepted_sharing_version == current`. **Narrowing** (full→summary, summary→none, badges on→off): apply immediately, auto-ack `accepted_sharing_version`. Global: 400 `{ "error": "global_clubs_are_feed_only" }` if visibility ≠ none. 403 member.
 
 **`PATCH /api/clubs/<id>/membership/`** `{ "feed_muted": true } | { "household_id": 4 } | { "accepted_sharing_version": 2 }`. Stay must equal **current** club version (no jumping). `household_id` must be a household the user belongs to.
 
@@ -752,7 +764,7 @@ Invite mint/redeem while a vote is `open`: 409 `{ "error": "dismantle_in_progres
   "kind": "club",
   "code": "K9m2Pq4r",
   "club": {"id": 3, "name": "Thursday reds"},
-  "cellar_visibility": "summary",
+  "cellar_visibility": "full",
   "badges_visible": true,
   "sharing_version": 1,
   "expires_at": "...",
@@ -878,7 +890,13 @@ def expire_dismantle_votes():
     # beat ~15 min: open votes with expires_at < now → expired; notify
 ```
 
-Do **not** add `club_widen_notice` until open-q #5 closes. Do **not** add a digest task in this phase (open-q #7: per-open until 15 members).
+```python
+@shared_task(name="club_widen_notice")
+def club_widen_notice(club_id):
+    # Stay/Leave DM to members except the owner (J2.9)
+```
+
+Do **not** add a digest task in this phase (open-q #7: per-open until 15 members).
 
 Reuse `_send_telegram`. HTML. `parse_mode=HTML`. Retry once on Telegram 429 (backoff). Do not retry forever. Store `error` on delivery.
 
@@ -888,7 +906,7 @@ Gunicorn must not wait on these.
 
 ## Web UI
 
-Admin for Club, Membership, Invite, Event, DismantleVote/Ballot. Optional read-only `/clubs/` and `/club/<id>/` (session auth, `ClubMembership` gate — **not** `HouseholdScopedMixin`). Owner settings form = the three radios (widen control **hidden** until open-q #5). No React. Homepage cellar challenges unchanged.
+Admin for Club, Membership, Invite, Event, DismantleVote/Ballot. Optional read-only `/clubs/` and `/club/<id>/` (session auth, `ClubMembership` gate — **not** `HouseholdScopedMixin`). Owner settings form = the three radios (widen triggers J2.9). Default on create is full + badges on. No React. Homepage cellar challenges unchanged.
 
 ## Test plan
 
@@ -902,7 +920,11 @@ Django:
 - invite code not in `HouseholdInvite`
 - redeem compound creates household + club
 - redeem already_member idempotent
-- PATCH widen returns 400 `widen_not_enabled` until open-q #5
+- POST omitted `cellar_visibility` → `full`; omitted badges → true
+- global create still `none` (constraint)
+- widen bumps version; unacked peek uses previous
+- stay sets accepted; leave deletes membership
+- narrowing applies immediately and auto-acks
 - owner leave 409 without handover; last leave deletes club
 - dismantle: proposer auto-yes; one no rejects; all yes deletes club; expiry not-unanimous; cancel; join 409 while open; leave mid-vote drops ballot
 - unique one open vote per club
@@ -941,13 +963,13 @@ Bot:
 | **2d** | Peek + badges GET; redacted serializer tests (forbidden keys) | S |
 | **2e** | `publish_club_event` + deliveries + stock/vote/undo hooks; no-op if flag off | M |
 | **2f** | `club_share_notice` task + tests (no names) | S |
-| **2g** | Widen/re-consent — **SKIP until open-q #5** | — |
+| **2g** | Widen/re-consent API + `club_widen_notice` + previous visibility (J2.9) | S |
 | **2h** | `telegram_clubs.py` found/invite/join/home/mute/leave; `/start` dispatcher; copy EN+AF; menu | L — **split if needed:** 2h-join vs 2h-home |
-| **2i** | Peek/members/feed bot screens; settings (narrowing only; no Stay/Leave widen) | M |
+| **2i** | Peek/members/feed bot screens; settings + widen Stay/Leave | M |
 | **2j** | `/help`, `/status`, CLAUDE.md, presence, feature flag wiring in `server.py` | S |
 | **2k** | Dismantle vote models + API + ballot DMs + expire beat + EN/AF copy (J2.10) | M |
 
-Order: **2a → 2b → 2c/2d → 2e/2f → 2h → 2i → 2j → 2k**. Skip **2g** until open-q #5. Do not land 2h before 2c. 2k can follow 2b (API) and 2h (bot module).
+Order: **2a → 2b → 2c/2d → 2e/2f/2g → 2h → 2i → 2j → 2k**. Do not land 2h before 2c. 2k can follow 2b (API) and 2h (bot module).
 
 If 2h is too large, ship **2h1** found+invite+join (growth) before **2h2** home/feed UI (the join still works via `/start`).
 

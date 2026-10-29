@@ -58,14 +58,13 @@ Lists (`WineList`) live in `wine_cellar.apps.wine`. Personal lists are **owned b
 10. **Feed is automatic** from drank / vote / undo. Nobody posts. Catch-up **Moved** is not a feed event. Badge unlocks are not feed events.
 11. **Mute is receive-only.** Opens still record. Leave stops new events from and to that user.
 12. **Invite TTL** (open-q #1): household 30 days, one-use; club 30 days, `max_uses=20`.
-13. **Default club policy** (open-q #16): create requires a pick; UI default summary + badges on.
-14. **Feed digest** (open-q #7): per-open until 15 members; do not build digest in phase 2.
-15. **Taste-off** (open-q #2, #17): scores 1–5; any member may host; owner or host may close. Feed thumbs stay 👎/—/👍.
-16. **Destroying a club** (open-q #11): last member leave deletes it. Owner may propose dismantle; that needs a **unanimous** vote (J2.10). Not unanimous → owner can only leave via handover.
-17. **Global opens** (open-q #19): yes, named on the join card; mute available; never auto-post household drink-by into global.
-18. **Language** (open-q #20): slash commands and the `/` menu stay English. All dialogue / message copy is multilingual (catalog; EN + AF first).
-
-**Still open, do not ship:** owner widens sharing (open-q **#5**) — pending owner clarification. Skip PR 2g / J2.9 until it is closed.
+13. **Default club policy** (open-q #16): create requires a pick; model/UI default **full cellar + badges on**. Creator can lower it. Global clubs stay forced `none`.
+14. **Widen sharing** (open-q #5): DM + Stay/Leave. Peek at the new level only after Stay. Unacked stay at the previous level. Narrowing applies immediately.
+15. **Feed digest** (open-q #7): per-open until 15 members; do not build digest in phase 2.
+16. **Taste-off** (open-q #2, #17): scores 1–5; any member may host; owner or host may close. Feed thumbs stay 👎/—/👍.
+17. **Destroying a club** (open-q #11): last member leave deletes it. Owner may propose dismantle; that needs a **unanimous** vote (J2.10). Not unanimous → owner can only leave via handover.
+18. **Global opens** (open-q #19): yes, named on the join card; mute available; never auto-post household drink-by into global.
+19. **Language** (open-q #20): slash commands and the `/` menu stay English. All dialogue / message copy is multilingual (catalog; EN + AF first).
 
 Other recommended answers: [open-questions.md](open-questions.md). Treat those as the build default unless a later review flips them. Phase PRs should not bikeshed them.
 
@@ -182,7 +181,7 @@ Applies to every phase. A phase PR that violates a cell is a bug, not a product 
 | Club member, visibility `none` | never | never | yes (unmuted) | 404 | 404 | names only (phase 3) | yes |
 | Club member, `summary`, accepted | never | never | yes | counts only | if club+hh flags | names only | yes |
 | Club member, `full`, accepted | never | never | yes | names/vintages, no prices | if flags | names only | yes |
-| Club member, unacked after widen | never | never | yes | **previous** level (if #5 lands that way) | previous | names only | yes |
+| Club member, unacked after widen | never | never | yes | **previous** level | previous | names only | yes |
 | Household partner, not in club | full (their cellar) | **never** (partner has their own list) | no | no | no | no | no |
 | Stranger / other household | never | never | never | never | never | never | never |
 | Staff admin | Django admin | Django admin | Django admin | Django admin | Django admin | Django admin | Django admin |
@@ -220,7 +219,7 @@ Do **not** grow `telegram_bot.py` by another thousand lines. Wire handlers the w
 | `publish_club_event` | 2 | `on_commit` after drank / vote / undo / bulk remove |
 | `deliver_club_event` | 2 | from publish, per distinct `chat_id` |
 | `club_share_notice` | 2 | first sharing join for a household |
-| `club_widen_notice` | 2 | **blocked on open-q #5** — do not ship |
+| `club_widen_notice` | 2 | owner PATCH that widens (open-q #5) |
 | `club_dismantle_ballot` / expire | 2 | owner proposes end-club; 48h timeout |
 | `club_digest` | later | **not in phase 2** (open-q #7; only after 15 members) |
 | `close_stale_tasteoffs` | 3 | beat, daily |
@@ -238,7 +237,7 @@ Do **not** route “what did Riley open?” or “add this to my list” through
 | --- | --- | --- |
 | Notification fatigue | Drink-by + empty-cellar + badge GIFs already DM people | One line per open, no badge spam, mute one tap, no peek pings. Digest only after 15 members (open-q #7) |
 | Privacy leak | Reusing `WineInStockView` would ship prices, drawers, comments | Dedicated peek serializer; forbidden-key tests; join card must match serializer |
-| Widening after join | Owner turns summary → full; existing members never tapped that | **Open-q #5 pending.** Do not ship widen until the owner closes it |
+| Widening after join | Owner turns summary → full (or none → full); existing members never tapped that | `sharing_version` + Stay/Leave DMs; unacked stay at previous level (open-q #5) |
 | Partner / shared cellar | Two memberships, one stock. Partner may not be in the club | Joiner’s card names the household. Others: nameless heads-up, no veto, once |
 | To-drink becomes fake stock | Fastest path is a Wishlist `Storage` | Separate models. Tests that list items never appear in `WineInStockView` |
 | Club as household | Fastest path is `kind=club` on `HouseholdInvite` | New app; review gate |
