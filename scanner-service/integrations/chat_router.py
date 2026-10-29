@@ -347,6 +347,21 @@ class ChatRouter:
         if intent in ("search", "unsure", None):
             box["handled"] = False
             return
+        if intent == "drink":
+            wine_ref = (parsed.get("wine_ref") or "").strip()
+            fact = parsed.get("fact") if isinstance(parsed.get("fact"), dict) else {}
+            location = (fact.get("storage_text") or "").strip()
+            if not wine_ref or wine_ref.casefold() in {
+                "this", "it", "that", "dit", "hierdie",
+            }:
+                box["handled"] = await self.handler._maybe_typed_stock(
+                    update, context, "Drank this",
+                )
+            else:
+                box["handled"] = await self.handler._typed_drink_named(
+                    update, context, api, None, wine_ref, location,
+                )
+            return
         if intent == "wine_chat":
             await self._wine_chat(update, context, api, chat_id, text)
             box["handled"] = True

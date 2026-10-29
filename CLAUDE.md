@@ -38,7 +38,7 @@ start.sh / stop.sh    # Service orchestration
 Auth: `Authorization: Token <token>` header. Optional `X-Household: <id>` header.
 
 - `GET /api/wines/by-barcode/<ean>/` — Barcode lookup
-- `GET /api/wines/in-stock/` — Stock list (filter by `?storage=Name`). Each wine also carries `vintage`, `region`, `grapes`, `comment`, purchase `price`, `drink_by`, `rating`, `critic_score`, `vivino_rating`, `attributes`, `food_pairings`, drunk-only `votes`, and `items[].price`. `name` still includes the vintage and `grape` is still the first grape.
+- `GET /api/wines/in-stock/` — Stock list (filter by `?storage=Name`). Each wine also carries `vintage`, `region`, `appellation`, `grapes`, `comment`, purchase `price`, `drink_by`, `rating`, `critic_score`, `vivino_rating`, `attributes`, `food_pairings`, drunk-only `votes`, and `items[].price`. `name` still includes the vintage and `grape` is still the first grape.
 - `GET /api/wines/search/?q=<query>` — Search wines
 - `GET /api/wines/all/` — List all wines
 - `POST /api/wines/` — Create wine

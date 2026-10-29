@@ -11,7 +11,7 @@ import unicodedata
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 from urllib.parse import urlparse
 
 from telegram import (
@@ -33,6 +33,7 @@ from telegram.ext import (
 )
 
 from integrations.card_store import CardStore, StoreError
+from integrations.cellar_facts import fold as _fold_stock, resolve_storage
 
 logger = logging.getLogger(__name__)
 
@@ -42,21 +43,45 @@ TYPED_ADD_RE = re.compile(
     r"^(confirm|add|add it|add to cellar|yes|ok|\u2705)\W*$",
     re.IGNORECASE,
 )
-TYPED_DRANK_THIS_RE = re.compile(
-    r"^(?:(?:i|ek)\s+)?"
-    r"(?:drank this|drank it|remove one|gedrink|het dit gedrink|verwyder een)"
-    r"\W*$",
+# Drink/remove typing. Add a language by appending a pack; phrases are
+# matched longest-first so "from my" wins over "from".
+_TYPED_STOCK_PACKS = (
+    {
+        "subjects": ("i have", "i've", "i", "we"),
+        "lead_verbs": ("took out", "drank", "removed", "remove", "finished"),
+        "trail_verbs": (),
+        "this": (
+            "drank this", "drank it", "drank that", "remove one",
+            "take one out", "took it out",
+        ),
+        "qty": (
+            "a bottle of", "some bottles of", "bottles of", "bottle of",
+            "one of my", "some of my", "my last", "the last",
+            "some", "one", "a", "an", "my",
+        ),
+        "loc_prep": (
+            "from my", "from the", "from our", "from",
+            "in my", "in the", "in our", "in",
+        ),
+    },
+    {
+        "subjects": ("ek het", "ek", "ons het", "ons"),
+        "lead_verbs": ("verwyder",),
+        "trail_verbs": ("gedrink", "verwyder", "uitgehaal"),
+        "this": ("gedrink", "het dit gedrink", "verwyder een", "verwyder dit"),
+        "qty": (
+            "'n bottel van", "n bottel van", "'n bottel", "n bottel",
+            "een van my", "my laaste", "die laaste", "een", "'n", "my",
+        ),
+        "loc_prep": ("uit die", "uit my", "in die", "in my", "uit", "in"),
+    },
+)
+_TYPED_STOCK_SKIP = re.compile(
+    r"^(?:what|which|watter|wat|should|shall|want|wanna|something|how)\b",
     re.IGNORECASE,
 )
-TYPED_DRANK_OF_RE = re.compile(
-    r"^(?:(?:i|ek)\s+)?"
-    r"(?:drank|removed?|verwyder|het)\s+"
-    r"(?:one|een|a)\s+"
-    r"(?:of\s+(?:my\s+)?|van\s+my\s+)?"
-    r"(.+?)"
-    r"(?:\s+gedrink)?"
-    r"\W*$",
-    re.IGNORECASE,
+_STOCK_MATCH_KEYS = (
+    "name", "producer", "grape", "region", "appellation", "appellation_name",
 )
 PHOTO_TRIAGE_FAILED = (
     "I couldn't read that photo in time. Send it again — "
@@ -67,36 +92,168 @@ WINE_SITE_LINK = "Open in Whiney Wino"
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
 
 
-def parse_typed_stock(text: str) -> tuple[str, str] | None:
-    """Map a typed drink/remove line to ('this', '') or ('of', query)."""
-    raw = (text or "").strip()
-    if not raw:
+class TypedStock(NamedTuple):
+    """A typed drink/remove line: point at the open card, or name a wine."""
+
+    kind: str
+    query: str = ""
+    location: str = ""
+
+
+def _stock_phrases(key: str) -> tuple[str, ...]:
+    seen: list[str] = []
+    for pack in _TYPED_STOCK_PACKS:
+        for phrase in pack[key]:
+            if phrase not in seen:
+                seen.append(phrase)
+    return tuple(sorted(seen, key=len, reverse=True))
+
+
+def _strip_prefix_phrase(text: str, phrases: tuple[str, ...]) -> str:
+    for phrase in phrases:
+        if text == phrase:
+            return ""
+        prefix = f"{phrase} "
+        if text.startswith(prefix):
+            return text[len(prefix):].strip()
+    return text
+
+
+def _strip_suffix_phrase(text: str, phrases: tuple[str, ...]) -> str:
+    for phrase in phrases:
+        if text == phrase:
+            return ""
+        suffix = f" {phrase}"
+        if text.endswith(suffix):
+            return text[:-len(suffix)].strip()
+    return text
+
+
+def _is_typed_this(folded: str) -> bool:
+    for phrase in _stock_phrases("this"):
+        if folded == phrase:
+            return True
+        for subject in _stock_phrases("subjects"):
+            if folded == f"{subject} {phrase}":
+                return True
+    return False
+
+
+def _has_stock_verb(folded: str) -> bool:
+    rest = _strip_prefix_phrase(folded, _stock_phrases("subjects"))
+    for phrase in _stock_phrases("lead_verbs"):
+        if rest == phrase or rest.startswith(f"{phrase} "):
+            return True
+    for phrase in _stock_phrases("trail_verbs"):
+        if folded == phrase or folded.endswith(f" {phrase}"):
+            return True
+    return False
+
+
+def _split_location(text: str) -> tuple[str, str]:
+    for prep in _stock_phrases("loc_prep"):
+        needle = f" {prep} "
+        idx = text.rfind(needle)
+        if idx < 0:
+            continue
+        query = text[:idx].strip()
+        location = text[idx + len(needle):].strip()
+        if query and location:
+            return query, location
+    return text, ""
+
+
+def parse_typed_stock(text: str) -> TypedStock | None:
+    """Map a typed drink/remove line to this-card or a named wine + location."""
+    raw = (text or "").strip().strip(".!,")
+    if not raw or "?" in raw:
         return None
-    if TYPED_DRANK_THIS_RE.match(raw):
-        return "this", ""
-    match = TYPED_DRANK_OF_RE.match(raw)
-    if match:
-        query = (match.group(1) or "").strip()
-        if query:
-            return "of", query
-    return None
+    folded = _fold_stock(raw)
+    if _TYPED_STOCK_SKIP.match(folded):
+        return None
+    if _is_typed_this(folded):
+        return TypedStock("this")
+    if not _has_stock_verb(folded):
+        return None
+    body = _strip_prefix_phrase(folded, _stock_phrases("subjects"))
+    body = _strip_prefix_phrase(body, _stock_phrases("lead_verbs"))
+    body = _strip_suffix_phrase(body, _stock_phrases("trail_verbs"))
+    body, location = _split_location(body)
+    body = _strip_prefix_phrase(body, _stock_phrases("qty"))
+    query = body.strip(" .,!")
+    if not query:
+        if location:
+            return TypedStock("of", "", location)
+        return TypedStock("this")
+    return TypedStock("of", query, location)
+
+
+def _stock_needles(query: str) -> list[str]:
+    needle = _fold_stock(query)
+    if not needle:
+        return []
+    needles = [needle]
+    if needle.endswith("s") and len(needle) > 3:
+        needles.append(needle[:-1])
+    return [n for n in needles if len(n) >= 3]
+
+
+def _wine_match_blob(wine: dict) -> str:
+    parts = [str(wine.get(key) or "") for key in _STOCK_MATCH_KEYS]
+    grapes = wine.get("grapes") or []
+    if isinstance(grapes, list):
+        parts.extend(str(g) for g in grapes if g)
+    elif grapes:
+        parts.append(str(grapes))
+    wine_type = str(wine.get("wine_type") or "")
+    parts.append(wine_type)
+    parts.append(WINE_TYPES.get(wine_type, ""))
+    return _fold_stock(" ".join(parts))
 
 
 def match_in_stock_wines(wines: list[dict], query: str) -> list[dict]:
-    """In-stock rows whose name/producer/grape mention the typed wine."""
-    needle = (query or "").strip().lower()
-    if not needle:
+    """In-stock rows whose name/producer/grape/region/appellation mention the query."""
+    needles = _stock_needles(query)
+    if not needles:
         return []
-    stem = needle[:-1] if needle.endswith("s") and len(needle) > 4 else needle
     hits = []
     for wine in wines or []:
-        blob = " ".join(
-            str(wine.get(key) or "")
-            for key in ("name", "producer", "grape", "region")
-        ).lower()
-        if needle in blob or stem in blob:
+        blob = _wine_match_blob(wine)
+        if any(needle in blob for needle in needles):
             hits.append(wine)
     return hits
+
+
+def similar_in_stock_wines(wines: list[dict], query: str, limit: int = 5) -> list[dict]:
+    """Looser token overlap for a typed drink that missed an exact match."""
+    tokens = [t for t in re.findall(r"[a-z0-9]+", _fold_stock(query)) if len(t) >= 3]
+    stems: list[str] = []
+    for token in tokens:
+        stems.append(token)
+        if token.endswith("s") and len(token) > 4:
+            stems.append(token[:-1])
+    if not stems:
+        return []
+    scored = []
+    for wine in wines or []:
+        blob = _wine_match_blob(wine)
+        score = sum(1 for stem in stems if stem in blob)
+        if score:
+            scored.append((score, wine))
+    scored.sort(key=lambda item: -item[0])
+    return [wine for _score, wine in scored[:limit]]
+
+
+def match_storage_name(location: str, storages) -> str:
+    """Unique household storage for a trailing 'from/in/uit' phrase, else ''."""
+    names = []
+    for item in storages or []:
+        if isinstance(item, str) and item:
+            names.append(item)
+        elif isinstance(item, dict) and item.get("name"):
+            names.append(item["name"])
+    hits = resolve_storage(location or "", names)
+    return hits[0] if len(hits) == 1 else ""
 
 
 def _confirm_drink_markup(wine_id: int) -> InlineKeyboardMarkup:
@@ -1457,6 +1614,30 @@ def _wine_choice_label(wine: dict, limit: int = 50) -> str:
         return f"{name} · {tail}"
     room = max(8, limit - len(tail) - 3)
     return f"{name[:room].rstrip()} · {tail}"[:limit]
+
+
+def _place_bit(wine: dict) -> str:
+    items = wine.get("items") or []
+    if not items:
+        return ""
+    item = items[0] if isinstance(items[0], dict) else {}
+    storage = str(item.get("storage") or "").strip()
+    drawer = item.get("drawer")
+    if drawer is not None and storage:
+        return f"{storage} D{drawer}"
+    return storage
+
+
+def _drink_choice_label(wine: dict, limit: int = 64) -> str:
+    """Picker row for a drink/remove match: name plus storage/drawer."""
+    name = str(wine.get("name") or "that wine")
+    place = _place_bit(wine)
+    if not place:
+        return name[:limit]
+    if len(name) + 3 + len(place) <= limit:
+        return f"{name} · {place}"
+    room = max(8, limit - len(place) - 3)
+    return f"{name[:room].rstrip()} · {place}"[:limit]
 
 
 def merge_front_back(front: dict | None, back: dict | None) -> dict:
@@ -3264,53 +3445,67 @@ class TelegramBotHandler:
         it used to spend the turn explaining that only commands work.
         """
         text = (update.message.text or "").strip()
+        handled_by = "none"
+        try:
+            if await self._invite_flow().on_text(update, context):
+                handled_by = "invite"
+                return
 
-        if await self._club_flow().on_text(update, context):
-            return
+            if await self._club_flow().on_text(update, context):
+                handled_by = "club"
+                return
 
-        if await self._invite_flow().on_text(update, context):
-            return
+            # A pasted link is not a wine name. Searching the cellar for a URL
+            # returns nothing and tells the sender nothing about why.
+            if re.search(r"https?://|www\.", text, re.IGNORECASE):
+                handled_by = "link"
+                await update.message.reply_text(
+                    "\U0001F517 I can't open links yet.\n\n"
+                    "If that's a wine list, take a <b>screenshot</b> or photo of it "
+                    "and send me that — I'll read it and tell you what to order.",
+                    parse_mode="HTML",
+                )
+                return
 
-        # A pasted link is not a wine name. Searching the cellar for a URL
-        # returns nothing and tells the sender nothing about why.
-        if re.search(r"https?://|www\.", text, re.IGNORECASE):
+            # Drink/remove-one-of-my-X must beat country/region browse and the
+            # wine-detail lookup — those used to list every Italian wine or open
+            # a card for "I drank one of my barolos" / "Remove one of my barolos".
+            if await self._maybe_typed_stock(update, context, text):
+                handled_by = "typed_stock"
+                return
+
+            if await self._maybe_correct_winelist_text(update, text):
+                handled_by = "winelist_correction"
+                return
+
+            if await self._maybe_typed_add(update, context, text):
+                handled_by = "typed_add"
+                return
+
+            if await self._maybe_take_producer(update, text, context):
+                handled_by = "producer"
+                return
+
+            if await self._maybe_identify_misread_text(update, text):
+                handled_by = "misread"
+                return
+
+            if len(text) >= 3:
+                router = getattr(self, "_router", None)
+                if router is not None and await router.handle_text(update, context, text):
+                    handled_by = "chat"
+                    return
+                handled_by = "search"
+                await self._do_search(update, text)
+                return
+            handled_by = "hint"
             await update.message.reply_text(
-                "\U0001F517 I can't open links yet.\n\n"
-                "If that's a wine list, take a <b>screenshot</b> or photo of it "
-                "and send me that — I'll read it and tell you what to order.",
+                "\U0001F4A1 Type a wine name to search, send a <b>photo</b> of a bottle to add one, "
+                "or try /help.",
                 parse_mode="HTML",
             )
-            return
-
-        # Drink/remove-one-of-my-X must beat country/region browse and the
-        # wine-detail lookup — those used to list every Italian wine or open
-        # a card for "I drank one of my barolos" / "Remove one of my barolos".
-        if await self._maybe_typed_stock(update, context, text):
-            return
-
-        if await self._maybe_correct_winelist_text(update, text):
-            return
-
-        if await self._maybe_typed_add(update, context, text):
-            return
-
-        if await self._maybe_take_producer(update, text, context):
-            return
-
-        if await self._maybe_identify_misread_text(update, text):
-            return
-
-        if len(text) >= 3:
-            router = getattr(self, "_router", None)
-            if router is not None and await router.handle_text(update, context, text):
-                return
-            await self._do_search(update, text)
-            return
-        await update.message.reply_text(
-            "\U0001F4A1 Type a wine name to search, send a <b>photo</b> of a bottle to add one, "
-            "or try /help.",
-            parse_mode="HTML",
-        )
+        finally:
+            logger.info("[text] handler=%s text=%r", handled_by, text[:240])
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         api = self._get_api(update)
@@ -7498,13 +7693,12 @@ class TelegramBotHandler:
         parsed = parse_typed_stock(text)
         if not parsed:
             return False
-        kind, query_name = parsed
         try:
             api = self._get_api(update)
         except Exception:
             return False
         query = _as_edit_query(update)
-        if kind == "this":
+        if parsed.kind == "this":
             cards = self._open_label_cards(
                 api, max_age=TYPED_ADD_TTL, include_complete=True,
             )
@@ -7528,21 +7722,37 @@ class TelegramBotHandler:
             query.data = _cb("dk", barcode=barcode)
             await self._dispatch_callback(fake, context)
             return True
-        return await self._typed_drink_named(update, context, api, query, query_name)
+        return await self._typed_drink_named(
+            update, context, api, query, parsed.query, parsed.location,
+        )
 
-    async def _typed_drink_named(self, update, context, api, query, query_name: str) -> bool:
+    def _typed_storage_name(self, api, location: str) -> str:
+        if not (location or "").strip():
+            return ""
         try:
-            wines = api.wines_in_stock()
+            storages = api.list_storages() or []
+        except Exception:
+            storages = []
+        return match_storage_name(location, storages)
+
+    async def _typed_drink_named(
+        self, update, context, api, query, query_name: str, location: str = "",
+    ) -> bool:
+        if query is None:
+            query = _as_edit_query(update)
+        storage = self._typed_storage_name(api, location)
+        try:
+            wines = api.wines_in_stock(storage_name=storage) if storage else api.wines_in_stock()
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
             return True
-        hits = match_in_stock_wines(wines, query_name)
+        if query_name.strip():
+            hits = match_in_stock_wines(wines, query_name)
+        else:
+            hits = list(wines or [])
         if not hits:
-            await update.message.reply_text(
-                f"Nothing matching <b>{html.escape(query_name, quote=False)}</b> "
-                f"in stock.\n\nSend a label photo if you've just finished a bottle "
-                f"that isn't on the shelf list.",
-                parse_mode="HTML",
+            await self._typed_drink_no_match(
+                query, api, query_name, storage, wines,
             )
             return True
         if len(hits) == 1:
@@ -7556,12 +7766,48 @@ class TelegramBotHandler:
         await self._offer_drink_picks(query, hits, confirm=True)
         return True
 
+    async def _typed_drink_no_match(
+        self, query, api, query_name: str, storage: str, wines: list[dict],
+    ) -> None:
+        shown = html.escape(query_name or "that", quote=False)
+        where = f" in <b>{html.escape(storage, quote=False)}</b>" if storage else ""
+        text = f"Nothing matching <b>{shown}</b>{where} in stock."
+        similar = similar_in_stock_wines(wines, query_name) if query_name else []
+        if not similar and storage:
+            try:
+                similar = similar_in_stock_wines(api.wines_in_stock(), query_name)
+            except Exception:
+                similar = []
+        keyboard = []
+        if similar:
+            text += "\n\nClosest in stock:"
+            for wine in similar[:5]:
+                keyboard.append([InlineKeyboardButton(
+                    _drink_choice_label(wine),
+                    callback_data=_cb("dc", wine_id=wine["id"]),
+                )])
+        text += (
+            "\n\nBrowse the fridge, or send a label photo if it wasn't in the cellar."
+        )
+        browse = storage or "__all__"
+        browse_label = f"Browse {storage}" if storage else "Browse stock"
+        keyboard.append([InlineKeyboardButton(
+            browse_label, callback_data=_cb("fs", original=browse),
+        )])
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data=_cb("x"))])
+        await _safe_edit(
+            query,
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
     async def _offer_drink_picks(self, query, wines: list[dict], *, confirm: bool = False):
         keyboard = []
         action = "dc" if confirm else "dx"
         for wine in wines[:8]:
             keyboard.append([InlineKeyboardButton(
-                _wine_choice_label(wine),
+                _drink_choice_label(wine),
                 callback_data=_cb(action, wine_id=wine["id"]),
             )])
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data=_cb("x"))])
