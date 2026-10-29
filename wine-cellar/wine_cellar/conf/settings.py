@@ -57,6 +57,7 @@ INSTALLED_APPS = [
     "rest_framework.authtoken",
     "wine_cellar.apps.api",
     "wine_cellar.apps.scanner",
+    "wine_cellar.apps.club",
 ]
 
 REST_FRAMEWORK = {
@@ -95,6 +96,7 @@ TEMPLATES = [
                 "django.template.context_processors.request",
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
+                "wine_cellar.apps.scanner.flags.flags_context",
             ],
         },
     },

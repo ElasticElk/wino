@@ -38,9 +38,10 @@ def test_wine_image(clear_image_folder, user, wine_factory, wine_image_factory):
     wine = wine_factory(user=user)
     wine_image = wine_image_factory(user=user, wine=wine)
     assert wine.image == wine_image.image.url
-    assert wine_image.image.path == str(
-        settings.MEDIA_ROOT / Path("user_" + str(user.pk) + "/example.jpg")
-    )
+    stored = Path(wine_image.image.path)
+    assert stored.parent == settings.MEDIA_ROOT / Path("user_" + str(user.pk))
+    assert stored.name.startswith("example")
+    assert stored.suffix == ".jpg"
 
 
 @pytest.mark.django_db

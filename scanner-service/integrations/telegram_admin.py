@@ -536,6 +536,11 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE, handler)
             f"Lists: <b>{data.get('lists_open', 0)}</b> items "
             f"({data.get('lists_moved', 0)} moved)"
         ),
+        (
+            f"Clubs: <b>{data.get('clubs', 0)}</b> "
+            f"({data.get('club_members', 0)} members), "
+            f"feed events 7d: {data.get('feed_events_7d', 0)}"
+        ),
     ]
     scanners = data.get("scanners") or []
     if scanners:

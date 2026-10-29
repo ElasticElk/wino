@@ -18,4 +18,8 @@ celery_app.conf.beat_schedule = {
         "task": "empty_cellar_nudge",
         "schedule": crontab(minute="0", hour="10"),
     },
+    "expire_dismantle_votes": {
+        "task": "expire_dismantle_votes",
+        "schedule": crontab(minute="*/15"),
+    },
 }

@@ -1,0 +1,14 @@
+{% extends 'base.html' %}
+{% load i18n %}
+{% block header %}
+    <h1 class="header__title">{% translate "Club settings" %} · {{ club.name }}</h1>
+{% endblock header %}
+{% block content %}
+    <p>{% translate "Everyone who joins shares this with the club. Widening asks members to Stay or Leave." %}</p>
+    <form method="post" class="pure-form pure-form-stacked">
+        {% csrf_token %}
+        {{ form.as_p }}
+        <button type="submit" class="pure-button button__primary">{% translate "Save" %}</button>
+        <a href="{% url 'club-detail' club.id %}" class="pure-button">{% translate "Back" %}</a>
+    </form>
+{% endblock content %}

@@ -53,6 +53,153 @@ MESSAGES: dict[str, dict[str, str]] = {
         "list.newer": "Newer 5",
         "list.where": "Where are you storing this?",
         "list.drawer": "Which drawer?",
+        "club.off": "Wine clubs aren't on yet.",
+        "club.err": "Couldn't reach the club just now.",
+        "club.not_member": "You're not in that club.",
+        "club.forbidden": "Only the owner can change that.",
+        "club.name_taken": "You already have a club with that name.",
+        "club.fresh": (
+            "That invite has expired or was already used. Ask them for a fresh link."
+        ),
+        "club.unreachable": (
+            "Couldn't reach the cellar just now — tap the link again in a minute."
+        ),
+        "club.pitch": (
+            "Wine clubs are for drinking with people who have their own cellars.\n\n"
+            "Not a shared fridge — you each keep your own."
+        ),
+        "club.found.btn": "Found a club",
+        "club.found.name": "What should we call it?",
+        "club.share.ask": (
+            "What does {name} share?\n\nEveryone who joins shares this with the club."
+        ),
+        "club.share.summary": "Type and count",
+        "club.share.full": "Full cellar",
+        "club.share.none": "Drink feed only",
+        "club.share.badges_on": "Badges: on",
+        "club.share.badges_off": "Badges: off",
+        "club.create.btn": "Create club",
+        "club.invite.body": (
+            "Join {name} on Whiney.\n\n{policy}\n\nTap this, then Start:\n{link}\n\n"
+            "Forward this, or tap Share.\n\nWorks until {date}, up to {n} uses."
+        ),
+        "club.policy.summary": (
+            "Joining shares a type-and-count summary of your cellar and your badges "
+            "with the other members. Drink-opens are posted automatically. Not a shared fridge."
+        ),
+        "club.policy.full": (
+            "Joining shares the names and vintages in your cellar (no prices or drawers) "
+            "and your badges. Drink-opens are posted automatically. Not a shared fridge."
+        ),
+        "club.policy.none": (
+            "Joining posts drink-opens automatically. Your cellar stays private."
+        ),
+        "club.policy_of.summary": "a type-and-count summary of",
+        "club.policy_of.full": "the names and vintages in",
+        "club.policy_of.none": "only the drink feed from",
+        "club.join.known": (
+            "{inviter} invited you to {club}.\n\n"
+            "Joining shares {policy_of} {household}, including bottles anyone "
+            "in that cellar added. Drink-opens are posted to the club. Not a shared fridge."
+        ),
+        "club.join.btn": "Join {name}",
+        "club.join.not_now": "Not now",
+        "club.join.pick_hh": "Which cellar should {club} see?",
+        "club.not_now.ok": "No problem. That link still works until {date}.",
+        "club.feed.opened": "{name} opened a {vintage} {wine}",
+        "club.feed.put_back": "{name} put the {vintage} {wine} back.",
+        "club.feed.joined": "{name} joined",
+        "club.muted": (
+            "Muted {name}. Opens still go to the club; you won't get pings. /club then Unmute."
+        ),
+        "club.unmuted": "Unmuted {name}.",
+        "club.left": "You've left {name}.",
+        "club.handover.need": "Hand the club to someone else first.",
+        "club.handover.btn": "Hand over",
+        "club.hh.notice": (
+            "Just so you know — this cellar is now shared\n"
+            "inside a wine club.\n\n"
+            "Only people in the club can see it, and only\n"
+            "what the club allows. Whiney never shares a\n"
+            "cellar any other way."
+        ),
+        "club.widen.body": (
+            "{club} now shares the {level}.\n\n"
+            "You already share a {old}. Stay to share the new level, or leave."
+        ),
+        "club.widen.stay": "Stay",
+        "club.widen.leave": "Leave",
+        "club.switch.ask": "Use {household} for {club}?",
+        "club.switch.yes": "Yes",
+        "club.switch.keep": "Keep {household}",
+        "club.home.invite": "Invite",
+        "club.home.members": "Members",
+        "club.home.feed": "Feed",
+        "club.home.mute": "Mute",
+        "club.home.unmute": "Unmute",
+        "club.home.settings": "Settings",
+        "club.home.leave": "Leave",
+        "club.peek.btn": "Show cellar",
+        "club.badges.btn": "Badges",
+        "club.peek.summary_title": "{household} · summary",
+        "club.peek.full_title": "{household} · full cellar",
+        "club.peek.more": "and {n} more",
+        "club.help": "Wine clubs",
+        "club.status.ready": "Clubs: ready",
+        "club.status.resting": "Clubs: off",
+        "club.end.btn": "End this club",
+        "club.end.confirm": (
+            "End {name}?\n\nEvery member has to agree. If anyone says no, "
+            "or doesn't reply within 48 hours, the club stays.\n\nThis can't be undone."
+        ),
+        "club.end.ask": "Ask everyone",
+        "club.end.cancel": "Cancel",
+        "club.end.ballot": (
+            "{name} wants to end {club}.\n\n"
+            "If everyone says yes, the club and its feed go away. "
+            "If anyone says no, or doesn't reply in time, nothing changes."
+        ),
+        "club.end.yes": "Yes, end it",
+        "club.end.no": "No, keep it",
+        "club.end.status": (
+            "Ending {club} — waiting on {n} votes.\n"
+            "Yes: {yes_n} · No: {no_n}\n"
+            "Waiting: {waiting}\n\n"
+            "Closes {date} if not everyone has voted."
+        ),
+        "club.end.rejected": "{name} voted to keep {club}. The club stays.",
+        "club.end.passed": "{club} has ended.",
+        "club.end.expired": "Not everyone voted in time. {club} stays.",
+        "club.end.cancelled": "Cancelled. {club} stays.",
+        "club.end.in_progress": (
+            "This club is deciding whether to close. Ask for a new link later."
+        ),
+        "club.end.over": "That vote is over.",
+        "club.picker.title": "Your wine clubs",
+        "club.leave.ask": "Leave {name}?",
+        "club.leave.yes": "Leave",
+        "club.leave.keep": "Stay",
+        "club.feed.empty": "Nobody's opened a bottle yet. Opens show up here.",
+        "club.members.empty": "Just you so far. Invite someone.",
+        "club.peek.none": "This club only shares the drink feed.",
+        "club.badges.off": "Badges aren't shared here.",
+        "club.name.retry": "What should we call it? 2–40 characters.",
+        "club.created": "{name} is live.",
+        "club.back": "Back",
+        "club.feed.newer": "Newer",
+        "club.feed.older": "Older",
+        "club.home.n_members": "{n} members",
+        "club.invite.cancelled": "Cancelled invite {code}.",
+        "club.invite.share": "Join {name} on Whiney.",
+        "club.type.RE": "Red",
+        "club.type.WH": "White",
+        "club.type.RO": "Rosé",
+        "club.type.SP": "Sparkling",
+        "club.type.DE": "Dessert",
+        "club.type.FO": "Fortified",
+        "club.type.OR": "Orange",
+        "club.named.ok": "OK — here's what joining shares.",
+        "club.hh.taken": "That name's taken — pick another",
     },
     "af": {
         "invite.join.share": (
@@ -99,6 +246,153 @@ MESSAGES: dict[str, dict[str, str]] = {
         "list.newer": "Nuwer 5",
         "list.where": "Waar sit jy dit?",
         "list.drawer": "Watter laai?",
+        "club.off": "Wynklubs is nog nie aan nie.",
+        "club.err": "Kon nie die klub nou bereik nie.",
+        "club.not_member": "Jy is nie in daai klub nie.",
+        "club.forbidden": "Net die eienaar kan dit verander.",
+        "club.name_taken": "Jy het al 'n klub met daai naam.",
+        "club.fresh": (
+            "Daai uitnodiging het verval of is al gebruik. Vra vir 'n nuwe skakel."
+        ),
+        "club.unreachable": (
+            "Kon nie die kelder nou bereik nie — tik die skakel oor 'n minuut weer."
+        ),
+        "club.pitch": (
+            "Wynklubs is om te drink met mense wat hul eie kelders het.\n\n"
+            "Nie 'n gedeelde yskas nie — elkeen hou sy eie."
+        ),
+        "club.found.btn": "Begin 'n klub",
+        "club.found.name": "Wat noem ons dit?",
+        "club.share.ask": (
+            "Wat deel {name}?\n\nAlmal wat aansluit deel dit met die klub."
+        ),
+        "club.share.summary": "Tipe en aantal",
+        "club.share.full": "Vol kelder",
+        "club.share.none": "Net die drink-lys",
+        "club.share.badges_on": "Kentekens: aan",
+        "club.share.badges_off": "Kentekens: af",
+        "club.create.btn": "Skep klub",
+        "club.invite.body": (
+            "Sluit by {name} aan op Whiney.\n\n{policy}\n\nTik hier, dan Start:\n{link}\n\n"
+            "Stuur aan, of tik Deel.\n\nWerk tot {date}, tot {n} keer."
+        ),
+        "club.policy.summary": (
+            "Aansluit deel 'n tipe-en-aantal opsomming van jou kelder en jou kentekens "
+            "met die ander lede. Drink-oops word outomaties geplaas. Nie 'n gedeelde yskas nie."
+        ),
+        "club.policy.full": (
+            "Aansluit deel die name en oesjare in jou kelder (geen pryse of laaie nie) "
+            "en jou kentekens. Drink-oops word outomaties geplaas. Nie 'n gedeelde yskas nie."
+        ),
+        "club.policy.none": (
+            "Aansluit plaas drink-oops outomaties. Jou kelder bly privaat."
+        ),
+        "club.policy_of.summary": "'n tipe-en-aantal opsomming van",
+        "club.policy_of.full": "die name en oesjare in",
+        "club.policy_of.none": "net die drink-lys van",
+        "club.join.known": (
+            "{inviter} het jou na {club} genooi.\n\n"
+            "Aansluit deel {policy_of} {household}, insluitend bottels wat enigiemand "
+            "in daai kelder bygevoeg het. Drink-oops gaan na die klub. Nie 'n gedeelde yskas nie."
+        ),
+        "club.join.btn": "Sluit by {name} aan",
+        "club.join.not_now": "Nou nie",
+        "club.join.pick_hh": "Watter kelder moet {club} sien?",
+        "club.not_now.ok": "Geen probleem. Daai skakel werk tot {date}.",
+        "club.feed.opened": "{name} het 'n {vintage} {wine} oopgemaak",
+        "club.feed.put_back": "{name} het die {vintage} {wine} teruggesit.",
+        "club.feed.joined": "{name} het aangesluit",
+        "club.muted": (
+            "{name} is stil. Oops gaan nog na die klub; jy kry nie pings nie. /club dan Unmute."
+        ),
+        "club.unmuted": "{name} is nie meer stil nie.",
+        "club.left": "Jy het {name} verlaat.",
+        "club.handover.need": "Gee eers die klub aan iemand anders.",
+        "club.handover.btn": "Gee oor",
+        "club.hh.notice": (
+            "Net gou — hierdie kelder word nou binne 'n\n"
+            "wynklub gedeel.\n\n"
+            "Net mense in die klub kan dit sien, en net\n"
+            "wat die klub toelaat. Whiney deel nooit 'n\n"
+            "kelder op 'n ander manier nie."
+        ),
+        "club.widen.body": (
+            "{club} deel nou die {level}.\n\n"
+            "Jy deel al 'n {old}. Bly om die nuwe vlak te deel, of loop."
+        ),
+        "club.widen.stay": "Bly",
+        "club.widen.leave": "Loop",
+        "club.switch.ask": "Gebruik {household} vir {club}?",
+        "club.switch.yes": "Ja",
+        "club.switch.keep": "Hou {household}",
+        "club.home.invite": "Nooi",
+        "club.home.members": "Lede",
+        "club.home.feed": "Lys",
+        "club.home.mute": "Stil",
+        "club.home.unmute": "Praat",
+        "club.home.settings": "Instellings",
+        "club.home.leave": "Loop",
+        "club.peek.btn": "Wys kelder",
+        "club.badges.btn": "Kentekens",
+        "club.peek.summary_title": "{household} · opsomming",
+        "club.peek.full_title": "{household} · vol kelder",
+        "club.peek.more": "en nog {n}",
+        "club.help": "Wynklubs",
+        "club.status.ready": "Klubs: gereed",
+        "club.status.resting": "Klubs: af",
+        "club.end.btn": "Beëindig hierdie klub",
+        "club.end.confirm": (
+            "Beëindig {name}?\n\nElke lid moet saamstem. As iemand nee sê, "
+            "of nie binne 48 uur antwoord nie, bly die klub.\n\nDit kan nie ontdoen word nie."
+        ),
+        "club.end.ask": "Vra almal",
+        "club.end.cancel": "Kanselleer",
+        "club.end.ballot": (
+            "{name} wil {club} beëindig.\n\n"
+            "As almal ja sê, verdwyn die klub en sy lys. "
+            "As iemand nee sê, of nie betyds antwoord nie, verander niks."
+        ),
+        "club.end.yes": "Ja, beëindig dit",
+        "club.end.no": "Nee, hou dit",
+        "club.end.status": (
+            "Beëindig {club} — wag op {n} stemme.\n"
+            "Ja: {yes_n} · Nee: {no_n}\n"
+            "Wag: {waiting}\n\n"
+            "Sluit {date} as nie almal gestem het nie."
+        ),
+        "club.end.rejected": "{name} het gestem om {club} te hou. Die klub bly.",
+        "club.end.passed": "{club} is beëindig.",
+        "club.end.expired": "Nie almal het betyds gestem nie. {club} bly.",
+        "club.end.cancelled": "Gekanselleer. {club} bly.",
+        "club.end.in_progress": (
+            "Hierdie klub besluit of dit toemaak. Vra later vir 'n nuwe skakel."
+        ),
+        "club.end.over": "Daai stemming is verby.",
+        "club.picker.title": "Jou wynklubs",
+        "club.leave.ask": "Verlaat {name}?",
+        "club.leave.yes": "Loop",
+        "club.leave.keep": "Bly",
+        "club.feed.empty": "Niemand het nog 'n bottel oopgemaak nie. Oops verskyn hier.",
+        "club.members.empty": "Net jy tot nou. Nooi iemand.",
+        "club.peek.none": "Hierdie klub deel net die drink-lys.",
+        "club.badges.off": "Kentekens word nie hier gedeel nie.",
+        "club.name.retry": "Wat noem ons dit? 2–40 karakters.",
+        "club.created": "{name} is live.",
+        "club.back": "Terug",
+        "club.feed.newer": "Nuwer",
+        "club.feed.older": "Ouer",
+        "club.home.n_members": "{n} lede",
+        "club.invite.cancelled": "Uitnodiging {code} gekanselleer.",
+        "club.invite.share": "Sluit by {name} aan op Whiney.",
+        "club.type.RE": "Rooi",
+        "club.type.WH": "Wit",
+        "club.type.RO": "Rosé",
+        "club.type.SP": "Vonkelwyn",
+        "club.type.DE": "Nagereg",
+        "club.type.FO": "Versterk",
+        "club.type.OR": "Oranje",
+        "club.named.ok": "Reg — hier's wat aansluit deel.",
+        "club.hh.taken": "Daai naam is al geneem — kies 'n ander",
     },
 }
 

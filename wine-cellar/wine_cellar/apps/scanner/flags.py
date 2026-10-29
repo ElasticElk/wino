@@ -15,3 +15,12 @@ def flag_on(key: str) -> bool:
         .first()
     )
     return (value or "").strip().lower() in _TRUE
+
+
+def flags_context(request):
+    """Expose feature flags to templates so nav links are not dead ends."""
+    try:
+        clubs = flag_on("feature_clubs")
+    except Exception:
+        clubs = False
+    return {"feature_clubs": clubs}

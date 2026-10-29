@@ -831,9 +831,19 @@ class HouseholdInvitePreviewView(APIView):
             .filter(code=code)
             .first()
         )
-        if invite is None:
+        if invite is not None:
+            return Response(_serialize_invite(invite))
+        from wine_cellar.apps.club.models import ClubInvite
+        from wine_cellar.apps.club.services import serialize_invite
+
+        club_invite = (
+            ClubInvite.objects.select_related("club", "created_by")
+            .filter(code=code)
+            .first()
+        )
+        if club_invite is None:
             return Response({"error": "Invite not found"}, status=status.HTTP_404_NOT_FOUND)
-        return Response(_serialize_invite(invite))
+        return Response(serialize_invite(club_invite))
 
 
 @method_decorator(login_not_required, name="dispatch")
@@ -1262,6 +1272,21 @@ class ScannerWhoisView(APIView):
         return Response({"results": results})
 
 
+def _club_stats():
+    from datetime import timedelta
+
+    from wine_cellar.apps.club.models import Club, ClubEvent, ClubMembership
+
+    return {
+        "clubs": Club.objects.filter(kind=Club.KIND_PRIVATE).count(),
+        "club_members": ClubMembership.objects.count(),
+        "feed_events_7d": ClubEvent.objects.filter(
+            kind=ClubEvent.KIND_OPENED,
+            created__gte=timezone.now() - timedelta(days=7),
+        ).count(),
+    }
+
+
 @method_decorator(login_not_required, name="dispatch")
 class ScannerStatsView(APIView):
     """Staff-only: counts across every household. No tokens or API keys."""
@@ -1278,6 +1303,7 @@ class ScannerStatsView(APIView):
             }
             for sc in Scanner.objects.select_related("household")
         ]
+        clubs = _club_stats()
         return Response({
             "households": Household.objects.count(),
             "telegram_users": TelegramUser.objects.filter(is_active=True).count(),
@@ -1289,6 +1315,9 @@ class ScannerStatsView(APIView):
             "lists_moved": WineListItem.objects.filter(
                 moved_at__isnull=False,
             ).count(),
+            "clubs": clubs["clubs"],
+            "club_members": clubs["club_members"],
+            "feed_events_7d": clubs["feed_events_7d"],
             "scanners": scanners,
         })
 

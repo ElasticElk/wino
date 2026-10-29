@@ -39,10 +39,11 @@ ADMIN_COMMANDS = [
 
 
 LIST_COMMAND = ("list", "Things to drink or buy")
+CLUB_COMMAND = ("club", "Wine clubs")
 
 
 def menu_commands(flags: dict | None = None) -> list[tuple[str, str]]:
-    """Public / menu. /list is omitted until feature_lists is on."""
+    """Public / menu. Flagged commands are omitted until their flag is on."""
     commands = list(PUBLIC_COMMANDS)
     if flags and flags.get("feature_lists"):
         after = next(
@@ -50,6 +51,12 @@ def menu_commands(flags: dict | None = None) -> list[tuple[str, str]]:
             0,
         )
         commands.insert(after + 1, LIST_COMMAND)
+    if flags and flags.get("feature_clubs"):
+        after = next(
+            (i for i, (name, _) in enumerate(commands) if name == "invite"),
+            len(commands) - 1,
+        )
+        commands.insert(after + 1, CLUB_COMMAND)
     return commands
 
 
