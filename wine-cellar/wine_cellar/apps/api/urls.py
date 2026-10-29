@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import views
+from . import list_views, views
 
 urlpatterns = [
     path(
@@ -95,4 +95,25 @@ urlpatterns = [
     path("wines/search/", views.WineSearchView.as_view(), name="api-wine-search"),
     path("wines/all/", views.WineListAllView.as_view(), name="api-wine-list-all"),
     path("wines/", views.WineCreateView.as_view(), name="api-wine-create"),
+    path("lists/", list_views.WineListCollectionView.as_view(), name="api-lists"),
+    path(
+        "lists/<int:pk>/",
+        list_views.WineListDetailView.as_view(),
+        name="api-list-detail",
+    ),
+    path(
+        "lists/<int:pk>/items/",
+        list_views.WineListItemCreateView.as_view(),
+        name="api-list-items",
+    ),
+    path(
+        "lists/<int:pk>/items/<int:item_id>/",
+        list_views.WineListItemDeleteView.as_view(),
+        name="api-list-item-delete",
+    ),
+    path(
+        "lists/<int:pk>/items/<int:item_id>/to-cellar/",
+        list_views.WineListItemToCellarView.as_view(),
+        name="api-list-item-to-cellar",
+    ),
 ]

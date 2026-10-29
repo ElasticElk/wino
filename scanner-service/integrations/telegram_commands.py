@@ -38,12 +38,27 @@ ADMIN_COMMANDS = [
 ]
 
 
-def public_command_payload() -> list[dict]:
-    return [{"command": c, "description": d} for c, d in PUBLIC_COMMANDS]
+LIST_COMMAND = ("list", "Things to drink or buy")
 
 
-def staff_command_payload() -> list[dict]:
+def menu_commands(flags: dict | None = None) -> list[tuple[str, str]]:
+    """Public / menu. /list is omitted until feature_lists is on."""
+    commands = list(PUBLIC_COMMANDS)
+    if flags and flags.get("feature_lists"):
+        after = next(
+            (i for i, (name, _) in enumerate(commands) if name == "recent"),
+            0,
+        )
+        commands.insert(after + 1, LIST_COMMAND)
+    return commands
+
+
+def public_command_payload(flags: dict | None = None) -> list[dict]:
+    return [{"command": c, "description": d} for c, d in menu_commands(flags)]
+
+
+def staff_command_payload(flags: dict | None = None) -> list[dict]:
     return [
         {"command": c, "description": d}
-        for c, d in PUBLIC_COMMANDS + ADMIN_COMMANDS
+        for c, d in menu_commands(flags) + ADMIN_COMMANDS
     ]
