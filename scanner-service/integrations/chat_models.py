@@ -39,7 +39,7 @@ TYPE_TO_WORD = {code: word for word, code in COLOUR_TO_TYPE.items()}
 
 INTENTS = {
     "fact", "recommend", "price", "correct", "answer", "wine_chat", "place", "help",
-    "offtopic", "search", "unsure",
+    "offtopic", "search", "unsure", "drink",
 }
 HELP_TOPICS = {
     "invite", "new_cellar", "switch", "photo", "take_out", "commands", "other",
@@ -62,6 +62,7 @@ intent:
 - place: they want a restaurant, wine bar, wine farm or shop found or suggested for wine, near them or in a named area ("a restaurant near me with good wine for my taste", "any good wine bars near here?", "where can I buy a good Chenin in Stellenbosch?", "Ken jy 'n goeie restaurant naby my met 'n goeie wynlys?"). Put a named town, suburb or area in area; leave area empty for "near me".
 - wine_chat: any other wine, drink or food-pairing question that isn't picking from their cellar: what to order at a restaurant they're already at, a grape, region, vintage or producer, serving, storing, decanting, glassware ("I'm at a steakhouse, what should I order?", "is 2019 a good Barolo year?", "Watter wyn pas by bobotie?").
 - help: how to use Whiney itself, not a wine question ("how do I add someone to my house", "can I start a new cellar", "how do I invite", "how do I switch cellars", "how do I add a wine", "how do I take a bottle out", "the fridge is wrong", "I moved things around", "what can you do", "how does this work"). Set help_topic to invite, new_cellar, switch, photo, take_out, commands, or other. Use take_out when they want to fix fridge stock after a shuffle.
+- drink: they already drank, finished, or want a named bottle taken out of stock now ("I drank one of my barolos from the big fridge", "remove a bottle of Chenin", "ek het een van my barolos uit die yskas gedrink"). Not a question about what to open — that is recommend. Not how to take a bottle out — that is help. wine_ref is the wine words they used ("this" if they pointed at a card); fact.storage_text is the fridge or rack they named, else empty.
 - offtopic: nothing to do with wine, drink, food, wine places, their cellar or how Whiney works ("how high do planes fly", "write me a poem about cars").
 - price: they give what they paid for a wine ("£18 on the Chenin", "it was 12.50").
 - correct: they say a wine's details are wrong ("wrong wine, it's Aux Moines", "vintage is 2019").

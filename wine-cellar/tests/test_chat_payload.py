@@ -18,6 +18,7 @@ from wine_cellar.apps.storage.tests.factories import StorageFactory
 from wine_cellar.apps.user.tests.factories import UserFactory
 from wine_cellar.apps.wine.models import Wine
 from wine_cellar.apps.wine.tests.factories import (
+    AppellationFactory,
     AttributeFactory,
     FoodPairingFactory,
     GrapeFactory,
@@ -115,6 +116,21 @@ def test_votes_count_drunk_bottles_only(client):
 
 
 @pytest.mark.django_db
+def test_appellation_is_present(client):
+    user, household, storage = _cellar()
+    appellation = AppellationFactory(name="Barolo", user=user)
+    wine = WineFactory(
+        user=user, household=household, name="I Siglati", vintage=2019,
+        wine_type="RE", country="IT", grapes=[], appellation=appellation,
+    )
+    StorageItem.objects.create(storage=storage, wine=wine, user=user)
+
+    entry = _stock(client, user)[0]
+    assert entry["appellation"] == "Barolo"
+    assert entry["name"] == "I Siglati 2019"
+
+
+@pytest.mark.django_db
 def test_item_carries_its_own_price(client):
     user, household, storage = _cellar()
     wine = WineFactory(
@@ -173,6 +189,7 @@ def test_missing_optionals_are_empty_not_absent(client):
     assert entry["critic_score"] is None
     assert entry["vivino_rating"] is None
     assert entry["region"] == ""
+    assert entry["appellation"] == ""
     assert entry["grapes"] == []
     assert entry["attributes"] == []
     assert entry["food_pairings"] == []

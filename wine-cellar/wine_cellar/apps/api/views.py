@@ -788,7 +788,9 @@ class WineInStockView(ScannerAPIView):
 
         items = StorageItem.objects.filter(
             wine__household=household, deleted=False
-        ).select_related("wine", "wine__region", "storage").prefetch_related(
+        ).select_related(
+            "wine", "wine__region", "wine__appellation", "storage",
+        ).prefetch_related(
             "wine__grapes", "wine__attributes", "wine__food_pairings",
         )
 
@@ -814,6 +816,7 @@ class WineInStockView(ScannerAPIView):
                     "grape": grape,
                     "vintage": wine.vintage,
                     "region": wine.region.name if wine.region_id else "",
+                    "appellation": wine.appellation.name if wine.appellation_id else "",
                     "grapes": [g.name for g in grapes],
                     "comment": wine.comment or "",
                     "price": None if wine.price is None else float(wine.price),
