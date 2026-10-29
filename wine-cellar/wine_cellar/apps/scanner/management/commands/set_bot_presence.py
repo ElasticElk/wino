@@ -81,6 +81,12 @@ class Command(BaseCommand):
                 0,
             )
             commands.insert(after + 1, ("list", "Things to drink or buy"))
+        if flag_on("feature_clubs"):
+            after = next(
+                (i for i, (name, _) in enumerate(commands) if name == "invite"),
+                len(commands) - 1,
+            )
+            commands.insert(after + 1, ("club", "Wine clubs"))
         public = [{"command": c, "description": d} for c, d in commands]
         staff = [
             {"command": c, "description": d}

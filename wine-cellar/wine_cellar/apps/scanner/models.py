@@ -18,6 +18,7 @@ class Household(models.Model):
     # On for new cellars — owners can still turn challenges off.
     gamification_enabled = models.BooleanField(default=True)
     empty_nudge_sent_at = models.DateTimeField(null=True, blank=True)
+    club_share_notice_sent_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["name"]
@@ -175,12 +176,12 @@ class HouseholdInvite(models.Model):
 
 
 def invite_code_taken(code: str) -> bool:
-    """True if this code is already a household invite.
+    """True if this code is already a household or club invite."""
+    if HouseholdInvite.objects.filter(code=code).exists():
+        return True
+    from wine_cellar.apps.club.models import ClubInvite
 
-    Phase 2 must also check ClubInvite so a /start code cannot collide
-    across household and club tables (open-q #12).
-    """
-    return HouseholdInvite.objects.filter(code=code).exists()
+    return ClubInvite.objects.filter(code=code).exists()
 
 
 def mint_unique_code(taken=None, attempts=5):

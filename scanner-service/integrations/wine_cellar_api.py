@@ -725,3 +725,177 @@ class WineCellarAPI:
         if isinstance(body, dict):
             body["status_code"] = resp.status_code
         return body
+
+    def list_clubs(self) -> dict:
+        resp = self.session.get(f"{self.base_url}/api/clubs/", timeout=10)
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()
+
+    def create_club(self, name: str, cellar_visibility="full", badges_visible=True) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/",
+            json={
+                "name": name,
+                "cellar_visibility": cellar_visibility,
+                "badges_visible": badges_visible,
+            },
+            timeout=15,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json()
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
+    def get_club(self, club_id: int) -> dict:
+        resp = self.session.get(f"{self.base_url}/api/clubs/{club_id}/", timeout=10)
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()
+
+    def patch_club(self, club_id: int, **fields) -> dict:
+        resp = self.session.patch(
+            f"{self.base_url}/api/clubs/{club_id}/", json=fields, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()
+
+    def patch_club_membership(self, club_id: int, **fields) -> dict:
+        resp = self.session.patch(
+            f"{self.base_url}/api/clubs/{club_id}/membership/", json=fields, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()
+
+    def leave_club(self, club_id: int) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/{club_id}/leave/", json={}, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json() if resp.content else {"status": "left"}
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
+    def handover_club(self, club_id: int, user_id: int) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/{club_id}/handover/",
+            json={"user_id": user_id}, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()
+
+    def club_feed(self, club_id: int, limit: int = 5, offset: int = 0) -> dict:
+        resp = self.session.get(
+            f"{self.base_url}/api/clubs/{club_id}/feed/",
+            params={"limit": limit, "offset": offset}, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()
+
+    def club_members(self, club_id: int) -> dict:
+        resp = self.session.get(
+            f"{self.base_url}/api/clubs/{club_id}/members/", timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()
+
+    def club_peek(self, club_id: int, user_id: int) -> dict:
+        resp = self.session.get(
+            f"{self.base_url}/api/clubs/{club_id}/members/{user_id}/cellar/",
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()
+
+    def club_badges(self, club_id: int, user_id: int) -> dict:
+        resp = self.session.get(
+            f"{self.base_url}/api/clubs/{club_id}/members/{user_id}/badges/",
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()
+
+    def mint_club_invite(self, club_id: int) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/{club_id}/invites/", json={}, timeout=15,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json()
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
+    def cancel_club_invite(self, club_id: int) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/{club_id}/invites/cancel/", json={}, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()
+
+    def redeem_club_invite(
+        self, code: str, chat_id: str, display_name: str,
+        household_name: str | None = None, household_id: int | None = None,
+    ) -> dict:
+        data = {
+            "code": code,
+            "chat_id": str(chat_id),
+            "display_name": display_name,
+        }
+        if household_name:
+            data["household_name"] = household_name
+        if household_id is not None:
+            data["household_id"] = household_id
+        resp = self.session.post(
+            f"{self.base_url}/api/scanner/club-invites/redeem/", json=data, timeout=15,
+        )
+        return self._invite_body(resp)
+
+    def start_dismantle(self, club_id: int) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/{club_id}/dismantle/", json={}, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json()
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
+    def get_dismantle(self, club_id: int) -> dict:
+        resp = self.session.get(
+            f"{self.base_url}/api/clubs/{club_id}/dismantle/", timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()
+
+    def cast_dismantle_ballot(self, club_id: int, vote_id: int, choice: str) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/{club_id}/dismantle/{vote_id}/ballot/",
+            json={"choice": choice}, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()
+
+    def cancel_dismantle(self, club_id: int, vote_id: int) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/{club_id}/dismantle/{vote_id}/cancel/",
+            json={}, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()

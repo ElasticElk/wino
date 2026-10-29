@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import list_views, views
+from . import club_views, list_views, views
 
 urlpatterns = [
     path(
@@ -115,5 +115,67 @@ urlpatterns = [
         "lists/<int:pk>/items/<int:item_id>/to-cellar/",
         list_views.WineListItemToCellarView.as_view(),
         name="api-list-item-to-cellar",
+    ),
+    path("clubs/", club_views.ClubCollectionView.as_view(), name="api-clubs"),
+    path("clubs/<int:pk>/", club_views.ClubDetailView.as_view(), name="api-club-detail"),
+    path(
+        "clubs/<int:pk>/membership/",
+        club_views.ClubMembershipView.as_view(),
+        name="api-club-membership",
+    ),
+    path(
+        "clubs/<int:pk>/leave/",
+        club_views.ClubLeaveView.as_view(),
+        name="api-club-leave",
+    ),
+    path(
+        "clubs/<int:pk>/handover/",
+        club_views.ClubHandoverView.as_view(),
+        name="api-club-handover",
+    ),
+    path(
+        "clubs/<int:pk>/feed/",
+        club_views.ClubFeedView.as_view(),
+        name="api-club-feed",
+    ),
+    path(
+        "clubs/<int:pk>/members/",
+        club_views.ClubMembersView.as_view(),
+        name="api-club-members",
+    ),
+    path(
+        "clubs/<int:pk>/members/<int:user_id>/cellar/",
+        club_views.ClubPeekView.as_view(),
+        name="api-club-peek",
+    ),
+    path(
+        "clubs/<int:pk>/members/<int:user_id>/badges/",
+        club_views.ClubBadgesView.as_view(),
+        name="api-club-badges",
+    ),
+    path(
+        "clubs/<int:pk>/invites/",
+        club_views.ClubInviteCreateView.as_view(),
+        name="api-club-invites",
+    ),
+    path(
+        "clubs/<int:pk>/invites/cancel/",
+        club_views.ClubInviteCancelView.as_view(),
+        name="api-club-invites-cancel",
+    ),
+    path(
+        "clubs/<int:pk>/dismantle/",
+        club_views.ClubDismantleView.as_view(),
+        name="api-club-dismantle",
+    ),
+    path(
+        "clubs/<int:pk>/dismantle/<int:vote_id>/ballot/",
+        club_views.ClubDismantleBallotView.as_view(),
+        name="api-club-dismantle-ballot",
+    ),
+    path(
+        "clubs/<int:pk>/dismantle/<int:vote_id>/cancel/",
+        club_views.ClubDismantleCancelView.as_view(),
+        name="api-club-dismantle-cancel",
     ),
 ]

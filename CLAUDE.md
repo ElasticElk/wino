@@ -32,6 +32,7 @@ start.sh / stop.sh    # Service orchestration
 - `TelegramUser` — Links Django users to Telegram chat IDs
 - `ServiceConfig` — Key-value config store (bot_token, grok_api_key, web_url, `feature_lists` / `feature_clubs` / …)
 - `WineList` / `WineListItem` — Personal To-drink list (**user-scoped**, not household). Club lists come in a later phase.
+- `Club` / `ClubMembership` / `ClubInvite` / `ClubEvent` — Private wine clubs (own app `wine_cellar.apps.club`). Sharing policy is club-wide. Flag `feature_clubs`.
 
 ### REST API (`/api/`)
 Auth: `Authorization: Token <token>` header. Optional `X-Household: <id>` header.
@@ -74,6 +75,13 @@ Auth: `Authorization: Token <token>` header. Optional `X-Household: <id>` header
 - `POST /api/lists/<id>/items/` — Snapshot a bottle onto the list. Duplicate `wine_id` is 200 (idempotent)
 - `DELETE /api/lists/<id>/items/<item_id>/` — Remove. 409 `already_moved`
 - `POST /api/lists/<id>/items/<item_id>/to-cellar/` — Create/find `Wine` in the **current** household and add stock. Sets `moved_at`. Undo of that stock add does not restore the list row
+- `GET/POST /api/clubs/` — User-keyed club list / create (default full cellar + badges). Flag `feature_clubs`; off → 404 `not_enabled`. Never use `X-Household` as the club id
+- `GET/PATCH /api/clubs/<id>/` — Home card / owner policy. Widening bumps `sharing_version` and DMs Stay/Leave; unacked peek stays at the previous level
+- `PATCH /api/clubs/<id>/membership/` — Mute, switch shared household, Stay (`accepted_sharing_version`)
+- `POST /api/clubs/<id>/leave/` — 409 `hand_over_required` if owner with others; last member deletes the club
+- `GET /api/clubs/<id>/members/<user_id>/cellar/` — Peek (summary/full). Forbidden: prices, drawers, notes, barcodes, critic/Vivino
+- `POST /api/scanner/club-invites/redeem/` — Staff. Compound: new cellar + club membership in one call. 409 `dismantle_in_progress` while a unanimous end-vote is open
+- `POST /api/scanner/invites/preview/` — Household invite first, then club invite (`kind=club`)
 
 ### Frontend
 - **Templates:** `wine_cellar/templates/` — Django templates with `base.html` layout
@@ -111,6 +119,7 @@ Bridges physical barcode scanners to the Wine Cellar API. Runs as FastAPI server
 - `integrations/wine_cellar_api.py` — HTTP client for Wine Cellar REST API
 - `integrations/telegram_bot.py` — Telegram bot (notifications, photos, disambiguation, household switching)
 - `integrations/telegram_lists.py` — `/list` To-drink flow and label-card `td` button
+- `integrations/telegram_clubs.py` — `/club` found/invite/join/home/peek/mute/leave/dismantle; `/start` club codes
 - `integrations/copy.py` — EN/AF dialogue catalog (menus stay English)
 - `integrations/telegram_catchup.py` — `/fridge` Catch up drawer walk (staged Drunk/Moved, bulk apply)
 - `integrations/grok_vision.py` — xAI Grok Vision for label analysis
@@ -185,6 +194,7 @@ Available to authorized users via the bot:
 - `/fridge` — Browse fridge contents. **Catch up** walks one drawer: tap Drunk / Moved (1 or both), then Apply. Empty here means those bottles moved, not drunk. One Undo. Not a new slash command. Buttons carry `wine_id` / `item_id`, never a list position (the list shrinks per tap, so an index would hit another wine). Bottles with no drawer (fridge `+` adds them so) get a *No drawer* bucket. A move may be *Not sure which drawer* (row null). Undo carries its batch id, so it still works after a new Catch up. Stale Apply keeps the changes that are still valid and drops the rest.
 - `/recent` — Recent bottles (notes + label photo, pages of 5)
 - `/list` — Personal To-drink list (bottles you don't own yet). **User-scoped** — a household partner does not see it. Gated on `ServiceConfig.feature_lists`. Move to cellar writes stock on the current household. Not created on new-cellar redeem; first `/list` or first add creates the default list.
+- `/club` — Private wine clubs (own cellar each, automatic drink feed, club-wide peek). Gated on `ServiceConfig.feature_clubs`. `/club invite` is social; `/invite` stays cellar. Default policy is full cellar + badges. Owner widen asks Stay/Leave. Last member leave deletes the club; owner can propose a unanimous 48h dismantle instead.
 - `/help` — List available commands
 - `/pending` — Show barcodes awaiting label photos
 - `/flush` — Clear pending barcodes

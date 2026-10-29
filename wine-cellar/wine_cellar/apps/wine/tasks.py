@@ -1,5 +1,6 @@
 import html
 import logging
+import time
 from datetime import timedelta
 
 import requests
@@ -44,25 +45,53 @@ def _bot_token():
     return token or None
 
 
-def _send_telegram(token, chat_id, text, purpose="drink_by_reminder"):
-    try:
-        response = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
-            timeout=15,
-        )
-    except requests.RequestException:
-        logger.warning("%s: send failed for chat %s", purpose, chat_id)
-        return False
-    if response.status_code != 200:
-        logger.warning(
-            "%s: telegram returned %s for chat %s",
-            purpose,
-            response.status_code,
-            chat_id,
-        )
-        return False
-    return True
+def _send_telegram(
+    token, chat_id, text, purpose="drink_by_reminder",
+    reply_markup=None, message_id=None,
+):
+    """Send or edit a Telegram HTML message. Retry once on 429.
+
+    Returns the message_id (int) when Telegram includes it, True on a
+    successful send without an id, False on failure. Existing callers
+    only check truthiness.
+    """
+    method = "editMessageText" if message_id else "sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    if message_id:
+        payload["message_id"] = message_id
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    for attempt in range(2):
+        try:
+            response = requests.post(url, json=payload, timeout=15)
+        except requests.RequestException:
+            logger.warning("%s: send failed for chat %s", purpose, chat_id)
+            return False
+        if response.status_code == 429 and attempt == 0:
+            retry_after = 1
+            try:
+                retry_after = int(
+                    (response.json().get("parameters") or {}).get("retry_after") or 1
+                )
+            except (ValueError, TypeError, AttributeError):
+                retry_after = 1
+            time.sleep(min(max(retry_after, 1), 5))
+            continue
+        if response.status_code != 200:
+            logger.warning(
+                "%s: telegram returned %s for chat %s",
+                purpose,
+                response.status_code,
+                chat_id,
+            )
+            return False
+        try:
+            mid = (response.json().get("result") or {}).get("message_id")
+        except ValueError:
+            mid = None
+        return mid if mid is not None else True
+    return False
 
 
 @shared_task(name="drink_by_reminder")

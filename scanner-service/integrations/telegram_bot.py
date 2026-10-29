@@ -2763,6 +2763,14 @@ class TelegramBotHandler:
             self._lists = flow
         return flow
 
+    def _club_flow(self):
+        flow = getattr(self, "_clubs", None)
+        if flow is None:
+            from integrations.telegram_clubs import ClubFlow
+            flow = ClubFlow(self)
+            self._clubs = flow
+        return flow
+
     def set_flags(self, config: dict | None):
         flags = {}
         for key, value in (config or {}).items():
@@ -2969,6 +2977,7 @@ class TelegramBotHandler:
         app.add_handler(CommandHandler("search", self._cmd_search, filters=user_filter))
         app.add_handler(CommandHandler("recent", self._cmd_recent, filters=user_filter))
         app.add_handler(CommandHandler("list", self._cmd_list, filters=user_filter))
+        app.add_handler(CommandHandler("club", self._cmd_club, filters=user_filter))
         app.add_handler(CommandHandler("help", self._cmd_help, filters=user_filter))
         app.add_handler(CommandHandler("pending", self._cmd_pending, filters=user_filter))
         app.add_handler(CommandHandler("flush", self._cmd_flush, filters=user_filter))
@@ -3073,6 +3082,12 @@ class TelegramBotHandler:
         state = flow.state_for(chat_id)
         if state and state.get("step") in ("name", "confirm"):
             flow.clear(chat_id)
+        club = self._club_flow()
+        club_state = club.state_for(chat_id)
+        if club_state and club_state.get("step") in (
+            "name", "share", "compound_name", "compound_consent", "pick_hh", "join",
+        ):
+            club.clear(chat_id)
         router = getattr(self, "_router", None)
         if router is not None:
             await router.abandon(chat_id)
@@ -3081,6 +3096,8 @@ class TelegramBotHandler:
         """Anything at all from an unprovisioned chat gets the onboarding reply."""
         if self._is_known(update):
             return  # provisioned users are handled above; nothing to do here
+        if update.message and await self._club_flow().on_text(update, context):
+            return
         if update.message and await self._invite_flow().on_text(update, context):
             return
         await self._greet_stranger(update)
@@ -3179,6 +3196,8 @@ class TelegramBotHandler:
         )
         if self.flag_on("feature_lists"):
             text += "/list \u2014 Things to drink or buy\n"
+        if self.flag_on("feature_clubs"):
+            text += "/club \u2014 Wine clubs\n"
         text += (
             "/pending \u2014 Show pending barcodes\n"
             "/flush \u2014 Clear all pending barcodes\n"
@@ -3216,6 +3235,8 @@ class TelegramBotHandler:
         await update.message.reply_text(text, parse_mode="HTML")
 
     async def _unknown_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if await self._club_flow().on_text(update, context):
+            return
         if await self._invite_flow().on_text(update, context):
             return
         cmd = update.message.text.split()[0] if update.message.text else "that"
@@ -3231,6 +3252,9 @@ class TelegramBotHandler:
         it used to spend the turn explaining that only commands work.
         """
         text = (update.message.text or "").strip()
+
+        if await self._club_flow().on_text(update, context):
+            return
 
         if await self._invite_flow().on_text(update, context):
             return
@@ -3345,6 +3369,10 @@ class TelegramBotHandler:
                 text += "\n" + copy_t(loc, "list.status.ready")
             else:
                 text += "\n" + copy_t(loc, "list.status.resting")
+            if self.flag_on("feature_clubs"):
+                text += "\n" + copy_t(loc, "club.status.ready")
+            else:
+                text += "\n" + copy_t(loc, "club.status.resting")
             await update.message.reply_text(text, parse_mode="HTML")
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
@@ -3455,6 +3483,9 @@ class TelegramBotHandler:
 
     async def _cmd_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await self._list_flow().cmd_list(update, context)
+
+    async def _cmd_club(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self._club_flow().cmd_club(update, context)
 
     async def _show_drank_page(self, query, api, page: int):
         try:
@@ -3606,6 +3637,13 @@ class TelegramBotHandler:
             await _safe_edit(update_or_query, text, parse_mode="HTML", reply_markup=buttons)
         elif hasattr(update_or_query, "message"):
             await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=buttons)
+        if new_api:
+            try:
+                await self._club_flow().after_household_switch(
+                    update_or_query, chat_id, household_id, household_name,
+                )
+            except Exception:
+                logger.exception("[club] household switch prompt failed")
 
     async def _cmd_household(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show household info and members."""
@@ -3731,6 +3769,8 @@ class TelegramBotHandler:
         await self._invite_flow().cmd_invite(update, context)
 
     async def _handle_location(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if await self._club_flow().on_location(update, context):
+            return
         if await self._invite_flow().on_location(update, context):
             return
         if not self._is_known(update):
@@ -4821,6 +4861,9 @@ class TelegramBotHandler:
             return
 
         if await self._list_flow().on_callback(update, context):
+            return
+
+        if await self._club_flow().on_callback(update, context):
             return
 
         data = _parse_cb(query.data)

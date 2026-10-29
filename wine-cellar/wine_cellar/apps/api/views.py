@@ -18,6 +18,7 @@ from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser
 
 from wine_cellar.apps.api.stock import add_stock_item, refresh_taste as _refresh_taste
+from wine_cellar.apps.club.events import queue_club_event
 from wine_cellar.apps.api.task_access import remember_task, task_visible
 from wine_cellar.apps.scanner.households import get_user_household
 from wine_cellar.apps.scanner.models import Household, TelegramUser
@@ -185,6 +186,8 @@ class StockAddView(ScannerAPIView):
             check_duplicate=check_duplicate,
             confirm_duplicate=confirm_duplicate,
         )
+        if code == 201 and drank and payload.get("item_id"):
+            queue_club_event(payload["item_id"], request.user.id, "opened")
         return Response(payload, status=code)
 
 
@@ -265,6 +268,7 @@ class StockRemoveView(ScannerAPIView):
 
         payload = _soft_delete_item(item)
         _refresh_taste(household)
+        queue_club_event(payload["item_id"], request.user.id, "opened")
         return Response(payload)
 
 
@@ -338,6 +342,8 @@ class StockRestoreView(ScannerAPIView):
                 {"error": "Item not found"}, status=status.HTTP_404_NOT_FOUND
             )
         payload, code = _restore_item(item, household)
+        if code == status.HTTP_200_OK:
+            queue_club_event(item.id, request.user.id, "retracted")
         return Response(payload, status=code)
 
 
@@ -366,6 +372,8 @@ class StockRestoreLatestView(ScannerAPIView):
                 status=status.HTTP_409_CONFLICT,
             )
         payload, code = _restore_item(item, household)
+        if code == status.HTTP_200_OK:
+            queue_club_event(item.id, request.user.id, "retracted")
         return Response(payload, status=code)
 
 
@@ -473,7 +481,15 @@ class StockBulkView(ScannerAPIView):
                     snapshots,
                     timeout=BULK_UNDO_TTL,
                 )
-                transaction.on_commit(lambda: _refresh_taste(household))
+                removed = [s["item_id"] for s in snapshots if s["op"] == "remove"]
+                actor_id = request.user.id
+
+                def _after(h=household, ids=removed, aid=actor_id):
+                    _refresh_taste(h)
+                    for iid in ids:
+                        queue_club_event(iid, aid, "opened")
+
+                transaction.on_commit(_after)
         except BulkConflict as exc:
             return Response(exc.payload, status=exc.code)
 
@@ -542,7 +558,15 @@ class StockBulkUndoView(ScannerAPIView):
                         item.row = snap.get("from_row")
                         item.save()
                 cache.delete(key)
-                transaction.on_commit(lambda: _refresh_taste(household))
+                restored = [s["item_id"] for s in snapshots if s["op"] == "remove"]
+                actor_id = request.user.id
+
+                def _after_undo(h=household, ids=restored, aid=actor_id):
+                    _refresh_taste(h)
+                    for iid in ids:
+                        queue_club_event(iid, aid, "retracted")
+
+                transaction.on_commit(_after_undo)
         except BulkConflict as exc:
             return Response(exc.payload, status=exc.code)
 
@@ -1321,6 +1345,7 @@ class StockVoteView(ScannerAPIView):
         serializer.is_valid(raise_exception=True)
         item.vote = serializer.validated_data["vote"]
         item.save(update_fields=["vote"])
+        queue_club_event(item.id, request.user.id, "voted")
         return Response({
             "item_id": item.id,
             "vote": item.vote,

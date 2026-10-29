@@ -65,3 +65,19 @@ def test_phase1_list_keys_are_present():
     assert required <= catalog_keys("af")
     assert t("en", "list.note.added") == "On your To-drink list."
     assert t("af", "list.note.added") == "Op jou To-drink-lys."
+
+
+def test_phase2_club_keys_are_present():
+    required = {
+        "club.off",
+        "club.pitch",
+        "club.hh.notice",
+        "club.policy.full",
+        "club.end.confirm",
+        "club.widen.stay",
+    }
+    assert required <= catalog_keys("en")
+    assert required <= catalog_keys("af")
+    assert "{name}" not in MESSAGES["en"]["club.hh.notice"]
+    assert t("en", "club.off") == "Wine clubs aren't on yet."
+    assert t("af", "club.off") == "Wynklubs is nog nie aan nie."

@@ -1,5 +1,7 @@
 from django.urls import path
 
+from wine_cellar.apps.api.club_views import ClubInviteRedeemView
+
 from . import views
 
 urlpatterns = [
@@ -22,5 +24,10 @@ urlpatterns = [
     path("invites/redeem/", views.HouseholdInviteRedeemView.as_view(), name="api-scanner-invites-redeem"),
     path("invites/cancel/", views.HouseholdInviteCancelView.as_view(), name="api-scanner-invites-cancel"),
     path("invites/preview/", views.HouseholdInvitePreviewView.as_view(), name="api-scanner-invites-preview"),
+    path(
+        "club-invites/redeem/",
+        ClubInviteRedeemView.as_view(),
+        name="api-scanner-club-invites-redeem",
+    ),
     path("settings/", views.ScannerSettingsView.as_view(), name="api-scanner-settings"),
 ]

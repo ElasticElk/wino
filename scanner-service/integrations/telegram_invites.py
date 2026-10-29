@@ -633,6 +633,10 @@ class InviteFlow:
             await update.message.reply_text(UNREACHABLE)
             return
 
+        if preview.get("kind") == "club":
+            await self.handler._club_flow().open_invite(update, preview)
+            return
+
         chat_id = str(update.effective_chat.id)
         display = self._display_name(update)
         kind = preview.get("kind")
