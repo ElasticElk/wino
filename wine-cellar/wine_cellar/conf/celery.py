@@ -22,4 +22,8 @@ celery_app.conf.beat_schedule = {
         "task": "expire_dismantle_votes",
         "schedule": crontab(minute="*/15"),
     },
+    "close_stale_tasteoffs": {
+        "task": "close_stale_tasteoffs",
+        "schedule": crontab(minute="15", hour="3"),
+    },
 }

@@ -270,3 +270,89 @@ class ClubDismantleBallot(models.Model):
         constraints = [
             models.UniqueConstraint(fields=["vote", "user"], name="unique_dismantle_ballot"),
         ]
+
+
+class ClubComment(models.Model):
+    event = models.ForeignKey(
+        ClubEvent, on_delete=models.CASCADE, related_name="comments",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True,
+    )
+    text = models.CharField(max_length=280)
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created"]
+        indexes = [
+            models.Index(fields=["event", "created"], name="clubcomment_event_idx"),
+        ]
+
+
+class TasteOff(models.Model):
+    STATUS_SETUP = "setup"
+    STATUS_SCORING = "scoring"
+    STATUS_CLOSED = "closed"
+    STATUS = [
+        (STATUS_SETUP, "Setup"),
+        (STATUS_SCORING, "Scoring"),
+        (STATUS_CLOSED, "Closed"),
+    ]
+    club = models.ForeignKey(Club, on_delete=models.CASCADE, related_name="tasteoffs")
+    host = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True,
+    )
+    title = models.CharField(max_length=80)
+    status = models.CharField(max_length=8, choices=STATUS, default=STATUS_SETUP)
+    created = models.DateTimeField(auto_now_add=True)
+    opened_at = models.DateTimeField(null=True, blank=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["club"],
+                condition=models.Q(status="scoring"),
+                name="one_open_tasteoff_per_club",
+            ),
+        ]
+
+    @property
+    def is_open(self):
+        return self.status in (self.STATUS_SETUP, self.STATUS_SCORING)
+
+
+class TasteOffBottle(models.Model):
+    tasteoff = models.ForeignKey(
+        TasteOff, on_delete=models.CASCADE, related_name="bottles",
+    )
+    label = models.CharField(max_length=160)
+    wine_id = models.IntegerField(null=True, blank=True)
+    sort_order = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        ordering = ["sort_order", "id"]
+
+
+class TasteOffScore(models.Model):
+    tasteoff = models.ForeignKey(
+        TasteOff, on_delete=models.CASCADE, related_name="scores",
+    )
+    bottle = models.ForeignKey(
+        TasteOffBottle, on_delete=models.CASCADE, related_name="scores",
+    )
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    score = models.PositiveSmallIntegerField()
+    created = models.DateTimeField(auto_now_add=True)
+    modified = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["bottle", "user"], name="unique_tasteoff_score",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(score__gte=1) & models.Q(score__lte=5),
+                name="tasteoff_score_1_5",
+            ),
+        ]

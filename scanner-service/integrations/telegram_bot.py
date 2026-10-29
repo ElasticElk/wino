@@ -3086,6 +3086,8 @@ class TelegramBotHandler:
         club_state = club.state_for(chat_id)
         if club_state and club_state.get("step") in (
             "name", "share", "compound_name", "compound_consent", "pick_hh", "join",
+            "comment", "tasteoff_title", "tasteoff_label", "club_list_add",
+            "tasteoff_setup",
         ):
             club.clear(chat_id)
         router = getattr(self, "_router", None)
@@ -3198,6 +3200,12 @@ class TelegramBotHandler:
             text += "/list \u2014 Things to drink or buy\n"
         if self.flag_on("feature_clubs"):
             text += "/club \u2014 Wine clubs\n"
+            if self.flag_on("feature_lists"):
+                text += "/club list \u2014 Shared tasting list\n"
+            if self.flag_on("feature_tasteoffs"):
+                text += "/club tasteoff \u2014 Score a flight\n"
+            if self.flag_on("feature_club_comments"):
+                text += "Feed cards: Say something\n"
         text += (
             "/pending \u2014 Show pending barcodes\n"
             "/flush \u2014 Clear all pending barcodes\n"

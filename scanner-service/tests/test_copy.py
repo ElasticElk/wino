@@ -67,6 +67,37 @@ def test_phase1_list_keys_are_present():
     assert t("af", "list.note.added") == "Op jou To-drink-lys."
 
 
+def test_phase3_social_keys_are_present():
+    required = {
+        "club.comment.btn",
+        "club.comment.prompt",
+        "club.comment.saved",
+        "club.comment.too_long",
+        "club.comment.again",
+        "club.comment.more",
+        "club.td.btn",
+        "club.td.added",
+        "club.to.title",
+        "club.to.score",
+        "club.to.closed",
+        "club.to.need_two",
+        "club.to.open",
+        "club.to.close",
+        "club.to.running",
+        "club.to.summary_only",
+        "club.to.already",
+        "club.list.title",
+        "club.list.empty",
+        "club.td.off",
+    }
+    assert required <= catalog_keys("en")
+    assert required <= catalog_keys("af")
+    assert t("en", "club.comment.btn") == "Say something"
+    assert t("af", "club.comment.btn") == "Sê iets"
+    assert t("en", "club.td.off") == "To-drink lists aren't on yet."
+    assert t("af", "club.td.off") == "To-drink-lyste is nog nie aan nie."
+
+
 def test_phase2_club_keys_are_present():
     required = {
         "club.off",

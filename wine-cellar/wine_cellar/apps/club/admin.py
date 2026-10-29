@@ -2,12 +2,16 @@ from django.contrib import admin
 
 from wine_cellar.apps.club.models import (
     Club,
+    ClubComment,
     ClubDismantleBallot,
     ClubDismantleVote,
     ClubEvent,
     ClubEventDelivery,
     ClubInvite,
     ClubMembership,
+    TasteOff,
+    TasteOffBottle,
+    TasteOffScore,
 )
 
 
@@ -78,3 +82,37 @@ class ClubDismantleVoteAdmin(admin.ModelAdmin):
 class ClubDismantleBallotAdmin(admin.ModelAdmin):
     list_display = ("vote", "user", "choice", "decided_at")
     list_filter = ("choice",)
+
+
+@admin.register(ClubComment)
+class ClubCommentAdmin(admin.ModelAdmin):
+    list_display = ("id", "event", "user", "text", "created")
+    search_fields = ("text",)
+
+
+class TasteOffBottleInline(admin.TabularInline):
+    model = TasteOffBottle
+    extra = 0
+
+
+class TasteOffScoreInline(admin.TabularInline):
+    model = TasteOffScore
+    extra = 0
+
+
+@admin.register(TasteOff)
+class TasteOffAdmin(admin.ModelAdmin):
+    list_display = ("id", "club", "title", "status", "host", "created", "opened_at", "closed_at")
+    list_filter = ("status",)
+    inlines = [TasteOffBottleInline, TasteOffScoreInline]
+
+
+@admin.register(TasteOffBottle)
+class TasteOffBottleAdmin(admin.ModelAdmin):
+    list_display = ("id", "tasteoff", "label", "sort_order", "wine_id")
+
+
+@admin.register(TasteOffScore)
+class TasteOffScoreAdmin(admin.ModelAdmin):
+    list_display = ("id", "tasteoff", "bottle", "user", "score", "modified")
+    list_filter = ("score",)

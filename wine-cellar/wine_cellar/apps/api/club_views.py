@@ -319,6 +319,15 @@ class ClubFeedView(ClubsEnabledMixin, ScannerAPIView):
         except (TypeError, ValueError):
             offset = 0
         qs = ClubEvent.objects.filter(club=membership.club).select_related("actor")
+        from django.db.models import Count
+
+        qs = qs.annotate(comment_count=Count("comments"))
+        event_id = request.query_params.get("event_id")
+        if event_id not in (None, ""):
+            try:
+                qs = qs.filter(id=int(event_id))
+            except (TypeError, ValueError):
+                qs = qs.none()
         count = qs.count()
         events = list(qs.order_by("-created")[offset : offset + limit])
         return Response(

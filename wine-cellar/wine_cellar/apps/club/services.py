@@ -91,10 +91,15 @@ def serialize_event(event: ClubEvent, *, public=True) -> dict:
         "created": created,
         "retracted": event.retracted,
     }
+    if event.kind == ClubEvent.KIND_TASTEOFF:
+        body["payload"] = event.payload or {}
     if not public:
         body["actor_id"] = event.actor_id
         body["item_id"] = event.item_id
-        body["comment_count"] = 0
+        count = getattr(event, "comment_count", None)
+        if count is None:
+            count = event.comments.count()
+        body["comment_count"] = count
     return body
 
 
@@ -433,6 +438,57 @@ def cancel_dismantle(vote: ClubDismantleVote):
     resolve_dismantle(vote, ClubDismantleVote.STATUS_CANCELLED)
     vote.refresh_from_db()
     return vote, None
+
+
+def close_tasteoff(tasteoff):
+    """Close a taste-off, write rankings onto a feed event, and fan out DMs."""
+    from django.db.models import Avg, Count
+
+    from wine_cellar.apps.club.models import TasteOff
+
+    if tasteoff.status == TasteOff.STATUS_CLOSED:
+        return tasteoff
+    with transaction.atomic():
+        locked = (
+            TasteOff.objects.select_for_update()
+            .filter(id=tasteoff.id)
+            .first()
+        )
+        if locked is None or locked.status == TasteOff.STATUS_CLOSED:
+            return locked or tasteoff
+        bottles = list(
+            locked.bottles.annotate(n=Count("scores"), average=Avg("scores__score"))
+        )
+        rankings = []
+        for bottle in bottles:
+            rankings.append(
+                {
+                    "label": bottle.label,
+                    "average": (
+                        round(float(bottle.average), 1)
+                        if bottle.average is not None
+                        else None
+                    ),
+                    "n": bottle.n,
+                }
+            )
+        rankings.sort(key=lambda r: (-(r["average"] or 0), r["label"]))
+        locked.status = TasteOff.STATUS_CLOSED
+        locked.closed_at = timezone.now()
+        locked.save(update_fields=["status", "closed_at"])
+        ClubEvent.objects.create(
+            club=locked.club,
+            actor=locked.host,
+            kind=ClubEvent.KIND_TASTEOFF,
+            wine_name=locked.title,
+            payload={"title": locked.title, "rankings": rankings},
+        )
+        tasteoff.status = locked.status
+        tasteoff.closed_at = locked.closed_at
+    from wine_cellar.apps.club.tasks import deliver_tasteoff_closed
+
+    transaction.on_commit(lambda i=locked.id: deliver_tasteoff_closed.delay(i))
+    return locked
 
 
 def serialize_invite(invite: ClubInvite) -> dict:

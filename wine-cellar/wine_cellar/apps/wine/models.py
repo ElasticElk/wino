@@ -567,7 +567,7 @@ class TasteIntent(models.Model):
 class WineList(models.Model):
     """A To-drink list. Personal lists are user-scoped (open-q #15).
 
-    Club lists (kind=club, club_id set, owner null) land in phase 3.
+    Club lists (kind=club, club set, owner null) land in phase 3.
     """
 
     KIND_PERSONAL = "personal"
@@ -589,8 +589,13 @@ class WineList(models.Model):
     kind = models.CharField(
         max_length=8, choices=KIND_CHOICES, default=KIND_PERSONAL,
     )
-    # Integer until the club app exists (open-q #21). Phase 3 adds a real FK.
-    club_id = models.PositiveIntegerField(null=True, blank=True)
+    club = models.ForeignKey(
+        "club.Club",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="wine_lists",
+    )
     created = models.DateTimeField(auto_now_add=True)
     modified = models.DateTimeField(auto_now=True)
 
@@ -607,6 +612,18 @@ class WineList(models.Model):
                     | models.Q(kind="club", owner__isnull=True)
                 ),
                 name="winelist_owner_matches_kind",
+            ),
+            models.UniqueConstraint(
+                fields=["club"],
+                condition=models.Q(kind="club", club__isnull=False),
+                name="unique_club_list_per_club",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(kind="personal", club__isnull=True)
+                    | models.Q(kind="club", club__isnull=False)
+                ),
+                name="winelist_club_matches_kind",
             ),
         ]
         indexes = [

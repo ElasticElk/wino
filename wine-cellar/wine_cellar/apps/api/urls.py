@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import club_views, list_views, views
+from . import club_views, list_views, social_views, views
 
 urlpatterns = [
     path(
@@ -177,5 +177,65 @@ urlpatterns = [
         "clubs/<int:pk>/dismantle/<int:vote_id>/cancel/",
         club_views.ClubDismantleCancelView.as_view(),
         name="api-club-dismantle-cancel",
+    ),
+    path(
+        "clubs/<int:pk>/events/<int:event_id>/comments/",
+        social_views.ClubCommentCollectionView.as_view(),
+        name="api-club-event-comments",
+    ),
+    path(
+        "clubs/<int:pk>/events/<int:event_id>/to-list/",
+        social_views.ClubEventToListView.as_view(),
+        name="api-club-event-to-list",
+    ),
+    path(
+        "clubs/<int:pk>/list/",
+        social_views.ClubSharedListView.as_view(),
+        name="api-club-list",
+    ),
+    path(
+        "clubs/<int:pk>/list/items/",
+        social_views.ClubSharedListItemView.as_view(),
+        name="api-club-list-items",
+    ),
+    path(
+        "clubs/<int:pk>/list/items/<int:item_id>/",
+        social_views.ClubSharedListItemDeleteView.as_view(),
+        name="api-club-list-item-delete",
+    ),
+    path(
+        "clubs/<int:pk>/tasteoffs/",
+        social_views.TasteOffCollectionView.as_view(),
+        name="api-club-tasteoffs",
+    ),
+    path(
+        "clubs/<int:pk>/tasteoffs/<int:tid>/",
+        social_views.TasteOffDetailView.as_view(),
+        name="api-club-tasteoff-detail",
+    ),
+    path(
+        "clubs/<int:pk>/tasteoffs/<int:tid>/bottles/",
+        social_views.TasteOffBottleView.as_view(),
+        name="api-club-tasteoff-bottles",
+    ),
+    path(
+        "clubs/<int:pk>/tasteoffs/<int:tid>/bottles/<int:bid>/",
+        social_views.TasteOffBottleDeleteView.as_view(),
+        name="api-club-tasteoff-bottle-delete",
+    ),
+    path(
+        "clubs/<int:pk>/tasteoffs/<int:tid>/open/",
+        social_views.TasteOffOpenView.as_view(),
+        name="api-club-tasteoff-open",
+    ),
+    path(
+        "clubs/<int:pk>/tasteoffs/<int:tid>/scores/",
+        social_views.TasteOffScoreView.as_view(),
+        name="api-club-tasteoff-scores",
+    ),
+    path(
+        "clubs/<int:pk>/tasteoffs/<int:tid>/close/",
+        social_views.TasteOffCloseView.as_view(),
+        name="api-club-tasteoff-close",
     ),
 ]
