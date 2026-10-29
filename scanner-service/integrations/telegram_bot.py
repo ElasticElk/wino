@@ -2818,6 +2818,8 @@ class TelegramBotHandler:
         self._browse_sessions: dict[str, BrowseSession] = {}
         self._chat_id_to_currency: dict[str, str] = {}
         self._chat_id_to_country: dict[str, str] = {}
+        self._chat_id_to_language: dict[str, str] = {}
+        self.flags: dict[str, bool] = {}
         self._enriching_wine_ids: set[int] = set()
         self._label_seq = 0
         self._winelists: dict[str, dict] = {}
@@ -2933,6 +2935,56 @@ class TelegramBotHandler:
             flow = CatchUpFlow(self)
             self._catchups = flow
         return flow
+
+    def _list_flow(self):
+        flow = getattr(self, "_lists", None)
+        if flow is None:
+            from integrations.telegram_lists import ListFlow
+            flow = ListFlow(self)
+            self._lists = flow
+        return flow
+
+    def _club_flow(self):
+        flow = getattr(self, "_clubs", None)
+        if flow is None:
+            from integrations.telegram_clubs import ClubFlow
+            flow = ClubFlow(self)
+            self._clubs = flow
+        return flow
+
+    def set_flags(self, config: dict | None):
+        flags = {}
+        for key, value in (config or {}).items():
+            if str(key).startswith("feature_"):
+                flags[str(key)] = str(value or "").strip().lower() in {
+                    "on", "true", "1", "yes",
+                }
+        self.flags = flags
+
+    def flag_on(self, key: str) -> bool:
+        return bool((getattr(self, "flags", None) or {}).get(key))
+
+    def set_language(self, chat_id: str, language: str):
+        if chat_id:
+            self._chat_id_to_language[str(chat_id)] = language or ""
+
+    def locale_for(self, update=None, chat_id=None, language_code=None) -> str:
+        from integrations.copy import locale_from_telegram, normalize_locale
+
+        cid = str(chat_id or "")
+        if update is not None:
+            chat = getattr(update, "effective_chat", None)
+            if not cid:
+                cid = str(getattr(chat, "id", "") or "")
+            user = getattr(update, "effective_user", None)
+            if language_code is None:
+                language_code = (
+                    getattr(user, "language_code", None) if user is not None else None
+                )
+        stored = (self._chat_id_to_language or {}).get(cid)
+        if stored:
+            return normalize_locale(stored)
+        return locale_from_telegram(language_code)
 
     def set_api_factory(self, factory: Callable):
         """Set a factory function to build new WineCellarAPI clients.
@@ -3086,7 +3138,9 @@ class TelegramBotHandler:
 
         async def _post_init(application: Application) -> None:
             from integrations.telegram_admin import push_command_menus
-            await push_command_menus(application.bot, admin_ids)
+            await push_command_menus(
+                application.bot, admin_ids, flags=self.flags,
+            )
 
         app = (
             Application.builder()
@@ -3103,6 +3157,8 @@ class TelegramBotHandler:
         app.add_handler(CommandHandler("fridge", self._cmd_fridge, filters=user_filter))
         app.add_handler(CommandHandler("search", self._cmd_search, filters=user_filter))
         app.add_handler(CommandHandler("recent", self._cmd_recent, filters=user_filter))
+        app.add_handler(CommandHandler("list", self._cmd_list, filters=user_filter))
+        app.add_handler(CommandHandler("club", self._cmd_club, filters=user_filter))
         app.add_handler(CommandHandler("help", self._cmd_help, filters=user_filter))
         app.add_handler(CommandHandler("pending", self._cmd_pending, filters=user_filter))
         app.add_handler(CommandHandler("flush", self._cmd_flush, filters=user_filter))
@@ -3207,6 +3263,14 @@ class TelegramBotHandler:
         state = flow.state_for(chat_id)
         if state and state.get("step") in ("name", "confirm"):
             flow.clear(chat_id)
+        club = self._club_flow()
+        club_state = club.state_for(chat_id)
+        if club_state and club_state.get("step") in (
+            "name", "share", "compound_name", "compound_consent", "pick_hh", "join",
+            "comment", "tasteoff_title", "tasteoff_label", "club_list_add",
+            "tasteoff_setup", "club_post",
+        ):
+            club.clear(chat_id)
         router = getattr(self, "_router", None)
         if router is not None:
             await router.abandon(chat_id)
@@ -3215,6 +3279,8 @@ class TelegramBotHandler:
         """Anything at all from an unprovisioned chat gets the onboarding reply."""
         if self._is_known(update):
             return  # provisioned users are handled above; nothing to do here
+        if update.message and await self._club_flow().on_text(update, context):
+            return
         if update.message and await self._invite_flow().on_text(update, context):
             return
         await self._greet_stranger(update)
@@ -3310,6 +3376,20 @@ class TelegramBotHandler:
             "/stock \u2014 Browse wines by type\n"
             "/storages \u2014 View storage locations\n"
             "/recent \u2014 Recent bottles\n"
+        )
+        if self.flag_on("feature_lists"):
+            text += "/list \u2014 Things to drink or buy\n"
+        if self.flag_on("feature_clubs"):
+            text += "/club \u2014 Wine clubs\n"
+            if self.flag_on("feature_lists"):
+                text += "/club list \u2014 Shared tasting list\n"
+            if self.flag_on("feature_tasteoffs"):
+                text += "/club tasteoff \u2014 Score a flight\n"
+            if self.flag_on("feature_club_comments"):
+                text += "Feed cards: Say something\n"
+            if self.flag_on("feature_global_clubs"):
+                text += "/club discover \u2014 Clubs for everyone\n"
+        text += (
             "/pending \u2014 Show pending barcodes\n"
             "/flush \u2014 Clear all pending barcodes\n"
             "/household \u2014 View household & members\n"
@@ -3337,6 +3417,8 @@ class TelegramBotHandler:
                 "\n\U0001F6E0 <b>Staff</b> — /admin for tools that only you see "
                 "in the / menu. Add and remove always take a household name.\n"
             )
+            if self.flag_on("feature_global_clubs"):
+                text += "/clubpost \u2014 Post to a global club\n"
         text += (
             "\n"
             "📸 <b>Reply to a barcode message</b> with a label photo to add a new wine.\n"
@@ -3346,6 +3428,8 @@ class TelegramBotHandler:
         await update.message.reply_text(text, parse_mode="HTML")
 
     async def _unknown_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if await self._club_flow().on_text(update, context):
+            return
         if await self._invite_flow().on_text(update, context):
             return
         cmd = update.message.text.split()[0] if update.message.text else "that"
@@ -3365,6 +3449,10 @@ class TelegramBotHandler:
         try:
             if await self._invite_flow().on_text(update, context):
                 handled_by = "invite"
+                return
+
+            if await self._club_flow().on_text(update, context):
+                handled_by = "club"
                 return
 
             # A pasted link is not a wine name. Searching the cellar for a URL
@@ -3482,6 +3570,16 @@ class TelegramBotHandler:
             router = getattr(self, "_router", None)
             if router is not None:
                 text += router.status_line()
+            from integrations.copy import t as copy_t
+            loc = self.locale_for(update)
+            if self.flag_on("feature_lists"):
+                text += "\n" + copy_t(loc, "list.status.ready")
+            else:
+                text += "\n" + copy_t(loc, "list.status.resting")
+            if self.flag_on("feature_clubs"):
+                text += "\n" + copy_t(loc, "club.status.ready")
+            else:
+                text += "\n" + copy_t(loc, "club.status.resting")
             await update.message.reply_text(text, parse_mode="HTML")
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
@@ -3589,6 +3687,12 @@ class TelegramBotHandler:
         await update.message.reply_text(
             text, parse_mode="HTML", reply_markup=markup,
         )
+
+    async def _cmd_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self._list_flow().cmd_list(update, context)
+
+    async def _cmd_club(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self._club_flow().cmd_club(update, context)
 
     async def _show_drank_page(self, query, api, page: int):
         try:
@@ -3740,6 +3844,13 @@ class TelegramBotHandler:
             await _safe_edit(update_or_query, text, parse_mode="HTML", reply_markup=buttons)
         elif hasattr(update_or_query, "message"):
             await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=buttons)
+        if new_api:
+            try:
+                await self._club_flow().after_household_switch(
+                    update_or_query, chat_id, household_id, household_name,
+                )
+            except Exception:
+                logger.exception("[club] household switch prompt failed")
 
     async def _cmd_household(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show household info and members."""
@@ -3865,6 +3976,8 @@ class TelegramBotHandler:
         await self._invite_flow().cmd_invite(update, context)
 
     async def _handle_location(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if await self._club_flow().on_location(update, context):
+            return
         if await self._invite_flow().on_location(update, context):
             return
         if not self._is_known(update):
@@ -4952,6 +5065,12 @@ class TelegramBotHandler:
             return
 
         if await self._catchup_flow().on_callback(update, context):
+            return
+
+        if await self._list_flow().on_callback(update, context):
+            return
+
+        if await self._club_flow().on_callback(update, context):
             return
 
         data = _parse_cb(query.data)
@@ -8749,6 +8868,19 @@ class TelegramBotHandler:
             suffix += PRODUCER_HINT
             extra = _guess_producer_row(temp_key, grok_data.get("name") or "")
             keyboard = keyboard[:1] + extra + keyboard[1:] if keyboard else extra
+        from integrations.telegram_lists import insert_to_drink, to_drink_button
+        td_wine_id = None
+        if hits:
+            td_wine_id = existing["id"] if existing else (
+                hits[0]["id"] if len(hits) == 1 else None
+            )
+        keyboard = insert_to_drink(
+            keyboard,
+            to_drink_button(
+                self, getattr(status_msg, "chat_id", None),
+                barcode=temp_key, wine_id=td_wine_id,
+            ),
+        )
 
         markup = InlineKeyboardMarkup(keyboard)
         # The triage vision call answers from the model's own memory and, held
@@ -8834,6 +8966,15 @@ class TelegramBotHandler:
             suffix += PRODUCER_HINT
             extra = _guess_producer_row(barcode, grok_data.get("name") or "")
             keyboard = keyboard[:1] + extra + keyboard[1:] if keyboard else extra
+        from integrations.telegram_lists import insert_to_drink, to_drink_button
+        td_wine_id = hits[0]["id"] if len(hits) == 1 else None
+        keyboard = insert_to_drink(
+            keyboard,
+            to_drink_button(
+                self, getattr(status_msg, "chat_id", None),
+                barcode=barcode, wine_id=td_wine_id,
+            ),
+        )
         markup = InlineKeyboardMarkup(keyboard)
         wants_refs = _needs_references(grok_data) and hasattr(api, "lookup_references")
         pending_note = REFS_PENDING_NOTE if wants_refs else ""
@@ -8928,7 +9069,8 @@ class TelegramBotHandler:
         if entry.get("had_pending") and stored:
             with self._lock:
                 pending_gone = stored not in self.pending_store
-        if entry.get("drunk") or entry.get("committed") or pending_gone:
+        keep_card = entry.get("looking") or entry.get("listed")
+        if entry.get("drunk") or entry.get("committed") or (pending_gone and not keep_card):
             # User already tapped Add / Drank this. Do not resurrect those
             # buttons over the storage picker — apply the search we already paid for.
             logger.info(
@@ -8955,7 +9097,11 @@ class TelegramBotHandler:
             return
         self._label_cards.pop(key, None)
         text = LABEL_HEADER + _grok_summary(grok_data) + entry["suffix"]
-        if entry["looking"]:
+        if entry.get("listed"):
+            from integrations.telegram_lists import listed_note
+            text += listed_note(self, getattr(status_msg, "chat_id", None))
+            markup = None
+        elif entry.get("looking"):
             text += JUST_LOOKING_NOTE
             markup = None
         try:

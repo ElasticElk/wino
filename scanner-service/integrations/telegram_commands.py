@@ -35,15 +35,38 @@ ADMIN_COMMANDS = [
     ("adduser", "Add a member to a named household"),
     ("removeuser", "Remove a member from a named household"),
     ("welcome", "Resend the welcome to a chat ID"),
+    ("clubpost", "Post to a global club"),
 ]
 
 
-def public_command_payload() -> list[dict]:
-    return [{"command": c, "description": d} for c, d in PUBLIC_COMMANDS]
+LIST_COMMAND = ("list", "Things to drink or buy")
+CLUB_COMMAND = ("club", "Wine clubs")
 
 
-def staff_command_payload() -> list[dict]:
+def menu_commands(flags: dict | None = None) -> list[tuple[str, str]]:
+    """Public / menu. Flagged commands are omitted until their flag is on."""
+    commands = list(PUBLIC_COMMANDS)
+    if flags and flags.get("feature_lists"):
+        after = next(
+            (i for i, (name, _) in enumerate(commands) if name == "recent"),
+            0,
+        )
+        commands.insert(after + 1, LIST_COMMAND)
+    if flags and flags.get("feature_clubs"):
+        after = next(
+            (i for i, (name, _) in enumerate(commands) if name == "invite"),
+            len(commands) - 1,
+        )
+        commands.insert(after + 1, CLUB_COMMAND)
+    return commands
+
+
+def public_command_payload(flags: dict | None = None) -> list[dict]:
+    return [{"command": c, "description": d} for c, d in menu_commands(flags)]
+
+
+def staff_command_payload(flags: dict | None = None) -> list[dict]:
     return [
         {"command": c, "description": d}
-        for c, d in PUBLIC_COMMANDS + ADMIN_COMMANDS
+        for c, d in menu_commands(flags) + ADMIN_COMMANDS
     ]

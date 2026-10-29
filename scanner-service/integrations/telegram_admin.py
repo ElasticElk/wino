@@ -12,7 +12,7 @@ import logging
 from telegram import BotCommand, BotCommandScopeChat, BotCommandScopeDefault, Update
 from telegram.ext import CommandHandler, ContextTypes, filters
 
-from integrations.telegram_commands import ADMIN_COMMANDS, PUBLIC_COMMANDS
+from integrations.telegram_commands import ADMIN_COMMANDS, menu_commands
 
 logger = logging.getLogger(__name__)
 
@@ -88,13 +88,15 @@ def register_admin_handlers(app, handler) -> None:
     app.add_handler(CommandHandler("adduser", bind(cmd_adduser), filters=admin_filter))
     app.add_handler(CommandHandler("removeuser", bind(cmd_removeuser), filters=admin_filter))
     app.add_handler(CommandHandler("welcome", bind(cmd_welcome), filters=admin_filter))
+    app.add_handler(CommandHandler("clubpost", bind(cmd_clubpost), filters=admin_filter))
     logger.info(f"[admin] staff commands registered for {len(admin_ids)} chat(s)")
 
 
-async def push_command_menus(bot, admin_chat_ids: list[str]) -> None:
+async def push_command_menus(bot, admin_chat_ids: list[str], flags: dict | None = None) -> None:
     """Default menu for everyone; public + admin for staff chats only."""
-    public = [BotCommand(c, d) for c, d in PUBLIC_COMMANDS]
-    staff = [BotCommand(c, d) for c, d in PUBLIC_COMMANDS + ADMIN_COMMANDS]
+    public_cmds = menu_commands(flags)
+    public = [BotCommand(c, d) for c, d in public_cmds]
+    staff = [BotCommand(c, d) for c, d in public_cmds + ADMIN_COMMANDS]
     try:
         await bot.set_my_commands(public, scope=BotCommandScopeDefault())
         logger.info("[admin] default command menu pushed")
@@ -503,6 +505,10 @@ def _seconds(ms) -> str:
     return "—" if ms is None else f"{ms / 1000:.1f}s"
 
 
+async def cmd_clubpost(update: Update, context: ContextTypes.DEFAULT_TYPE, handler) -> None:
+    await handler._club_flow().cmd_clubpost(update, context)
+
+
 async def cmd_chatstats(update: Update, context: ContextTypes.DEFAULT_TYPE, handler) -> None:
     args = context.args or []
     days = 30
@@ -531,6 +537,15 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE, handler)
         f"Telegram users: <b>{data.get('telegram_users', 0)}</b>",
         f"Wines: <b>{data.get('wines', 0)}</b>",
         f"Bottles in stock: <b>{data.get('bottles', 0)}</b>",
+        (
+            f"Lists: <b>{data.get('lists_open', 0)}</b> items "
+            f"({data.get('lists_moved', 0)} moved)"
+        ),
+        (
+            f"Clubs: <b>{data.get('clubs', 0)}</b> "
+            f"({data.get('club_members', 0)} members), "
+            f"feed events 7d: {data.get('feed_events_7d', 0)}"
+        ),
     ]
     scanners = data.get("scanners") or []
     if scanners:

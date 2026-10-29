@@ -57,6 +57,7 @@ INSTALLED_APPS = [
     "rest_framework.authtoken",
     "wine_cellar.apps.api",
     "wine_cellar.apps.scanner",
+    "wine_cellar.apps.club",
 ]
 
 REST_FRAMEWORK = {
@@ -95,6 +96,7 @@ TEMPLATES = [
                 "django.template.context_processors.request",
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
+                "wine_cellar.apps.scanner.flags.flags_context",
             ],
         },
     },
@@ -157,6 +159,8 @@ LANGUAGES = [
     ("de-DE", _("German")),
     ("fr-FR", _("French")),
     ("en-gb", _("British English")),
+    ("af", _("Afrikaans")),
+    ("af-ZA", _("Afrikaans (South Africa)")),
 ]
 
 # LOCALE_PATHS = [BASE_DIR / "locale"]

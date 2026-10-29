@@ -562,3 +562,141 @@ class TasteIntent(models.Model):
 
     def __str__(self):
         return f"{self.household} {self.kind} {self.created:%Y-%m-%d}"
+
+
+class WineList(models.Model):
+    """A To-drink list. Personal lists are user-scoped (open-q #15).
+
+    Club lists (kind=club, club set, owner null) land in phase 3.
+    """
+
+    KIND_PERSONAL = "personal"
+    KIND_CLUB = "club"
+    KIND_CHOICES = [
+        (KIND_PERSONAL, "Personal"),
+        (KIND_CLUB, "Club"),
+    ]
+    DEFAULT_PERSONAL_NAME = "To drink"
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="wine_lists",
+    )
+    name = models.CharField(max_length=40)
+    kind = models.CharField(
+        max_length=8, choices=KIND_CHOICES, default=KIND_PERSONAL,
+    )
+    club = models.ForeignKey(
+        "club.Club",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="wine_lists",
+    )
+    created = models.DateTimeField(auto_now_add=True)
+    modified = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["owner", "name"],
+                condition=models.Q(kind="personal", owner__isnull=False),
+                name="unique_personal_winelist_name",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(kind="personal", owner__isnull=False)
+                    | models.Q(kind="club", owner__isnull=True)
+                ),
+                name="winelist_owner_matches_kind",
+            ),
+            models.UniqueConstraint(
+                fields=["club"],
+                condition=models.Q(kind="club", club__isnull=False),
+                name="unique_club_list_per_club",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(kind="personal", club__isnull=True)
+                    | models.Q(kind="club", club__isnull=False)
+                ),
+                name="winelist_club_matches_kind",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["owner", "kind"], name="winelist_owner_kind_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.kind})"
+
+
+def get_or_create_personal_list(user) -> WineList:
+    lst, _ = WineList.objects.get_or_create(
+        owner=user,
+        kind=WineList.KIND_PERSONAL,
+        name=WineList.DEFAULT_PERSONAL_NAME,
+    )
+    return lst
+
+
+class WineListItem(models.Model):
+    SOURCE_CHOICES = [
+        ("label", "Label photo"),
+        ("barcode", "Barcode"),
+        ("typed", "Typed"),
+        ("club_feed", "Club feed"),
+    ]
+
+    list = models.ForeignKey(
+        WineList, on_delete=models.CASCADE, related_name="items",
+    )
+    name = models.CharField(max_length=100)
+    producer = models.CharField(max_length=100, blank=True, default="")
+    vintage = models.PositiveIntegerField(null=True, blank=True)
+    wine_type = models.CharField(max_length=2, blank=True, default="")
+    country = models.CharField(max_length=3, blank=True, default="")
+    grape = models.CharField(max_length=100, blank=True, default="")
+    barcode = models.CharField(max_length=100, blank=True, default="")
+    payload = models.JSONField(default=dict, blank=True)
+    wine = models.ForeignKey(
+        "wine.Wine",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="list_items",
+    )
+    source = models.CharField(
+        max_length=12, choices=SOURCE_CHOICES, default="label",
+    )
+    added_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    created = models.DateTimeField(auto_now_add=True)
+    touched_at = models.DateTimeField(auto_now=True)
+    moved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["list", "wine"],
+                condition=models.Q(wine__isnull=False, moved_at__isnull=True),
+                name="unique_open_list_item_per_wine",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["list", "moved_at", "-created"],
+                name="winelistitem_open_idx",
+            ),
+        ]
+        ordering = ["-created"]
+
+    def __str__(self):
+        return self.name

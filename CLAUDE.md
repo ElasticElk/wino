@@ -30,7 +30,9 @@ start.sh / stop.sh    # Service orchestration
 - `Household` / `HouseholdMembership` — Multi-tenant system (owner/member roles)
 - `Scanner` — Registered barcode devices with API keys + notify_users M2M
 - `TelegramUser` — Links Django users to Telegram chat IDs
-- `ServiceConfig` — Key-value config store (bot_token, grok_api_key, web_url)
+- `ServiceConfig` — Key-value config store (bot_token, grok_api_key, web_url, `feature_lists` / `feature_clubs` / …)
+- `WineList` / `WineListItem` — Personal To-drink list (**user-scoped**, not household). Club lists (`kind=club`, `owner` null, FK to `Club`) share a names-only checklist. Flag `feature_lists` (club lists also need `feature_clubs`).
+- `Club` / `ClubMembership` / `ClubInvite` / `ClubEvent` / `ClubComment` / `TasteOff` — Private wine clubs (own app `wine_cellar.apps.club`). Sharing policy is club-wide. Flag `feature_clubs`. Comments `feature_club_comments`; taste-offs `feature_tasteoffs`. `Club.kind=global` is staff-run, feed-only (`cellar_visibility=none`, no peek/badges/dismantle); flag `feature_global_clubs`.
 
 ### REST API (`/api/`)
 Auth: `Authorization: Token <token>` header. Optional `X-Household: <id>` header.
@@ -61,13 +63,34 @@ Auth: `Authorization: Token <token>` header. Optional `X-Household: <id>` header
 - `GET /api/households/` — All user's households
 - `POST /api/household/add-member/` — Add member to household
 - `POST /api/household/remove-member/` — Remove member from household
-- `POST /api/scanner/invites/` — Mint a one-time invite (`kind=join` any member, `kind=new` staff). 7-day expiry. Staff join requires `household_id`; the bot sends it even when there is only one cellar
+- `POST /api/scanner/invites/` — Mint a one-time invite (`kind=join` any member, `kind=new` staff). 30-day expiry. Staff join requires `household_id`; the bot sends it even when there is only one cellar
 - `GET /api/scanner/invites/<code>/` — Preview a code without burning it. **Staff only** — the bot calls it with its admin client (`handler.api`)
 - `POST /api/scanner/invites/redeem/` — Provision from a code (join=member, new=owner + storage named Cellar). Returns the token of the user for the posted `chat_id`, so **staff only**. A taken name is `409` with `error` "That name's taken — pick another" and a free `suggested_name` (never the taken one; names are global, so the taken name is not echoed)
 - `POST /api/scanner/invites/cancel/` — Drop the caller's newest **unexpired** unused invite. Optional `household_id` prefers that cellar, then a staff `new` invite. Returns `code`, `kind`, `household_name`
 - `POST /api/scanner/taste/` — Record a taste intent (`look`, `winelist`, or `ask`). `ask` requires a JSON object `payload` and does not rebuild the household snapshot. The response includes `intent_id`
 - `PATCH /api/scanner/taste/<id>/` — Merge `outcome`, `shown`, `rejected`, `place`, `model`, `latency_ms` and `fallback` into an `ask` intent. Another household, or a `look` / `winelist` row, is `404`
 - `GET /api/scanner/chat-stats/?days=30` — **Staff only.** How chat recommendations landed: taps, whether the suggested bottle was removed from stock within 48h and its vote, model mix, latency, and the five worst asks (`wine/chat_stats.py`)
+- `GET /api/lists/` — Caller's personal To-drink lists (creates the default list). **User-keyed**, not `X-Household`. Flag `feature_lists`; off → 404 `not_enabled`
+- `GET /api/lists/<id>/` — Open items (`?limit=5&offset=0`). Another user's list is 404
+- `POST /api/lists/<id>/items/` — Snapshot a bottle onto the list. Duplicate `wine_id` is 200 (idempotent)
+- `DELETE /api/lists/<id>/items/<item_id>/` — Remove. 409 `already_moved`
+- `POST /api/lists/<id>/items/<item_id>/to-cellar/` — Create/find `Wine` in the **current** household and add stock. Sets `moved_at`. Undo of that stock add does not restore the list row
+- `POST /api/clubs/global/` — Staff. Forces `kind=global`, `cellar_visibility=none`, `badges_visible=false`. Flag `feature_global_clubs`
+- `GET /api/clubs/discover/` — List global clubs (`joined`, `frozen`). Flag `feature_global_clubs`; off → 404 `not_enabled`
+- `POST /api/clubs/<id>/join/` — Self-join a global club (403 `invite_only` on private). No household heads-up
+- `POST /api/clubs/<id>/notes/` — Staff note on a global club → `staff_note` event
+- `POST /api/clubs/<id>/members/<user_id>/kick/` — Staff; cannot kick the owner; does not delete the club
+- `GET/POST /api/clubs/` — User-keyed club list / create (default full cellar + badges). Flag `feature_clubs`; off → 404 `not_enabled`. Never use `X-Household` as the club id
+- `GET/PATCH /api/clubs/<id>/` — Home card / owner policy. Widening bumps `sharing_version` and DMs Stay/Leave; unacked peek stays at the previous level
+- `PATCH /api/clubs/<id>/membership/` — Mute, switch shared household, Stay (`accepted_sharing_version`)
+- `POST /api/clubs/<id>/leave/` — 409 `hand_over_required` if owner with others; last member deletes the club
+- `GET /api/clubs/<id>/members/<user_id>/cellar/` — Peek (summary/full). Forbidden: prices, drawers, notes, barcodes, critic/Vivino
+- `POST /api/scanner/club-invites/redeem/` — Staff. Compound: new cellar + club membership in one call. 409 `dismantle_in_progress` while a unanimous end-vote is open
+- `POST /api/scanner/invites/preview/` — Household invite first, then club invite (`kind=club`)
+- `GET/POST /api/clubs/<id>/events/<event_id>/comments/` — Club-visible notes, max 280. Flag `feature_club_comments`. 409 `retracted`
+- `POST /api/clubs/<id>/events/<event_id>/to-list/` — Snapshot onto the **caller's** personal To-drink list (`source=club_feed`). No `wine_id` of the actor's bottle. Flag `feature_lists`
+- `GET/POST /api/clubs/<id>/list/` and `.../list/items/` — Shared club checklist (names/vintages only). Delete if owner or `added_by`
+- `POST /api/clubs/<id>/tasteoffs/` — Setup a scored tasting (1–5, not `Wine.rating`). One setup/scoring flight per club. Flag `feature_tasteoffs`. Host or owner may close; beat auto-closes after 7 days
 
 ### Frontend
 - **Templates:** `wine_cellar/templates/` — Django templates with `base.html` layout
@@ -104,6 +127,9 @@ Bridges physical barcode scanners to the Wine Cellar API. Runs as FastAPI server
 ### Integrations
 - `integrations/wine_cellar_api.py` — HTTP client for Wine Cellar REST API
 - `integrations/telegram_bot.py` — Telegram bot (notifications, photos, disambiguation, household switching)
+- `integrations/telegram_lists.py` — `/list` To-drink flow and label-card `td` button
+- `integrations/telegram_clubs.py` — `/club` found/invite/join/home/peek/mute/leave/dismantle; `/club list`; `/club tasteoff`; feed `Say something` / `To-drink list`; `/start` club codes
+- `integrations/copy.py` — EN/AF dialogue catalog (menus stay English)
 - `integrations/telegram_catchup.py` — `/fridge` Catch up drawer walk (staged Drunk/Moved, bulk apply)
 - `integrations/grok_vision.py` — xAI Grok Vision for label analysis
 - `integrations/open_food_facts.py` — Barcode → wine data lookup
@@ -146,7 +172,7 @@ Callers POST to queue, then poll the same URL with `?task_id=`. The Telegram cli
 ## Key Config Files
 - `wine-cellar/wine_cellar/conf/settings.py` — Base Django settings
 - `wine-cellar/wine_cellar/conf/docker_settings.py` — Docker/prod overrides (env vars)
-- `wine-cellar/wine_cellar/conf/celery.py` — Celery + beat schedule (drink_by_reminder at 2:30 AM daily)
+- `wine-cellar/wine_cellar/conf/celery.py` — Celery + beat schedule (drink_by_reminder at 2:30 AM daily; expire_dismantle_votes every 15 min; close_stale_tasteoffs at 03:15)
 - `scanner-service/config.yaml` — Scanner bootstrap config
 - `wine-cellar/pyproject.toml` — Project metadata, deps, test config (AGPL-3.0 license)
 
@@ -176,6 +202,8 @@ Available to authorized users via the bot:
 - `/stock` — View current stock (interactive, per-storage)
 - `/fridge` — Browse fridge contents. **Catch up** walks one drawer: tap Drunk / Moved (1 or both), then Apply. Empty here means those bottles moved, not drunk. One Undo. Not a new slash command. Buttons carry `wine_id` / `item_id`, never a list position (the list shrinks per tap, so an index would hit another wine). Bottles with no drawer (fridge `+` adds them so) get a *No drawer* bucket. A move may be *Not sure which drawer* (row null). Undo carries its batch id, so it still works after a new Catch up. Stale Apply keeps the changes that are still valid and drops the rest.
 - `/recent` — Recent bottles (notes + label photo, pages of 5)
+- `/list` — Personal To-drink list (bottles you don't own yet). **User-scoped** — a household partner does not see it. Gated on `ServiceConfig.feature_lists`. Move to cellar writes stock on the current household. Not created on new-cellar redeem; first `/list` or first add creates the default list.
+- `/club` — Private wine clubs (own cellar each, automatic drink feed, club-wide peek). Gated on `ServiceConfig.feature_clubs`. `/club invite` is social; `/invite` stays cellar. Default policy is full cellar + badges. Owner widen asks Stay/Leave. Last member leave deletes the club; owner can propose a unanimous 48h dismantle instead. `/club list` is a shared names-only checklist (`feature_lists`). `/club tasteoff` is a 1–5 scored flight (`feature_tasteoffs`) that does not write `Wine.rating` or stock votes. Feed cards gain **Say something** (`feature_club_comments`, 280 chars) and **To-drink list** (caller's personal list, `source=club_feed`). `/club discover` lists staff-run global clubs (`feature_global_clubs`) — feed only, cellar stays private; drink-opens still post if you open a bottle. Staff `/clubpost` writes a themed note. No peek, badges dump, or dismantle on global.
 - `/help` — List available commands
 - `/pending` — Show barcodes awaiting label photos
 - `/flush` — Clear pending barcodes

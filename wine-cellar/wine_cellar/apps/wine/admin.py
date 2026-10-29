@@ -11,6 +11,8 @@ from wine_cellar.apps.wine.models import (
     TasteIntent,
     Vineyard,
     Wine,
+    WineList,
+    WineListItem,
 )
 
 
@@ -83,3 +85,20 @@ class SourceAdmin(admin.ModelAdmin):
 class AttributeAdmin(admin.ModelAdmin):
     list_display = ["name", "user"]
     fields = ["name", "user"]
+
+
+@admin.register(WineList)
+class WineListAdmin(admin.ModelAdmin):
+    list_display = ["name", "owner", "kind", "item_count"]
+    list_filter = ["kind"]
+    search_fields = ["name", "owner__username"]
+
+    def item_count(self, obj):
+        return obj.items.filter(moved_at__isnull=True).count()
+
+
+@admin.register(WineListItem)
+class WineListItemAdmin(admin.ModelAdmin):
+    list_display = ["name", "list", "vintage", "moved_at", "added_by"]
+    list_filter = ["source"]
+    search_fields = ["name", "producer"]

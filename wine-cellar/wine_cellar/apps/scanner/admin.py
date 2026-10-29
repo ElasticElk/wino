@@ -12,7 +12,10 @@ class HouseholdMembershipInline(admin.TabularInline):
 
 @admin.register(Household)
 class HouseholdAdmin(admin.ModelAdmin):
-    list_display = ("name", "gamification_enabled", "member_count", "created")
+    list_display = (
+        "name", "gamification_enabled", "member_count",
+        "club_share_notice_sent_at", "created",
+    )
     list_filter = ("gamification_enabled",)
     inlines = [HouseholdMembershipInline]
 

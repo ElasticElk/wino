@@ -17,6 +17,8 @@ from rest_framework.views import APIView
 
 from rest_framework.parsers import MultiPartParser
 
+from wine_cellar.apps.api.stock import add_stock_item, refresh_taste as _refresh_taste
+from wine_cellar.apps.club.events import queue_club_event
 from wine_cellar.apps.api.task_access import remember_task, task_visible
 from wine_cellar.apps.scanner.households import get_user_household
 from wine_cellar.apps.scanner.models import Household, TelegramUser
@@ -28,18 +30,10 @@ from wine_cellar.apps.wine.achievements import (
     serialize_achievement,
 )
 from wine_cellar.apps.wine.models import CellarAchievement, ImageType, Size, Wine, WineImage
-from wine_cellar.apps.wine.taste import rebuild_snapshot
 
 import logging
 
 logger = logging.getLogger(__name__)
-
-
-def _refresh_taste(household):
-    try:
-        rebuild_snapshot(household)
-    except Exception:
-        logger.exception("taste snapshot rebuild failed")
 
 from .serializers import (
     StockAddSerializer,
@@ -181,48 +175,20 @@ class StockAddView(ScannerAPIView):
         drank = serializer.validated_data.get("drank", False)
         confirm_duplicate = serializer.validated_data.get("confirm_duplicate", False)
         check_duplicate = serializer.validated_data.get("check_duplicate", False)
-        if check_duplicate and not confirm_duplicate:
-            cutoff = timezone.now() - timedelta(minutes=60)
-            recent = (
-                StorageItem.objects.filter(
-                    wine=wine, wine__household=household, deleted=drank,
-                    created__gte=cutoff,
-                )
-                .order_by("-created")
-                .first()
-            )
-            if recent is not None:
-                return Response(
-                    {
-                        "error": "recent_duplicate",
-                        "wine_id": wine.id,
-                        "item_id": recent.id,
-                        "wine_name": f"{wine.name} {wine.vintage or ''}".strip(),
-                        "stock_count": wine.total_stock,
-                    },
-                    status=status.HTTP_409_CONFLICT,
-                )
-        item = StorageItem.objects.create(
-            storage=storage, wine=wine, user=request.user, price=price, row=row,
-            deleted=drank,
+        payload, code = add_stock_item(
+            household=household,
+            user=request.user,
+            wine=wine,
+            storage_name=storage.name,
+            price=price,
+            row=row,
+            drank=drank,
+            check_duplicate=check_duplicate,
+            confirm_duplicate=confirm_duplicate,
         )
-        _refresh_taste(household)
-
-        payload = {
-            "item_id": item.id,
-            "wine_id": wine.id,
-            "wine_name": f"{wine.name} {wine.vintage or ''}".strip(),
-            "stock_count": wine.total_stock,
-            "storage": storage.name,
-            "storage_id": storage.id,
-            "row": row,
-            "drawers": storage.rows,
-            "action": "drank" if drank else "added",
-            "achievements": award_for_add(
-                wine, request.user, storage=storage, drank=drank,
-            ),
-        }
-        return Response(payload, status=status.HTTP_201_CREATED)
+        if code == 201 and drank and payload.get("item_id"):
+            queue_club_event(payload["item_id"], request.user.id, "opened")
+        return Response(payload, status=code)
 
 
 def _wine_label(wine):
@@ -302,6 +268,7 @@ class StockRemoveView(ScannerAPIView):
 
         payload = _soft_delete_item(item)
         _refresh_taste(household)
+        queue_club_event(payload["item_id"], request.user.id, "opened")
         return Response(payload)
 
 
@@ -375,6 +342,8 @@ class StockRestoreView(ScannerAPIView):
                 {"error": "Item not found"}, status=status.HTTP_404_NOT_FOUND
             )
         payload, code = _restore_item(item, household)
+        if code == status.HTTP_200_OK:
+            queue_club_event(item.id, request.user.id, "retracted")
         return Response(payload, status=code)
 
 
@@ -403,6 +372,8 @@ class StockRestoreLatestView(ScannerAPIView):
                 status=status.HTTP_409_CONFLICT,
             )
         payload, code = _restore_item(item, household)
+        if code == status.HTTP_200_OK:
+            queue_club_event(item.id, request.user.id, "retracted")
         return Response(payload, status=code)
 
 
@@ -510,7 +481,15 @@ class StockBulkView(ScannerAPIView):
                     snapshots,
                     timeout=BULK_UNDO_TTL,
                 )
-                transaction.on_commit(lambda: _refresh_taste(household))
+                removed = [s["item_id"] for s in snapshots if s["op"] == "remove"]
+                actor_id = request.user.id
+
+                def _after(h=household, ids=removed, aid=actor_id):
+                    _refresh_taste(h)
+                    for iid in ids:
+                        queue_club_event(iid, aid, "opened")
+
+                transaction.on_commit(_after)
         except BulkConflict as exc:
             return Response(exc.payload, status=exc.code)
 
@@ -579,7 +558,15 @@ class StockBulkUndoView(ScannerAPIView):
                         item.row = snap.get("from_row")
                         item.save()
                 cache.delete(key)
-                transaction.on_commit(lambda: _refresh_taste(household))
+                restored = [s["item_id"] for s in snapshots if s["op"] == "remove"]
+                actor_id = request.user.id
+
+                def _after_undo(h=household, ids=restored, aid=actor_id):
+                    _refresh_taste(h)
+                    for iid in ids:
+                        queue_club_event(iid, aid, "retracted")
+
+                transaction.on_commit(_after_undo)
         except BulkConflict as exc:
             return Response(exc.payload, status=exc.code)
 
@@ -1361,6 +1348,7 @@ class StockVoteView(ScannerAPIView):
         serializer.is_valid(raise_exception=True)
         item.vote = serializer.validated_data["vote"]
         item.save(update_fields=["vote"])
+        queue_club_event(item.id, request.user.id, "voted")
         return Response({
             "item_id": item.id,
             "vote": item.vote,

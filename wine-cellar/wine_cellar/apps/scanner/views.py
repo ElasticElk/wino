@@ -10,11 +10,10 @@ from django.utils.crypto import get_random_string
 from django.utils.decorators import method_decorator
 from rest_framework import status
 from rest_framework.authentication import TokenAuthentication
+from rest_framework.authtoken.models import Token
 from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-
-from rest_framework.authtoken.models import Token
 
 from wine_cellar.apps.scanner.households import get_user_household
 from wine_cellar.apps.storage.models import Storage, StorageItem
@@ -26,12 +25,18 @@ from wine_cellar.apps.wine.achievements import (
     serialize_achievement,
 )
 from wine_cellar.apps.wine.chat_stats import chat_stats
-from wine_cellar.apps.wine.models import CellarAchievement, TasteIntent, Wine
+from wine_cellar.apps.wine.models import CellarAchievement, TasteIntent, Wine, WineListItem
 from wine_cellar.apps.wine.taste import record_intent, serialize_snapshot
 
 from .models import (
     INVITE_TTL,
-    Household, HouseholdInvite, HouseholdMembership, Scanner, ServiceConfig, TelegramUser,
+    Household,
+    HouseholdInvite,
+    HouseholdMembership,
+    Scanner,
+    ServiceConfig,
+    TelegramUser,
+    mint_unique_code,
 )
 
 User = get_user_model()
@@ -187,7 +192,7 @@ def _resolve_join_household(request):
         except (ValueError, TypeError):
             return None, Response(
                 {"error": "No household found"},
-                status=status.HTTP_404_NOT_FOUND,
+                status=status.HTTP_400_BAD_REQUEST,
             )
         membership = HouseholdMembership.objects.filter(
             user=request.user, household_id=hid,
@@ -195,8 +200,15 @@ def _resolve_join_household(request):
     else:
         header_id = request.META.get("HTTP_X_HOUSEHOLD")
         if header_id:
+            try:
+                header_household_id = int(header_id)
+            except (ValueError, TypeError):
+                return None, Response(
+                    {"error": "No household found"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             membership = HouseholdMembership.objects.filter(
-                user=request.user, household_id=int(header_id),
+                user=request.user, household_id=header_household_id,
             ).select_related("household").first()
         else:
             membership = HouseholdMembership.objects.filter(
@@ -379,12 +391,14 @@ class ScannerConfigView(APIView):
                 currency = "EUR"
                 country = ""
                 country_prompted = False
+                language = ""
                 if hasattr(tu.user, "user_settings"):
                     currency = tu.user.user_settings.currency or "EUR"
                     country = tu.user.user_settings.country or ""
                     country_prompted = bool(
                         tu.user.user_settings.country_prompted or country,
                     )
+                    language = tu.user.user_settings.language or ""
 
                 telegram_users.append(
                     {
@@ -401,6 +415,7 @@ class ScannerConfigView(APIView):
                         "currency": currency,
                         "country": country,
                         "country_prompted": country_prompted,
+                        "language": language,
                         "households": [
                             {"id": h[0], "name": h[1], "is_default": h[2]}
                             for h in all_households
@@ -734,17 +749,36 @@ class HouseholdsListView(APIView):
 
 
 def _mint_invite(user, kind, household=None):
+    """Create an invite, or None if a unique code could not be minted.
+
+    Callers must turn None into HTTP 503 — never let IntegrityError 500.
+    """
     for _ in range(5):
+        code = mint_unique_code()
+        if not code:
+            break
         try:
             return HouseholdInvite.objects.create(
                 kind=kind,
                 household=household,
                 created_by=user,
+                code=code,
                 expires_at=timezone.now() + INVITE_TTL,
             )
         except IntegrityError:
             continue
-    raise IntegrityError("could not mint a unique invite code")
+    logger.error("could not mint a unique invite code")
+    return None
+
+
+def _mint_invite_response(user, kind, household=None):
+    invite = _mint_invite(user, kind, household)
+    if invite is None:
+        return Response(
+            {"error": "could not mint a unique invite code"},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    return Response(_serialize_invite(invite), status=status.HTTP_201_CREATED)
 
 
 @method_decorator(login_not_required, name="dispatch")
@@ -762,8 +796,7 @@ class HouseholdInviteCreateView(APIView):
                     {"error": "Only staff can mint a new-cellar invite"},
                     status=status.HTTP_403_FORBIDDEN,
                 )
-            invite = _mint_invite(request.user, HouseholdInvite.KIND_NEW)
-            return Response(_serialize_invite(invite), status=status.HTTP_201_CREATED)
+            return _mint_invite_response(request.user, HouseholdInvite.KIND_NEW)
 
         if kind != HouseholdInvite.KIND_JOIN:
             return Response(
@@ -774,8 +807,9 @@ class HouseholdInviteCreateView(APIView):
         household, error = _resolve_join_household(request)
         if error is not None:
             return error
-        invite = _mint_invite(request.user, HouseholdInvite.KIND_JOIN, household)
-        return Response(_serialize_invite(invite), status=status.HTTP_201_CREATED)
+        return _mint_invite_response(
+            request.user, HouseholdInvite.KIND_JOIN, household,
+        )
 
 
 @method_decorator(login_not_required, name="dispatch")
@@ -797,9 +831,19 @@ class HouseholdInvitePreviewView(APIView):
             .filter(code=code)
             .first()
         )
-        if invite is None:
+        if invite is not None:
+            return Response(_serialize_invite(invite))
+        from wine_cellar.apps.club.models import ClubInvite
+        from wine_cellar.apps.club.services import serialize_invite
+
+        club_invite = (
+            ClubInvite.objects.select_related("club", "created_by")
+            .filter(code=code)
+            .first()
+        )
+        if club_invite is None:
             return Response({"error": "Invite not found"}, status=status.HTTP_404_NOT_FOUND)
-        return Response(_serialize_invite(invite))
+        return Response(serialize_invite(club_invite))
 
 
 @method_decorator(login_not_required, name="dispatch")
@@ -1228,6 +1272,21 @@ class ScannerWhoisView(APIView):
         return Response({"results": results})
 
 
+def _club_stats():
+    from datetime import timedelta
+
+    from wine_cellar.apps.club.models import Club, ClubEvent, ClubMembership
+
+    return {
+        "clubs": Club.objects.filter(kind=Club.KIND_PRIVATE).count(),
+        "club_members": ClubMembership.objects.count(),
+        "feed_events_7d": ClubEvent.objects.filter(
+            kind=ClubEvent.KIND_OPENED,
+            created__gte=timezone.now() - timedelta(days=7),
+        ).count(),
+    }
+
+
 @method_decorator(login_not_required, name="dispatch")
 class ScannerStatsView(APIView):
     """Staff-only: counts across every household. No tokens or API keys."""
@@ -1244,6 +1303,7 @@ class ScannerStatsView(APIView):
             }
             for sc in Scanner.objects.select_related("household")
         ]
+        clubs = _club_stats()
         return Response({
             "households": Household.objects.count(),
             "telegram_users": TelegramUser.objects.filter(is_active=True).count(),
@@ -1251,6 +1311,13 @@ class ScannerStatsView(APIView):
             "bottles": StorageItem.objects.filter(
                 deleted=False, storage__household__isnull=False,
             ).count(),
+            "lists_open": WineListItem.objects.filter(moved_at__isnull=True).count(),
+            "lists_moved": WineListItem.objects.filter(
+                moved_at__isnull=False,
+            ).count(),
+            "clubs": clubs["clubs"],
+            "club_members": clubs["club_members"],
+            "feed_events_7d": clubs["feed_events_7d"],
             "scanners": scanners,
         })
 

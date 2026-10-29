@@ -1,0 +1,20 @@
+{% extends 'base.html' %}
+{% load i18n %}
+{% block header %}
+    <h1 class="header__title">{% translate "Wine clubs" %}</h1>
+{% endblock header %}
+{% block content %}
+    {% if not memberships %}
+        <p>{% translate "You're not in a wine club yet. Ask Whiney with /club." %}</p>
+    {% else %}
+        <ul>
+            {% for membership in memberships %}
+                <li>
+                    <a href="{% url 'club-detail' membership.club_id %}">{{ membership.club.name }}</a>
+                    · {{ membership.role }}
+                    · {{ membership.club.get_cellar_visibility_display }}
+                </li>
+            {% endfor %}
+        </ul>
+    {% endif %}
+{% endblock content %}

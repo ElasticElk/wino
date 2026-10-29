@@ -1,0 +1,36 @@
+{% extends 'base.html' %}
+{% load i18n %}
+{% block header %}
+    <h1 class="header__title">{{ club.name }}</h1>
+{% endblock header %}
+{% block content %}
+    <p>
+        {{ club.get_cellar_visibility_display }}
+        · {% if club.badges_visible %}{% translate "badges on" %}{% else %}{% translate "badges off" %}{% endif %}
+        · {{ membership.role }}
+    </p>
+    {% if membership.role == 'owner' %}
+        <p><a href="{% url 'club-settings' club.id %}">{% translate "Settings" %}</a></p>
+    {% endif %}
+    <h2>{% translate "Feed" %}</h2>
+    {% if not events %}
+        <p>{% translate "Nobody's opened a bottle yet." %}</p>
+    {% else %}
+        <ul>
+            {% for event in events %}
+                <li>
+                    {{ event.created }}
+                    {% if event.kind == 'opened' %}
+                        · {% translate "opened" %} {{ event.wine_name }} {{ event.vintage|default_if_none:"" }}
+                    {% elif event.kind == 'joined' %}
+                        · {% translate "joined" %}
+                    {% else %}
+                        · {{ event.kind }}
+                        {% if event.wine_name %}· {{ event.wine_name }} {{ event.vintage|default_if_none:"" }}{% endif %}
+                    {% endif %}
+                    {% if event.retracted_at %}· {% translate "put back" %}{% endif %}
+                </li>
+            {% endfor %}
+        </ul>
+    {% endif %}
+{% endblock content %}

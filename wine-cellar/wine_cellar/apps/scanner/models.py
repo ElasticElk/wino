@@ -18,6 +18,7 @@ class Household(models.Model):
     # On for new cellars — owners can still turn challenges off.
     gamification_enabled = models.BooleanField(default=True)
     empty_nudge_sent_at = models.DateTimeField(null=True, blank=True)
+    club_share_notice_sent_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["name"]
@@ -116,11 +117,15 @@ def generate_api_key():
 
 INVITE_CODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
 INVITE_CODE_LENGTH = 8
-INVITE_TTL = timedelta(days=7)
+INVITE_TTL = timedelta(days=30)
 
 
 def generate_invite_code():
-    return "".join(secrets.choice(INVITE_CODE_ALPHABET) for _ in range(INVITE_CODE_LENGTH))
+    # Same 8-char alphabet as ClubInvite (phase 2). mint_unique_code() is the
+    # helper that must stay unique across both tables (open-q #12).
+    return "".join(
+        secrets.choice(INVITE_CODE_ALPHABET) for _ in range(INVITE_CODE_LENGTH)
+    )
 
 
 class HouseholdInvite(models.Model):
@@ -168,6 +173,29 @@ class HouseholdInvite(models.Model):
     @property
     def is_expired(self):
         return timezone.now() >= self.expires_at
+
+
+def invite_code_taken(code: str) -> bool:
+    """True if this code is already a household or club invite."""
+    if HouseholdInvite.objects.filter(code=code).exists():
+        return True
+    from wine_cellar.apps.club.models import ClubInvite
+
+    return ClubInvite.objects.filter(code=code).exists()
+
+
+def mint_unique_code(taken=None, attempts=5):
+    """Unused 8-char invite code, or None if every attempt was taken.
+
+    HouseholdInvite uses this today. ClubInvite (phase 2) must pass a
+    ``taken`` that covers both tables.
+    """
+    check = taken if taken is not None else invite_code_taken
+    for _ in range(attempts):
+        code = generate_invite_code()
+        if not check(code):
+            return code
+    return None
 
 
 class Scanner(models.Model):

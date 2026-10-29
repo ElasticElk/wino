@@ -57,6 +57,11 @@
                                     <li class="pure-menu-item">
                                         <a href="{% url 'storage-list' %}" class="pure-menu-link">{% translate "Storage" %}</a>
                                     </li>
+                                    {% if feature_clubs %}
+                                    <li class="pure-menu-item">
+                                        <a href="{% url 'club-list' %}" class="pure-menu-link">{% translate "Clubs" %}</a>
+                                    </li>
+                                    {% endif %}
                                     <li class="pure-menu-item">
                                         <a href="{% url 'user-settings' %}" class="pure-menu-link">{% translate "Settings" %}</a>
                                     </li>
@@ -95,6 +100,11 @@
                                     <li class="pure-menu-item">
                                         <a href="{% url 'storage-list' %}" class="pure-menu-link">{% translate "Storage" %}</a>
                                     </li>
+                                    {% if feature_clubs %}
+                                    <li class="pure-menu-item">
+                                        <a href="{% url 'club-list' %}" class="pure-menu-link">{% translate "Clubs" %}</a>
+                                    </li>
+                                    {% endif %}
                                     <li class="pure-menu-item">
                                         <a href="{% url 'user-settings' %}" class="pure-menu-link">{% translate "Settings" %}</a>
                                     </li>
