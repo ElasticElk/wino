@@ -1,9 +1,11 @@
 """One-time Telegram household invites."""
 
 from datetime import timedelta
+from unittest.mock import patch
 
 import pytest
-from django.db import transaction
+from django.conf import settings
+from django.db import IntegrityError, transaction
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.authtoken.models import Token
@@ -13,6 +15,7 @@ from wine_cellar.apps.scanner.models import (
     HouseholdInvite,
     HouseholdMembership,
     TelegramUser,
+    mint_unique_code,
 )
 from wine_cellar.apps.storage.models import Storage, StorageItem
 from wine_cellar.apps.user.models import UserSettings
@@ -72,7 +75,7 @@ def test_member_can_mint_join(client, member_user, household):
     invite = HouseholdInvite.objects.get(code=body["code"])
     assert invite.household_id == household.id
     assert invite.used_at is None
-    assert invite.expires_at > timezone.now() + timedelta(days=6)
+    assert invite.expires_at > timezone.now() + timedelta(days=29)
 
 
 def test_outsider_cannot_mint_join(client, outsider, household):
@@ -524,3 +527,47 @@ def test_join_redeem_reports_bottle_count(client, member_user, staff_user, house
     )
     assert response.status_code == 200
     assert response.json()["bottle_count"] == 2
+
+
+def test_mint_integrityerror_is_503(client, member_user):
+    with patch(
+        "wine_cellar.apps.scanner.views.HouseholdInvite.objects.create",
+        side_effect=IntegrityError("duplicate"),
+    ):
+        response = _mint(_auth(client, member_user), "join")
+    assert response.status_code == 503
+    assert response.json()["error"] == "could not mint a unique invite code"
+    assert not HouseholdInvite.objects.exists()
+
+
+def test_mint_bad_x_household_is_400(client, member_user):
+    auth = _auth(client, member_user)
+    auth.defaults["HTTP_X_HOUSEHOLD"] = "abc"
+    response = _mint(auth, "join")
+    assert response.status_code == 400
+    assert response.json()["error"] == "No household found"
+    assert not HouseholdInvite.objects.filter(kind="join").exists()
+
+
+def test_new_invite_ttl_is_thirty_days(client, member_user):
+    response = _mint(_auth(client, member_user), "join")
+    assert response.status_code == 201
+    invite = HouseholdInvite.objects.get(code=response.json()["code"])
+    now = timezone.now()
+    assert invite.expires_at > now + timedelta(days=29)
+    assert invite.expires_at < now + timedelta(days=31)
+
+
+def test_mint_unique_code_skips_taken(db):
+    taken = {"Ab3xY9k2"}
+    code = mint_unique_code(taken=lambda c: c in taken)
+    assert code is not None
+    assert len(code) == 8
+    assert code not in taken
+    assert mint_unique_code(taken=lambda c: True, attempts=3) is None
+
+
+def test_languages_include_afrikaans():
+    codes = {code for code, _ in settings.LANGUAGES}
+    assert "af" in codes
+    assert "af-ZA" in codes

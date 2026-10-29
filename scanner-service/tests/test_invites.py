@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from integrations.telegram_commands import ADMIN_COMMANDS, PUBLIC_COMMANDS
+from integrations.copy import t
 from integrations.telegram_invites import (
     FRESH_LINK,
     I2_COPY,
@@ -22,7 +23,9 @@ from integrations.telegram_invites import (
     join_card,
     join_share_text,
     mask_invite_code,
+    mint_fail_copy,
     new_share_text,
+    share_keyboard,
     suburb_from_address,
     validate_typed_name,
     welcome_join,
@@ -71,7 +74,7 @@ def test_invite_is_public_and_new_cellar_is_staff_only():
 def test_share_copy():
     join = join_share_text("Hillside", "https://t.me/b?start=Ab3xY9k2")
     assert "Hillside" in join
-    assert "One use, lasts 7 days." in join_share_text("Hillside", "https://t.me/x?start=a")
+    assert "One use, lasts 30 days." in join_share_text("Hillside", "https://t.me/x?start=a")
     body = new_share_text("https://t.me/b?start=K9m2Pq4r")
     assert "start a cellar" in body
     assert "That's the whole app." in body
@@ -912,7 +915,98 @@ def test_expiry_line():
     from datetime import datetime, timezone
     this_year = datetime.now(timezone.utc).year
     assert format_expiry(f"{this_year}-10-19T12:00:00+00:00") == "Works until 19 Oct, one use."
-    assert format_expiry(None) == "One use, lasts 7 days."
+    assert format_expiry(None) == "One use, lasts 30 days."
     assert format_expiry(f"{this_year + 1}-01-02T00:00:00+00:00") == (
         f"Works until 2 Jan {this_year + 1}, one use."
+    )
+    assert format_expiry(None, locale="af") == "Een keer, hou 30 dae."
+
+
+@pytest.mark.asyncio
+async def test_mint_503_shows_fail_copy_not_the_exception():
+    handler = _handler(known=True, household="Hillside")
+    handler.api.mint_invite.return_value = {
+        "error": "could not mint a unique invite code",
+        "status_code": 503,
+    }
+    flow = InviteFlow(handler)
+    u = _update("1", text="/invite")
+    u.effective_user.language_code = "en"
+    ctx = MagicMock()
+    ctx.args = []
+    await flow.cmd_invite(u, ctx)
+    body = u.message.reply_text.call_args.args[0]
+    assert body == t("en", "invite.mint.fail")
+    assert "could not mint a unique invite code" not in body
+    assert "IntegrityError" not in body
+
+
+@pytest.mark.asyncio
+async def test_mint_503_is_afrikaans_when_language_code_is_af():
+    handler = _handler(known=True, household="Hillside")
+    handler.api.mint_invite.return_value = {
+        "error": "could not mint a unique invite code",
+        "status_code": 503,
+    }
+    flow = InviteFlow(handler)
+    u = _update("1", text="/invite")
+    u.effective_user.language_code = "af"
+    ctx = MagicMock()
+    ctx.args = []
+    await flow.cmd_invite(u, ctx)
+    assert u.message.reply_text.call_args.args[0] == t("af", "invite.mint.fail")
+
+
+@pytest.mark.asyncio
+async def test_mint_400_shows_bad_household_copy():
+    handler = _handler(known=True, household="Hillside")
+    handler.api.mint_invite.return_value = {
+        "error": "No household found",
+        "status_code": 400,
+    }
+    flow = InviteFlow(handler)
+    u = _update("1", text="/invite")
+    u.effective_user.language_code = "en"
+    ctx = MagicMock()
+    ctx.args = []
+    await flow.cmd_invite(u, ctx)
+    assert u.message.reply_text.call_args.args[0] == t("en", "invite.mint.bad_hh")
+
+
+@pytest.mark.asyncio
+async def test_mint_exception_does_not_leak():
+    handler = _handler(known=True, household="Hillside")
+    handler.api.mint_invite.side_effect = RuntimeError("boom")
+    flow = InviteFlow(handler)
+    u = _update("1", text="/invite")
+    u.effective_user.language_code = "en"
+    ctx = MagicMock()
+    ctx.args = []
+    await flow.cmd_invite(u, ctx)
+    body = u.message.reply_text.call_args.args[0]
+    assert body == t("en", "invite.mint.fail")
+    assert "boom" not in body
+
+
+def test_afrikaans_join_share_and_button():
+    this_year = __import__("datetime").datetime.now(
+        __import__("datetime").timezone.utc,
+    ).year
+    body = join_share_text(
+        "Hillside",
+        "https://t.me/b?start=Ab3xY9k2",
+        f"{this_year}-11-28T12:00:00+00:00",
+        locale="af",
+    )
+    assert "Sluit by <b>Hillside</b> aan op Whiney." in body
+    assert "Tik hier, dan Start" in body
+    assert "Werk tot 28 Nov, een keer." in body
+    kb = share_keyboard("https://t.me/x", "text", locale="af")
+    assert kb.inline_keyboard[0][0].text == "Deel uitnodiging"
+
+
+def test_mint_fail_copy_never_includes_exception_text():
+    assert mint_fail_copy(exc=True) == t("en", "invite.mint.fail")
+    assert "boom" not in mint_fail_copy(
+        {"error": "boom", "status_code": 503},
     )

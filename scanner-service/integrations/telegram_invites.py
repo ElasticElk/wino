@@ -25,6 +25,8 @@ from telegram import (
 )
 from telegram.ext import ContextTypes
 
+from integrations.copy import locale_from_telegram, t
+
 logger = logging.getLogger(__name__)
 
 
@@ -60,7 +62,7 @@ NEW_COPY = (
 )
 SHARE_TEXT_JOIN = "Join {name} on Whiney. Tap the link, then Start."
 SHARE_TEXT_NEW = "Start a cellar on Whiney. Tap the link, then Start."
-EXPIRY_FALLBACK = "One use, lasts 7 days."
+EXPIRY_FALLBACK = t("en", "invite.expiry.fallback")
 JOIN_CARD = (
     "{who} invited you to <b>{household}</b>.\n\n"
     "Whiney keeps a cellar: photo a label and it tracks the bottle."
@@ -102,8 +104,8 @@ PHOTO_RESEND = "That name's taken — pick another, then send the photo again."
 PHOTO_NAME_FIRST = "Name the cellar first, then send that photo again."
 CALL_IT = "Call it {name}?"
 KEEP_SEARCHING = "Type a wine name, or send a photo."
-FRESH_LINK = "That invite has expired or was already used. Ask them for a fresh link."
-UNREACHABLE = "Couldn't reach the cellar just now — tap the link again in a minute."
+FRESH_LINK = t("en", "invite.fresh")
+UNREACHABLE = t("en", "invite.unreachable")
 TAP_AGAIN = "Tap your invite link again and I'll pick this up."
 CANCEL_JOIN = "Cancelled the invite to {name} ({code})."
 CANCEL_NEW = "Cancelled the new-cellar invite ({code})."
@@ -144,28 +146,69 @@ def format_until(expires_at) -> str | None:
     return day
 
 
-def format_expiry(expires_at) -> str:
+def format_expiry(expires_at, locale: str = "en") -> str:
     when = format_until(expires_at)
     if when is None:
-        return EXPIRY_FALLBACK
+        return t(locale, "invite.expiry.fallback")
+    loc = locale_from_telegram(locale) if locale else "en"
+    if loc == "af":
+        return f"Werk tot {when}, een keer."
     return f"Works until {when}, one use."
 
 
-def join_share_text(household_name: str, link: str, expires_at=None) -> str:
-    return JOIN_COPY.format(
-        name=esc(household_name), link=link, expiry=format_expiry(expires_at),
-    )
+def join_share_text(
+    household_name: str, link: str, expires_at=None, locale: str = "en",
+) -> str:
+    loc = locale_from_telegram(locale)
+    when = format_until(expires_at)
+    name = f"<b>{esc(household_name)}</b>"
+    if when is not None:
+        return t(loc, "invite.join.share", name=name, link=link, date=when)
+    expiry = t(loc, "invite.expiry.fallback")
+    if loc == "en":
+        return JOIN_COPY.format(
+            name=esc(household_name), link=link, expiry=expiry,
+        )
+    dated = t(loc, "invite.join.share", name=name, link=link, date="X")
+    return dated.replace("Werk tot X, een keer.", expiry)
 
 
-def new_share_text(link: str, expires_at=None) -> str:
-    return NEW_COPY.format(link=link, expiry=format_expiry(expires_at))
+def new_share_text(link: str, expires_at=None, locale: str = "en") -> str:
+    return NEW_COPY.format(link=link, expiry=format_expiry(expires_at, locale))
 
 
-def share_keyboard(link: str, text: str) -> InlineKeyboardMarkup:
+def share_keyboard(
+    link: str, text: str, locale: str = "en",
+) -> InlineKeyboardMarkup:
     url = "https://t.me/share/url?" + urllib.parse.urlencode(
         {"url": link, "text": text}, quote_via=urllib.parse.quote,
     )
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Share invite", url=url)]])
+    label = t(locale, "invite.share.btn")
+    return InlineKeyboardMarkup([[InlineKeyboardButton(label, url=url)]])
+
+
+def locale_for(update) -> str:
+    user = getattr(update, "effective_user", None)
+    if user is None:
+        user = getattr(update, "from_user", None)
+    return locale_from_telegram(
+        getattr(user, "language_code", None) if user is not None else None,
+    )
+
+
+def mint_fail_copy(result=None, *, locale: str = "en", exc: bool = False) -> str:
+    """Never interpolate the exception — 5xx is not an expiry."""
+    if exc or not isinstance(result, dict):
+        return t(locale, "invite.mint.fail")
+    status = result.get("status_code")
+    if status == 503 or (isinstance(status, int) and status >= 500):
+        return t(locale, "invite.mint.fail")
+    if status == 400:
+        return t(locale, "invite.mint.bad_hh")
+    err = result.get("error")
+    if err:
+        return f"\u26a0\ufe0f {err}"
+    return t(locale, "invite.mint.fail")
 
 
 def invite_callback(action: str, code: str = "", extra: str = "") -> str:
@@ -251,7 +294,11 @@ def reverse_geocode(lat: float, lon: float, timeout: float = 3) -> str | None:
 
 
 def classify_invite_result(result, *, exc: bool = False, api_missing: bool = False) -> str | None:
-    """Copy to show, or None if the payload is usable. 409 is handled by callers."""
+    """Copy to show, or None if the payload is usable. 409 is handled by callers.
+
+    Returns English catalog strings (FRESH_LINK / UNREACHABLE) so callers can
+    compare by identity. Localise at the reply site if the chat is not English.
+    """
     if api_missing or exc or not isinstance(result, dict):
         return UNREACHABLE
     status = result.get("status_code")
@@ -477,19 +524,20 @@ class InviteFlow:
         await self._mint_join(update, api)
 
     async def _mint_new(self, update, api) -> None:
+        loc = locale_for(update)
         try:
             result = api.mint_invite("new")
-        except Exception as e:
-            await update.message.reply_text(f"Couldn't make that invite: {e}")
+        except Exception:
+            await update.message.reply_text(mint_fail_copy(exc=True, locale=loc))
             return
         if result.get("error"):
-            await update.message.reply_text(f"\u26a0\ufe0f {result['error']}")
+            await update.message.reply_text(mint_fail_copy(result, locale=loc))
             return
         # One forwardable message. No private follow-up — they will forward the wrong one.
         link = invite_link(self.bot_username(), result["code"])
         await update.message.reply_text(
-            new_share_text(link, result.get("expires_at")),
-            reply_markup=share_keyboard(link, SHARE_TEXT_NEW),
+            new_share_text(link, result.get("expires_at"), locale=loc),
+            reply_markup=share_keyboard(link, SHARE_TEXT_NEW, locale=loc),
         )
 
     async def _cancel(self, update, api) -> None:
@@ -528,23 +576,28 @@ class InviteFlow:
         if household_id is None and len(households) == 1:
             # Staff must name the household even when there is only one.
             household_id = households[0].get("id")
+        loc = locale_for(update)
         try:
             result = api.mint_invite("join", household_id=household_id)
-        except Exception as e:
-            await update.message.reply_text(f"Couldn't make that invite: {e}")
+        except Exception:
+            await update.message.reply_text(mint_fail_copy(exc=True, locale=loc))
             return
         if result.get("error"):
-            await update.message.reply_text(f"\u26a0\ufe0f {result['error']}")
+            await update.message.reply_text(mint_fail_copy(result, locale=loc))
             return
-        text, keyboard = self._join_share(result)
+        text, keyboard = self._join_share(result, locale=loc)
         await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
 
-    def _join_share(self, result: dict) -> tuple[str, InlineKeyboardMarkup]:
+    def _join_share(
+        self, result: dict, locale: str = "en",
+    ) -> tuple[str, InlineKeyboardMarkup]:
         name = (result.get("household") or {}).get("name") or "your cellar"
         link = invite_link(self.bot_username(), result["code"])
         return (
-            join_share_text(name, link, result.get("expires_at")),
-            share_keyboard(link, SHARE_TEXT_JOIN.format(name=name)),
+            join_share_text(name, link, result.get("expires_at"), locale=locale),
+            share_keyboard(
+                link, SHARE_TEXT_JOIN.format(name=name), locale=locale,
+            ),
         )
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -841,15 +894,16 @@ class InviteFlow:
         return True
 
     async def _mint_join_edit(self, query, api, household_id: int) -> None:
+        loc = locale_for(query)
         try:
             result = api.mint_invite("join", household_id=household_id)
-        except Exception as e:
-            await query.edit_message_text(f"Couldn't make that invite: {e}")
+        except Exception:
+            await query.edit_message_text(mint_fail_copy(exc=True, locale=loc))
             return
         if result.get("error"):
-            await query.edit_message_text(result["error"])
+            await query.edit_message_text(mint_fail_copy(result, locale=loc))
             return
-        text, keyboard = self._join_share(result)
+        text, keyboard = self._join_share(result, locale=loc)
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
 
     async def _redeem_join(self, query, context, code: str, display: str) -> None:
