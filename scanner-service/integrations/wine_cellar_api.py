@@ -1063,3 +1063,57 @@ class WineCellarAPI:
         if isinstance(body, dict):
             body["status_code"] = resp.status_code
         return body
+
+    def discover_clubs(self) -> dict:
+        resp = self.session.get(f"{self.base_url}/api/clubs/discover/", timeout=10)
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()
+
+    def join_club(self, club_id: int) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/{club_id}/join/", json={}, timeout=15,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json() if resp.content else {}
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
+    def create_global_club(self, name: str, description: str = "") -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/global/",
+            json={"name": name, "description": description},
+            timeout=15,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json()
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
+    def post_club_note(self, club_id: int, text: str) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/{club_id}/notes/",
+            json={"text": text}, timeout=15,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json()
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
+    def kick_club_member(self, club_id: int, user_id: int) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/{club_id}/members/{user_id}/kick/",
+            json={}, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json() if resp.content else {"status": "kicked"}
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body

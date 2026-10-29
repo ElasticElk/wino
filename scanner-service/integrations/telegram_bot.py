@@ -3087,7 +3087,7 @@ class TelegramBotHandler:
         if club_state and club_state.get("step") in (
             "name", "share", "compound_name", "compound_consent", "pick_hh", "join",
             "comment", "tasteoff_title", "tasteoff_label", "club_list_add",
-            "tasteoff_setup",
+            "tasteoff_setup", "club_post",
         ):
             club.clear(chat_id)
         router = getattr(self, "_router", None)
@@ -3206,6 +3206,8 @@ class TelegramBotHandler:
                 text += "/club tasteoff \u2014 Score a flight\n"
             if self.flag_on("feature_club_comments"):
                 text += "Feed cards: Say something\n"
+            if self.flag_on("feature_global_clubs"):
+                text += "/club discover \u2014 Clubs for everyone\n"
         text += (
             "/pending \u2014 Show pending barcodes\n"
             "/flush \u2014 Clear all pending barcodes\n"
@@ -3234,6 +3236,8 @@ class TelegramBotHandler:
                 "\n\U0001F6E0 <b>Staff</b> — /admin for tools that only you see "
                 "in the / menu. Add and remove always take a household name.\n"
             )
+            if self.flag_on("feature_global_clubs"):
+                text += "/clubpost \u2014 Post to a global club\n"
         text += (
             "\n"
             "📸 <b>Reply to a barcode message</b> with a label photo to add a new wine.\n"

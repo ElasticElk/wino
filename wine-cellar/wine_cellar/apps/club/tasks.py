@@ -110,6 +110,7 @@ def publish_club_event(item_id, actor_id, kind):
     producer = (wine.producer or "") if wine is not None else ""
     wine_id = wine.id if wine is not None else None
     vote = (item.vote or "") if item is not None else ""
+    memberships = [m for m in memberships if not m.club.frozen]
 
     for membership in memberships:
         club = membership.club
@@ -182,6 +183,8 @@ def deliver_club_event(event_id):
         return
     if event.kind in (ClubEvent.KIND_TASTEOFF, ClubEvent.KIND_COMMENT):
         return
+    if event.club.frozen and event.kind != ClubEvent.KIND_STAFF_NOTE:
+        return
     token = _bot_token()
     if not token:
         logger.warning("deliver_club_event: bot_token missing")
@@ -207,7 +210,14 @@ def deliver_club_event(event_id):
 
                 actor = display_name(event.actor)
             markup = None
-            if event.kind == ClubEvent.KIND_JOINED:
+            if event.kind == ClubEvent.KIND_STAFF_NOTE:
+                import html as html_mod
+
+                note = html_mod.escape((event.payload or {}).get("text") or "")
+                text = (
+                    f"\U0001F30D {html_mod.escape(event.club.name)}\n\n{note}"
+                )
+            elif event.kind == ClubEvent.KIND_JOINED:
                 text = t(loc, "club.feed.joined", name=actor)
             elif event.retracted:
                 text = put_back_text(loc, actor, event.vintage, event.wine_name)
@@ -662,6 +672,20 @@ def deliver_tasteoff_closed(tasteoff_id):
             loc = locale_for_user(membership.user)
             text = trophy_text(loc, tasteoff.title, rankings)
             _send(token, tu.chat_id, text, purpose="tasteoff_closed")
+
+
+@shared_task(name="notify_kicked")
+def notify_kicked(club_name, chat_ids):
+    token = _bot_token()
+    if not token or not chat_ids:
+        return
+    for chat_id in chat_ids:
+        tu = TelegramUser.objects.filter(chat_id=str(chat_id), is_active=True).select_related("user").first()
+        loc = locale_for_user(tu.user) if tu is not None else "en"
+        _send(
+            token, chat_id, t(loc, "club.global.kicked", name=club_name),
+            purpose="club_kicked",
+        )
 
 
 @shared_task(name="close_stale_tasteoffs")

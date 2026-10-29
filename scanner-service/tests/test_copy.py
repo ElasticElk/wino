@@ -112,3 +112,22 @@ def test_phase2_club_keys_are_present():
     assert "{name}" not in MESSAGES["en"]["club.hh.notice"]
     assert t("en", "club.off") == "Wine clubs aren't on yet."
     assert t("af", "club.off") == "Wynklubs is nog nie aan nie."
+
+
+def test_phase4_global_keys_are_present():
+    required = {
+        "club.discover.title",
+        "club.discover.btn",
+        "club.global.consent",
+        "club.global.private_cellar",
+        "club.global.join",
+        "club.global.not_now",
+        "club.global.frozen",
+        "club.global.kicked",
+    }
+    assert required <= catalog_keys("en")
+    assert required <= catalog_keys("af")
+    assert "Your cellar stays private" in t("en", "club.global.consent", name="X")
+    assert "Jou kelder bly privaat" in t("af", "club.global.consent", name="X")
+    assert t("en", "club.discover.btn") == "Discover"
+    assert t("af", "club.discover.btn") == "Ontdek"

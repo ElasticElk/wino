@@ -240,6 +240,24 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.to.from_cellar": "From a cellar",
         "club.to.off": "Taste-offs aren't on yet.",
         "club.comment.off": "Comments aren't on yet.",
+        "club.discover.title": "Clubs for everyone",
+        "club.discover.btn": "Discover",
+        "club.discover.empty": "No clubs for everyone yet.",
+        "club.global.consent": (
+            "{name} is a Whiney club for everyone.\n\n"
+            "Joining means drink-opens (if you drink a bottle, the club can see that you opened it) "
+            "and a note from us now and then. Your cellar stays private."
+        ),
+        "club.global.private_cellar": "Your cellar stays private.",
+        "club.global.join": "Join",
+        "club.global.not_now": "Not now",
+        "club.global.frozen": "This club is paused.",
+        "club.global.kicked": "You've been removed from {name}.",
+        "club.global.joined": "You're in {name}.",
+        "club.global.post.prompt": "What should {name} hear this week?",
+        "club.global.posted": "Posted to {name}.",
+        "club.global.staff_only": "That's a staff tool.",
+        "club.global.off": "Clubs for everyone aren't on yet.",
     },
     "af": {
         "invite.join.share": (
@@ -473,6 +491,24 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.to.from_cellar": "Uit 'n kelder",
         "club.to.off": "Proeë is nog nie aan nie.",
         "club.comment.off": "Opmerkings is nog nie aan nie.",
+        "club.discover.title": "Klubs vir almal",
+        "club.discover.btn": "Ontdek",
+        "club.discover.empty": "Nog geen klubs vir almal nie.",
+        "club.global.consent": (
+            "{name} is 'n Whiney-klub vir almal.\n\n"
+            "Aansluit beteken drink-oops (as jy 'n bottel oopmaak, kan die klub dit sien) "
+            "en nou en dan 'n nota van ons. Jou kelder bly privaat."
+        ),
+        "club.global.private_cellar": "Jou kelder bly privaat.",
+        "club.global.join": "Sluit aan",
+        "club.global.not_now": "Nou nie",
+        "club.global.frozen": "Hierdie klub is gepouseer.",
+        "club.global.kicked": "Jy is uit {name} verwyder.",
+        "club.global.joined": "Jy is in {name}.",
+        "club.global.post.prompt": "Wat moet {name} dié week hoor?",
+        "club.global.posted": "Op {name} geplaas.",
+        "club.global.staff_only": "Dit is 'n personeel-hulpmiddel.",
+        "club.global.off": "Klubs vir almal is nog nie aan nie.",
     },
 }
 

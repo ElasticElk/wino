@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import club_views, list_views, social_views, views
+from . import club_views, global_views, list_views, social_views, views
 
 urlpatterns = [
     path(
@@ -117,7 +117,32 @@ urlpatterns = [
         name="api-list-item-to-cellar",
     ),
     path("clubs/", club_views.ClubCollectionView.as_view(), name="api-clubs"),
+    path(
+        "clubs/global/",
+        global_views.GlobalClubCreateView.as_view(),
+        name="api-clubs-global",
+    ),
+    path(
+        "clubs/discover/",
+        global_views.ClubDiscoverView.as_view(),
+        name="api-clubs-discover",
+    ),
     path("clubs/<int:pk>/", club_views.ClubDetailView.as_view(), name="api-club-detail"),
+    path(
+        "clubs/<int:pk>/join/",
+        global_views.ClubJoinView.as_view(),
+        name="api-club-join",
+    ),
+    path(
+        "clubs/<int:pk>/notes/",
+        global_views.ClubNoteView.as_view(),
+        name="api-club-notes",
+    ),
+    path(
+        "clubs/<int:pk>/members/<int:user_id>/kick/",
+        global_views.ClubKickView.as_view(),
+        name="api-club-kick",
+    ),
     path(
         "clubs/<int:pk>/membership/",
         club_views.ClubMembershipView.as_view(),
