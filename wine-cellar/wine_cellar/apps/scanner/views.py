@@ -25,7 +25,7 @@ from wine_cellar.apps.wine.achievements import (
     serialize_achievement,
 )
 from wine_cellar.apps.wine.chat_stats import chat_stats
-from wine_cellar.apps.wine.models import CellarAchievement, TasteIntent, Wine
+from wine_cellar.apps.wine.models import CellarAchievement, TasteIntent, Wine, WineListItem
 from wine_cellar.apps.wine.taste import record_intent, serialize_snapshot
 
 from .models import (
@@ -391,12 +391,14 @@ class ScannerConfigView(APIView):
                 currency = "EUR"
                 country = ""
                 country_prompted = False
+                language = ""
                 if hasattr(tu.user, "user_settings"):
                     currency = tu.user.user_settings.currency or "EUR"
                     country = tu.user.user_settings.country or ""
                     country_prompted = bool(
                         tu.user.user_settings.country_prompted or country,
                     )
+                    language = tu.user.user_settings.language or ""
 
                 telegram_users.append(
                     {
@@ -413,6 +415,7 @@ class ScannerConfigView(APIView):
                         "currency": currency,
                         "country": country,
                         "country_prompted": country_prompted,
+                        "language": language,
                         "households": [
                             {"id": h[0], "name": h[1], "is_default": h[2]}
                             for h in all_households
@@ -1281,6 +1284,10 @@ class ScannerStatsView(APIView):
             "wines": Wine.objects.filter(household__isnull=False).count(),
             "bottles": StorageItem.objects.filter(
                 deleted=False, storage__household__isnull=False,
+            ).count(),
+            "lists_open": WineListItem.objects.filter(moved_at__isnull=True).count(),
+            "lists_moved": WineListItem.objects.filter(
+                moved_at__isnull=False,
             ).count(),
             "scanners": scanners,
         })

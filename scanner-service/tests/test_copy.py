@@ -48,3 +48,20 @@ def test_phase0_invite_keys_are_present():
     assert required <= catalog_keys("af")
     assert "30 days" in MESSAGES["en"]["invite.expiry.fallback"]
     assert "30 dae" in MESSAGES["af"]["invite.expiry.fallback"]
+
+
+def test_phase1_list_keys_are_present():
+    required = {
+        "list.btn.add",
+        "list.note.added",
+        "list.note.already",
+        "list.empty",
+        "list.moved",
+        "list.removed",
+        "list.off",
+        "list.title",
+    }
+    assert required <= catalog_keys("en")
+    assert required <= catalog_keys("af")
+    assert t("en", "list.note.added") == "On your To-drink list."
+    assert t("af", "list.note.added") == "Op jou To-drink-lys."

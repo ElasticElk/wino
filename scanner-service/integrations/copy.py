@@ -28,6 +28,31 @@ MESSAGES: dict[str, dict[str, str]] = {
         "invite.unreachable": (
             "Couldn't reach the cellar just now — tap the link again in a minute."
         ),
+        "list.btn.add": "To-drink list",
+        "list.note.added": "On your To-drink list.",
+        "list.note.already": "Already on your To-drink list.",
+        "list.note.in_cellar": (
+            "Already in the cellar — add another bottle from here, or open /fridge."
+        ),
+        "list.need_name": "I need a name on the label first.",
+        "list.empty": (
+            "Nothing here yet.\n\n"
+            "Photograph a bottle you don't own — then tap To-drink list."
+        ),
+        "list.moved": "{name} is in the cellar.",
+        "list.removed": "Removed from To-drink.",
+        "list.off": "To-drink lists aren't on yet.",
+        "list.err": "Couldn't update that list. Try again.",
+        "list.title": "To drink",
+        "list.btn.move": "Move to cellar",
+        "list.btn.remove": "Remove",
+        "list.card.gone": "That card's finished — send the photo again.",
+        "list.status.ready": "Lists: ready",
+        "list.status.resting": "Lists: off",
+        "list.older": "Older 5",
+        "list.newer": "Newer 5",
+        "list.where": "Where are you storing this?",
+        "list.drawer": "Which drawer?",
     },
     "af": {
         "invite.join.share": (
@@ -49,6 +74,31 @@ MESSAGES: dict[str, dict[str, str]] = {
         "invite.unreachable": (
             "Kon nie die kelder nou bereik nie — tik die skakel oor 'n minuut weer."
         ),
+        "list.btn.add": "To-drink-lys",
+        "list.note.added": "Op jou To-drink-lys.",
+        "list.note.already": "Reeds op jou To-drink-lys.",
+        "list.note.in_cellar": (
+            "Reeds in die kelder — voeg nog 'n bottel hier by, of maak /fridge oop."
+        ),
+        "list.need_name": "Ek het eers 'n naam op die etiket nodig.",
+        "list.empty": (
+            "Niks hier nie.\n\n"
+            "Neem 'n foto van 'n bottel wat jy nie besit nie — dan tik To-drink-lys."
+        ),
+        "list.moved": "{name} is in die kelder.",
+        "list.removed": "Van To-drink afgehaal.",
+        "list.off": "To-drink-lyste is nog nie aan nie.",
+        "list.err": "Kon nie die lys bywerk nie. Probeer weer.",
+        "list.title": "Om te drink",
+        "list.btn.move": "Skuif na kelder",
+        "list.btn.remove": "Haal af",
+        "list.card.gone": "Daai kaart is klaar — stuur die foto weer.",
+        "list.status.ready": "Lyste: gereed",
+        "list.status.resting": "Lyste: af",
+        "list.older": "Ouer 5",
+        "list.newer": "Nuwer 5",
+        "list.where": "Waar sit jy dit?",
+        "list.drawer": "Watter laai?",
     },
 }
 

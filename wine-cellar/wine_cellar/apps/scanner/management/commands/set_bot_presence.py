@@ -14,6 +14,7 @@ it can only be set through @BotFather with /setuserpic.
 import requests
 from django.core.management.base import BaseCommand, CommandError
 
+from wine_cellar.apps.scanner.flags import flag_on
 from wine_cellar.apps.scanner.models import ServiceConfig, TelegramUser
 
 DESCRIPTION = (
@@ -73,10 +74,17 @@ class Command(BaseCommand):
         except ServiceConfig.DoesNotExist:
             raise CommandError("ServiceConfig 'bot_token' is not set")
 
-        public = [{"command": c, "description": d} for c, d in COMMANDS]
+        commands = list(COMMANDS)
+        if flag_on("feature_lists"):
+            after = next(
+                (i for i, (name, _) in enumerate(commands) if name == "recent"),
+                0,
+            )
+            commands.insert(after + 1, ("list", "Things to drink or buy"))
+        public = [{"command": c, "description": d} for c, d in commands]
         staff = [
             {"command": c, "description": d}
-            for c, d in COMMANDS + ADMIN_COMMANDS
+            for c, d in commands + ADMIN_COMMANDS
         ]
         staff_chat_ids = list(
             TelegramUser.objects.filter(

@@ -30,7 +30,8 @@ start.sh / stop.sh    # Service orchestration
 - `Household` / `HouseholdMembership` — Multi-tenant system (owner/member roles)
 - `Scanner` — Registered barcode devices with API keys + notify_users M2M
 - `TelegramUser` — Links Django users to Telegram chat IDs
-- `ServiceConfig` — Key-value config store (bot_token, grok_api_key, web_url)
+- `ServiceConfig` — Key-value config store (bot_token, grok_api_key, web_url, `feature_lists` / `feature_clubs` / …)
+- `WineList` / `WineListItem` — Personal To-drink list (**user-scoped**, not household). Club lists come in a later phase.
 
 ### REST API (`/api/`)
 Auth: `Authorization: Token <token>` header. Optional `X-Household: <id>` header.
@@ -68,6 +69,11 @@ Auth: `Authorization: Token <token>` header. Optional `X-Household: <id>` header
 - `POST /api/scanner/taste/` — Record a taste intent (`look`, `winelist`, or `ask`). `ask` requires a JSON object `payload` and does not rebuild the household snapshot. The response includes `intent_id`
 - `PATCH /api/scanner/taste/<id>/` — Merge `outcome`, `shown`, `rejected`, `place`, `model`, `latency_ms` and `fallback` into an `ask` intent. Another household, or a `look` / `winelist` row, is `404`
 - `GET /api/scanner/chat-stats/?days=30` — **Staff only.** How chat recommendations landed: taps, whether the suggested bottle was removed from stock within 48h and its vote, model mix, latency, and the five worst asks (`wine/chat_stats.py`)
+- `GET /api/lists/` — Caller's personal To-drink lists (creates the default list). **User-keyed**, not `X-Household`. Flag `feature_lists`; off → 404 `not_enabled`
+- `GET /api/lists/<id>/` — Open items (`?limit=5&offset=0`). Another user's list is 404
+- `POST /api/lists/<id>/items/` — Snapshot a bottle onto the list. Duplicate `wine_id` is 200 (idempotent)
+- `DELETE /api/lists/<id>/items/<item_id>/` — Remove. 409 `already_moved`
+- `POST /api/lists/<id>/items/<item_id>/to-cellar/` — Create/find `Wine` in the **current** household and add stock. Sets `moved_at`. Undo of that stock add does not restore the list row
 
 ### Frontend
 - **Templates:** `wine_cellar/templates/` — Django templates with `base.html` layout
@@ -104,6 +110,8 @@ Bridges physical barcode scanners to the Wine Cellar API. Runs as FastAPI server
 ### Integrations
 - `integrations/wine_cellar_api.py` — HTTP client for Wine Cellar REST API
 - `integrations/telegram_bot.py` — Telegram bot (notifications, photos, disambiguation, household switching)
+- `integrations/telegram_lists.py` — `/list` To-drink flow and label-card `td` button
+- `integrations/copy.py` — EN/AF dialogue catalog (menus stay English)
 - `integrations/telegram_catchup.py` — `/fridge` Catch up drawer walk (staged Drunk/Moved, bulk apply)
 - `integrations/grok_vision.py` — xAI Grok Vision for label analysis
 - `integrations/open_food_facts.py` — Barcode → wine data lookup
@@ -176,6 +184,7 @@ Available to authorized users via the bot:
 - `/stock` — View current stock (interactive, per-storage)
 - `/fridge` — Browse fridge contents. **Catch up** walks one drawer: tap Drunk / Moved (1 or both), then Apply. Empty here means those bottles moved, not drunk. One Undo. Not a new slash command. Buttons carry `wine_id` / `item_id`, never a list position (the list shrinks per tap, so an index would hit another wine). Bottles with no drawer (fridge `+` adds them so) get a *No drawer* bucket. A move may be *Not sure which drawer* (row null). Undo carries its batch id, so it still works after a new Catch up. Stale Apply keeps the changes that are still valid and drops the rest.
 - `/recent` — Recent bottles (notes + label photo, pages of 5)
+- `/list` — Personal To-drink list (bottles you don't own yet). **User-scoped** — a household partner does not see it. Gated on `ServiceConfig.feature_lists`. Move to cellar writes stock on the current household. Not created on new-cellar redeem; first `/list` or first add creates the default list.
 - `/help` — List available commands
 - `/pending` — Show barcodes awaiting label photos
 - `/flush` — Clear pending barcodes

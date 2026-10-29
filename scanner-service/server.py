@@ -181,6 +181,7 @@ chat_id_to_api: dict[str, WineCellarAPI] = {}  # chat_id -> WineCellarAPI for th
 chat_id_to_currency: dict[str, str] = {}  # chat_id -> ISO currency code (passed to Grok)
 chat_id_to_country: dict[str, str] = {}  # chat_id -> ISO 2-letter country code (price-context grounding)
 chat_id_to_country_prompted: dict[str, bool] = {}
+chat_id_to_language: dict[str, str] = {}
 notifiers: dict[str, TelegramNotifier] = {}  # scanner api_key -> TelegramNotifier
 off: OpenFoodFactsAPI = None  # type: ignore
 grok: GrokVisionAPI | None = None
@@ -330,6 +331,7 @@ def _register_telegram_user(tu: dict, *, default_storage: str, base_url: str, we
     chat_id_to_country_prompted[chat_id] = bool(
         tu.get("country_prompted") or tu.get("country"),
     )
+    chat_id_to_language[chat_id] = tu.get("language") or ""
     return chat_id
 
 
@@ -376,6 +378,8 @@ def _reload_db_config_once() -> None:
     if not users:
         logger.warning("Background config refresh returned no users; leaving allow list unchanged")
         return
+    if bot_handler:
+        bot_handler.set_flags(live.get("config") or {})
     fp = _config_fingerprint(live)
     if fp == _last_config_fp and config_source == "db":
         return
@@ -407,6 +411,9 @@ def _reload_db_config_once() -> None:
             bot_handler.set_country(
                 chat_id, chat_id_to_country.get(chat_id, ""),
                 prompted=chat_id_to_country_prompted.get(chat_id),
+            )
+            bot_handler.set_language(
+                chat_id, chat_id_to_language.get(chat_id, ""),
             )
     if bot_handler:
         for cid in list(bot_handler.chat_ids):
@@ -544,12 +551,15 @@ async def lifespan(app: FastAPI):
             redis_url, ttl=1800, prefix="whiney:catchup:",
         )
         bot_handler.set_local_barcode_reader(read_barcode_local)
+        bot_handler.set_flags(svc)
         for cid, ccy in chat_id_to_currency.items():
             bot_handler.set_currency(cid, ccy)
         for cid, cc in chat_id_to_country.items():
             bot_handler.set_country(
                 cid, cc, prompted=chat_id_to_country_prompted.get(cid),
             )
+        for cid, lang in chat_id_to_language.items():
+            bot_handler.set_language(cid, lang)
 
         def _api_factory(chat_id: str, household_id: int):
             """Build a new WineCellarAPI for a freshly added user."""
@@ -583,6 +593,7 @@ async def lifespan(app: FastAPI):
             if bot_handler:
                 bot_handler.set_currency(str(chat_id), currency)
                 bot_handler.set_country(str(chat_id), country, prompted=prompted)
+                bot_handler.set_language(str(chat_id), tu_info.get("language") or "")
             return client
 
         bot_handler.set_api_factory(_api_factory)

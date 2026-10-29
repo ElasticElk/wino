@@ -636,3 +636,92 @@ class WineCellarAPI:
         )
         resp.raise_for_status()
         return resp.json()
+
+    def _list_response(self, resp) -> dict:
+        body = {}
+        try:
+            body = resp.json() if resp.content else {}
+        except ValueError:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        body.setdefault("error", body.get("detail") or f"HTTP {resp.status_code}")
+        body["status_code"] = resp.status_code
+        return body
+
+    def list_lists(self) -> dict:
+        resp = self.session.get(f"{self.base_url}/api/lists/", timeout=10)
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()
+
+    def get_list(self, list_id: int, limit: int = 5, offset: int = 0) -> dict:
+        resp = self.session.get(
+            f"{self.base_url}/api/lists/{list_id}/",
+            params={"limit": limit, "offset": offset},
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()
+
+    def add_list_item(self, list_id: int, payload: dict) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/lists/{list_id}/items/",
+            json=payload,
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json()
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
+    def delete_list_item(self, list_id: int, item_id: int) -> dict:
+        resp = self.session.delete(
+            f"{self.base_url}/api/lists/{list_id}/items/{item_id}/",
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json()
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
+    def move_list_item_to_cellar(
+        self,
+        list_id: int,
+        item_id: int,
+        storage_name: str | None = None,
+        row: int | None = None,
+        price: float | None = None,
+        confirm_duplicate: bool = False,
+        ack_duplicate: bool = False,
+        item_id_ack: int | None = None,
+    ) -> dict:
+        data = {}
+        if storage_name:
+            data["storage_name"] = storage_name
+        if row is not None:
+            data["row"] = row
+        if price is not None:
+            data["price"] = price
+        if confirm_duplicate:
+            data["confirm_duplicate"] = True
+        if ack_duplicate:
+            data["ack_duplicate"] = True
+            if item_id_ack is not None:
+                data["item_id"] = item_id_ack
+        resp = self.session.post(
+            f"{self.base_url}/api/lists/{list_id}/items/{item_id}/to-cellar/",
+            json=data,
+            timeout=15,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json()
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
