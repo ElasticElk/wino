@@ -8,7 +8,7 @@ Design for a social layer on Whiney, grounded in the current Django apps and Tel
 
 **Out of scope:** Vivino integration (no public API).
 
-**Revision (Carel):** cellar sharing is a **club-level** policy set by the owner, not a per-member opt-in — joining means you share at that club’s level, and the invite/join card must say so. **Lists** (a “To drink” wishlist, not stock) are in scope; they can ship as an early standalone adoption win and later hook into clubs. Cellar sharing exists **only inside clubs** — there is no standalone sharing or friends feature. When a household member joins a club that peeks the cellar, other people in that household are **not** given a veto and are **not** told which club (or who joined); they get one gentle heads-up that the cellar is now shared with a club.
+**Owner decisions:** cellar sharing is a **club-level** policy set by the owner, not a per-member opt-in — joining means you share at that club’s level, and the invite/join card must say so. **Lists** (a “To drink” wishlist, not stock) are in scope; they can ship as an early standalone adoption win and later hook into clubs. Cellar sharing exists **only inside clubs** — there is no standalone sharing or friends feature. When a household member joins a club that peeks the cellar, other people in that household are **not** given a veto and are **not** told which club (or who joined); they get one gentle heads-up that the cellar is now shared with a club.
 
 ---
 
@@ -640,7 +640,7 @@ The social product, including peek, because the join card is a consent contract.
 
 ## 11. Open questions
 
-**Decided (Carel).** Households with several people: no veto; no club or member names in the heads-up; cellar sharing exists only inside clubs (no friends/public-share feature). Copy is in §4. If two members join the same club, show that household once.
+**Decided.** Households with several people: no veto; no club or member names in the heads-up; cellar sharing exists only inside clubs (no friends/public-share feature). Copy is in §4. If two members join the same club, show that household once.
 
 1. **Household invite TTL** — extend to 30 days, or keep 7 and rely on remint? Club default proposed 30 days / multi-use cap 20.
 2. **Thumbs vs 1–5 for taste-offs.** Feed should stay 👎/—/👍 because that’s what people already tap on drank cards. Scoring a flight may want 1–5. Don’t invent a third scale (`Wine.rating` 0–10) without a reason.
