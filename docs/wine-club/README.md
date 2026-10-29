@@ -32,7 +32,9 @@ A household is the **permission boundary for wine data** (`wine_cellar/apps/scan
 A wine club is the opposite shape: friends who **each have their own cellar**, sharing drinking and a peek at stock at a **club-wide** level the owner chooses. Modelling a club as a household would mix “share my fridge” with “see what I opened”, force one stock ledger, and break `/fridge`, catch-up, scanners, and badges.
 
 ```
-User ──< HouseholdMembership >── Household (cellar, stock, badges, lists)
+User ──< WineList (personal To-drink; user-scoped)
+  │
+  ├──< HouseholdMembership >── Household (cellar, stock, badges)
   │
   └──< ClubMembership >── Club (feed, sharing policy, taste-offs)
            │
@@ -40,7 +42,7 @@ User ──< HouseholdMembership >── Household (cellar, stock, badges, lists
            └── membership.household = “the cellar this club may see”
 ```
 
-Lists (`WineList`) live in `wine_cellar.apps.wine`. Clubs live in a new app `wine_cellar.apps.club`.
+Lists (`WineList`) live in `wine_cellar.apps.wine`. Personal lists are **owned by the User**. Clubs live in a new app `wine_cellar.apps.club`.
 
 ## Decided (do not reopen in a phase PR)
 
@@ -50,12 +52,22 @@ Lists (`WineList`) live in `wine_cellar.apps.wine`. Clubs live in a new app `win
 4. **Cellar sharing exists only inside clubs.** No friends list, follow, public cellar, or “share with this person.” A household with no club memberships shares nothing.
 5. **Shared households, other members:** no veto; not told which club or who joined; one gentle heads-up the first time that cellar becomes visible to any club. If two people from Hillside join the same club, Hillside appears once.
 6. **Lists are not stock.** `WineList` / `WineListItem`, not a wishlist `Storage` or a deleted `StorageItem`. Just looking (`TasteIntent.look`) stays ephemeral.
-7. **Telegram first.** Web is admin plus optional read-only pages. No new React.
-8. **`/invite` stays cellar.** `/club` is social. `/list` is To-drink.
-9. **Feed is automatic** from drank / vote / undo. Nobody posts. Catch-up **Moved** is not a feed event. Badge unlocks are not feed events.
-10. **Mute is receive-only.** Opens still record. Leave stops new events from and to that user.
+7. **Personal lists are user-scoped** (open-q #15). Each person has their own To-drink list. A household partner does not see it. Move-to-cellar still writes `StorageItem` on the actor’s current household. Club lists (phase 3) are club-shared.
+8. **Telegram first.** Web is admin plus optional read-only pages. No new React.
+9. **`/invite` stays cellar.** `/club` is social. `/list` is To-drink.
+10. **Feed is automatic** from drank / vote / undo. Nobody posts. Catch-up **Moved** is not a feed event. Badge unlocks are not feed events.
+11. **Mute is receive-only.** Opens still record. Leave stops new events from and to that user.
+12. **Invite TTL** (open-q #1): household 30 days, one-use; club 30 days, `max_uses=20`.
+13. **Default club policy** (open-q #16): create requires a pick; UI default summary + badges on.
+14. **Feed digest** (open-q #7): per-open until 15 members; do not build digest in phase 2.
+15. **Taste-off** (open-q #2, #17): scores 1–5; any member may host; owner or host may close. Feed thumbs stay 👎/—/👍.
+16. **Destroying a club** (open-q #11): last member leave deletes it. Owner may propose dismantle; that needs a **unanimous** vote (J2.10). Not unanimous → owner can only leave via handover.
+17. **Global opens** (open-q #19): yes, named on the join card; mute available; never auto-post household drink-by into global.
+18. **Language** (open-q #20): slash commands and the `/` menu stay English. All dialogue / message copy is multilingual (catalog; EN + AF first).
 
-Recommended answers for everything still open: [open-questions.md](open-questions.md). Treat those as the build default unless a later review flips them. Phase PRs should not bikeshed them.
+**Still open, do not ship:** owner widens sharing (open-q **#5**) — pending owner clarification. Skip PR 2g / J2.9 until it is closed.
+
+Other recommended answers: [open-questions.md](open-questions.md). Treat those as the build default unless a later review flips them. Phase PRs should not bikeshed them.
 
 ## Phases and dependency
 
@@ -102,16 +114,17 @@ Do **not** use `TelegramNotifier._send_to_all` for clubs — that is the Pi scan
 
 Django `UserSettings.language` exists (`wine_cellar/apps/user/models.py`) with `LANGUAGES` currently `en-gb`, `de-DE`, `fr-FR` (`wine_cellar/conf/settings.py`). The **bot copy is hardcoded English** (`telegram_invites.py`, `telegram_bot.py`). Chat answers (`wine_chat`) already reply in the language they were asked in; slash-command cards do not.
 
-**Design for any language from day one of new copy; ship English plus Afrikaans for the new strings.**
+**Decided (open-q #20):** slash commands and the Telegram `/` menu stay English. All bot **dialogue / message copy** (cards, buttons on messages, DMs, errors) is multilingual by design. Ship English plus Afrikaans for new strings; a third locale is a catalog addition, not a handler rewrite.
 
 Rules:
 
-1. New user-visible strings live in a **message catalog** keyed by id (`club.join.consent`, `list.added`, …), not interpolated ad-hoc in handlers. English is the source of truth in this spec.
+1. New user-visible **dialogue** lives in a **message catalog** keyed by id (`club.join.consent`, `list.added`, …), not interpolated ad-hoc in handlers. English is the source of truth in this spec.
 2. Resolve locale: `UserSettings.language` if set → else Telegram `language_code` for unprovisioned chats → else `en`. Map `en* → en`, `af* → af`. Adding `af` / `af-ZA` to Django `LANGUAGES` is a phase-0 or phase-1 chore so web settings can pick it.
 3. Afrikaans examples in this spec are **notes for the catalog**, not a second product. Do not machine-translate the whole bot in a phase PR unless that PR’s job is i18n.
 4. `wine_chat` / parser stay meaning-based (already any language). Do not add a keyword list for `/club` or `/list`.
 5. Every interpolated name goes through `esc()` when `parse_mode=HTML`.
 6. Dates stay as today’s invite formatter (`Works until 19 Oct`) so we don’t invent a new date library.
+7. Command names (`/list`, `/club`, `/clubpost`) and `PUBLIC_COMMANDS` / `ADMIN_COMMANDS` descriptions stay English. Button labels **on messages** are dialogue and use the catalog.
 
 Catalog shape (bot, not Django gettext — the scanner service has no Django i18n):
 
@@ -165,19 +178,19 @@ Applies to every phase. A phase PR that violates a cell is a bug, not a product 
 
 | Who | Cellar stock | Personal To-drink | Club feed | Club peek | Club badges | Club list | Taste-off |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Same household member | full | full | — | — | household `/badges` | — | — |
+| Same household member | full | **own list only** | — | — | household `/badges` | — | — |
 | Club member, visibility `none` | never | never | yes (unmuted) | 404 | 404 | names only (phase 3) | yes |
 | Club member, `summary`, accepted | never | never | yes | counts only | if club+hh flags | names only | yes |
 | Club member, `full`, accepted | never | never | yes | names/vintages, no prices | if flags | names only | yes |
-| Club member, unacked after widen | never | never | yes | **previous** level | previous | names only | yes |
-| Household partner, not in club | full (their cellar) | full (household list) | no | no | no | no | no |
+| Club member, unacked after widen | never | never | yes | **previous** level (if #5 lands that way) | previous | names only | yes |
+| Household partner, not in club | full (their cellar) | **never** (partner has their own list) | no | no | no | no | no |
 | Stranger / other household | never | never | never | never | never | never | never |
 | Staff admin | Django admin | Django admin | Django admin | Django admin | Django admin | Django admin | Django admin |
 | Global club member | never (forced `none`) | never | yes | 404 always | 404 (recommended) | n/a | n/a |
 
 **Always forbidden on peek JSON:** `price`, `items[].price`, `market_price`, storage name, `row`, `comment`, `drink_by`, barcode, `rating`, `critic_score`, `vivino_rating`. Write a walking test.
 
-Club APIs are keyed by the caller’s `User`, never `X-Household` as the club id. List APIs **are** household-scoped (`ScannerAPIView` + `X-Household`).
+Club APIs are keyed by the caller’s `User`, never `X-Household` as the club id. Personal list APIs are keyed by the caller’s `User` (**not** `X-Household`). Move-to-cellar still uses the current household (`X-Household` or default) because `Wine` / `StorageItem` are household-scoped.
 
 ## File map (where code goes)
 
@@ -207,7 +220,9 @@ Do **not** grow `telegram_bot.py` by another thousand lines. Wire handlers the w
 | `publish_club_event` | 2 | `on_commit` after drank / vote / undo / bulk remove |
 | `deliver_club_event` | 2 | from publish, per distinct `chat_id` |
 | `club_share_notice` | 2 | first sharing join for a household |
-| `club_widen_notice` | 2 | owner PATCH that widens |
+| `club_widen_notice` | 2 | **blocked on open-q #5** — do not ship |
+| `club_dismantle_ballot` / expire | 2 | owner proposes end-club; 48h timeout |
+| `club_digest` | later | **not in phase 2** (open-q #7; only after 15 members) |
 | `close_stale_tasteoffs` | 3 | beat, daily |
 | `global_club_nudge` | 4 | **skip v1**; staff `/club post` only |
 
@@ -223,7 +238,7 @@ Do **not** route “what did Riley open?” or “add this to my list” through
 | --- | --- | --- |
 | Notification fatigue | Drink-by + empty-cellar + badge GIFs already DM people | One line per open, no badge spam, mute one tap, no peek pings. Digest only after 15 members (open-q #7) |
 | Privacy leak | Reusing `WineInStockView` would ship prices, drawers, comments | Dedicated peek serializer; forbidden-key tests; join card must match serializer |
-| Widening after join | Owner turns summary → full; existing members never tapped that | `sharing_version` + Stay/Leave; unacked stay at previous level |
+| Widening after join | Owner turns summary → full; existing members never tapped that | **Open-q #5 pending.** Do not ship widen until the owner closes it |
 | Partner / shared cellar | Two memberships, one stock. Partner may not be in the club | Joiner’s card names the household. Others: nameless heads-up, no veto, once |
 | To-drink becomes fake stock | Fastest path is a Wishlist `Storage` | Separate models. Tests that list items never appear in `WineInStockView` |
 | Club as household | Fastest path is `kind=club` on `HouseholdInvite` | New app; review gate |

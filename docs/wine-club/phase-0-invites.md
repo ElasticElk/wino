@@ -6,6 +6,8 @@
 
 **Flag:** none. This is a fix to existing `/invite`, always on.
 
+**Decided (open-q #1):** household TTL **30 days**, still one-use. Club invites (phase 2) **30 days**, `max_uses=20`.
+
 ## Success metrics
 
 Query existing tables. No new analytics model.

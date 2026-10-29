@@ -12,11 +12,11 @@ This is the cheap solo-user adoption loop. It does not need clubs.
 
 | Signal | How | “It worked” |
 | --- | --- | --- |
-| People add to the list | `WineListItem` rows with `moved_at IS NULL` | ≥ 3 households have ≥ 1 item within 2 weeks of flag-on |
+| People add to the list | `WineListItem` rows with `moved_at IS NULL` | ≥ 3 **users** have ≥ 1 item within 2 weeks of flag-on |
 | People come back | `moved_at` set via to-cellar | ≥ 1 move-to-cellar in that window (even one real buy is the loop) |
 | Not polluting stock | `StorageItem` count vs list items | List items **never** appear in `GET /api/wines/in-stock/` or `/fridge` |
 | Button discoverable | label-card taps `td` vs `look` vs `grok` (scanner logs `[callback]`) | To-drink used at least as often as Just looking among unmatched labels |
-| Repeat use | items per household | A household with 3+ items is a stronger signal than one souvenir row |
+| Repeat use | items per user | A user with 3+ items is a stronger signal than one souvenir row |
 
 Staff: Django admin on `WineList` / `WineListItem`. Optional `/stats` line: `lists: 12 items (4 moved)`.
 
@@ -100,9 +100,13 @@ To-drink button hidden if flag off (don’t show a dead control).
 
 Unmatched barcode flow that already asks for a label photo: after the label card, same To-drink button. No To-drink on a barcode-only prompt that has no Grok payload yet (nothing to snapshot).
 
+### J1.7 Partner does not see it (decided, open-q #15)
+
+Sam and Pat share Hillside. Sam adds a shop bottle to To-drink. Pat’s `/list` is unchanged. Pat cannot move or remove Sam’s row. When Sam taps **Move to cellar**, Hillside stock gains a bottle Pat *will* see in `/fridge` — that is the shared cellar, not the list.
+
 ## Telegram flows (commands and callbacks)
 
-**Command:** `/list` — `PUBLIC_COMMANDS` + `set_bot_presence`. Description: `Things to drink or buy`. AF menu: `Om te drink of te koop` (Telegram menu is per-user language if we set it; today the menu is English-only — keep English menu text until a dedicated i18n PR; body copy uses the catalog).
+**Command:** `/list` — `PUBLIC_COMMANDS` + `set_bot_presence`. Description stays English: `Things to drink or buy` (open-q #20: menus/commands stay English). Body copy and message buttons use the catalog (EN + AF).
 
 **Callbacks** (64-byte budget, reuse `_cb`):
 
@@ -148,8 +152,11 @@ Handler module: `scanner-service/integrations/telegram_lists.py`. Wire from `tel
 | `/fridge` / in-stock / drink-by | Ignore list rows (tests) |
 | Badge on add-to-list | **No.** Badges on move-to-cellar / stock add only |
 | Club feed | Not in this phase |
-| Named extra lists (`Holiday`) | Not in this phase. One default list per household |
-| Partner sees Sam’s shop finds | Yes — household-scoped (decided). `added_by` shown as `· Sam` on the row if ≠ viewer |
+| Named extra lists (`Holiday`) | Not in this phase. One default list **per user** |
+| Partner sees Sam’s shop finds | **No** — user-scoped (decided, open-q #15). Pat’s `/list` is empty unless Pat added rows. Do not show `added_by` on personal lists (owner is the only viewer) |
+| Two Hillside members both `/list` | Two lists. Unique is per owner, not per household |
+| Move-to-cellar, user in several households | Uses the **current** household (`X-Household` / default), same as stock add. List row is still the user’s |
+| `wine_id` from another household after `/switch` | Ignore that FK; create/find `Wine` in the **current** household from `payload` |
 | Scanner restart mid-card | temp_key in pending_store; same as Add to cellar. If pending gone: `That card's finished — send the photo again` |
 | Item payload huge | Cap JSON at ~16 KiB; strip image bytes; keep fields `WineCreateSerializer` needs |
 
@@ -163,27 +170,35 @@ class WineList(models.Model):
     KIND_CLUB = "club"  # unused until phase 3; column exists so we don't migrate twice
     KIND_CHOICES = [(KIND_PERSONAL, "Personal"), (KIND_CLUB, "Club")]
 
-    household = models.ForeignKey(
-        "scanner.Household", on_delete=models.CASCADE, related_name="wine_lists",
+    # Personal lists are owned by a User (open-q #15). Club lists set club_id
+    # and leave owner null (phase 3).
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, null=True, blank=True,
+        related_name="wine_lists",
     )
     name = models.CharField(max_length=40)
     kind = models.CharField(max_length=8, choices=KIND_CHOICES, default=KIND_PERSONAL)
     club_id = models.PositiveIntegerField(null=True, blank=True)  # no FK yet (club app doesn't exist)
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
-    )
     created = models.DateTimeField(auto_now_add=True)
     modified = models.DateTimeField(auto_now=True)
 
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                fields=["household", "name"],
-                name="unique_winelist_name_per_household",
+                fields=["owner", "name"],
+                condition=models.Q(kind="personal", owner__isnull=False),
+                name="unique_personal_winelist_name",
+            ),
+            models.CheckConstraint(
+                check=(
+                    models.Q(kind="personal", owner__isnull=False)
+                    | models.Q(kind="club", owner__isnull=True)
+                ),
+                name="winelist_owner_matches_kind",
             ),
         ]
         indexes = [
-            models.Index(fields=["household", "kind"], name="winelist_hh_kind_idx"),
+            models.Index(fields=["owner", "kind"], name="winelist_owner_kind_idx"),
         ]
 
 class WineListItem(models.Model):
@@ -209,7 +224,7 @@ class WineListItem(models.Model):
     source = models.CharField(max_length=12, choices=SOURCE_CHOICES, default="label")
     added_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
-    )
+    )  # redundant on personal lists (always list.owner); required for phase 3 club lists
     created = models.DateTimeField(auto_now_add=True)
     touched_at = models.DateTimeField(auto_now=True)
     moved_at = models.DateTimeField(null=True, blank=True)
@@ -228,21 +243,21 @@ class WineListItem(models.Model):
         ordering = ["-created"]
 ```
 
-Default list: get_or_create `name="To drink"`, `kind=personal` on first `/list` or first add. Also create on new-cellar redeem (same place Storage `Cellar` is created) so the row exists before the first photo.
+Default list: get_or_create `name="To drink"`, `kind=personal`, `owner=request.user` on first `/list` or first add. **Do not** create it on new-cellar redeem (that is household-scoped; two people in Hillside must not share a list). Creating on first GET is enough; a provisioned user with no list yet is fine.
 
 `club_id` integer without FK: avoids a cross-app dependency before phase 2. Phase 3 adds a real FK or a check.
 
-Do **not** subclass `UserContentModel` if we already have `added_by` / `created_by` — pick one provenance field (`added_by` on items, `created_by` on lists).
+Personal lists have no `household` column. Stock writes on move-to-cellar resolve household the same way `ScannerAPIView.get_household` already does.
 
 ## API
 
-Base: `ScannerAPIView` (token, `X-Household`). Flag checked in a mixin `ListsEnabledMixin`.
+Base: token auth, keyed by `request.user` — **not** `HouseholdScopedMixin` / not filtered by `X-Household` for list CRUD. Flag checked in a mixin `ListsEnabledMixin`. `X-Household` is read **only** on `to-cellar` (which household’s fridge).
 
 Mount: `path("lists/", ...)` under `/api/` (`wine_cellar/apps/api/urls.py`).
 
 ### `GET /api/lists/`
 
-Creates default list if missing.
+Creates the caller’s default personal list if missing. Never returns another user’s list.
 
 ```json
 {
@@ -259,7 +274,7 @@ Creates default list if missing.
 
 ### `GET /api/lists/<id>/?limit=5&offset=0`
 
-404 if list not in household or `kind=club` (phase 1: club lists 404).
+404 if `list.owner_id != request.user.id` or `kind=club` (phase 1: club lists 404).
 
 ```json
 {
@@ -280,7 +295,6 @@ Creates default list if missing.
       "barcode": "",
       "wine_id": null,
       "source": "label",
-      "added_by_name": "Sam",
       "created": "2026-11-01T18:04:00+00:00",
       "moved_at": null
     }
@@ -307,11 +321,11 @@ Open items only (`moved_at` null) unless `?include_moved=1` (not used by the bot
 }
 ```
 
-201 item object. 200 if unique wine hit (idempotent). 400 if `name` blank. 404 list. `payload` stored as-is after stripping keys not in an allowlist (`name`, `producer`, `vintage`, `grape_variety`, `region`, `appellation`, `country`, `abv`, `wine_type`, `category`, `barcode`, `description`, `vineyard`, `size`, `critic_score`, `vivino_rating`, `market_price`, `market_price_currency`, … — same as create wine). **Never store image bytes.**
+201 item object. 200 if unique wine hit (idempotent). 400 if `name` blank. 404 list (wrong owner). Set `added_by=request.user`. `payload` stored as-is after stripping keys not in an allowlist (`name`, `producer`, `vintage`, `grape_variety`, `region`, `appellation`, `country`, `abv`, `wine_type`, `category`, `barcode`, `description`, `vineyard`, `size`, `critic_score`, `vivino_rating`, `market_price`, `market_price_currency`, … — same as create wine). **Never store image bytes.**
 
 ### `DELETE /api/lists/<id>/items/<item_id>/`
 
-200 `{ "status": "removed", "id": 44 }`. 409 if `moved_at` set. 404 if not in household.
+200 `{ "status": "removed", "id": 44 }`. 409 if `moved_at` set. 404 if not the caller’s list.
 
 ### `POST /api/lists/<id>/items/<item_id>/to-cellar/`
 
@@ -322,10 +336,11 @@ Open items only (`moved_at` null) unless `?include_moved=1` (not used by the bot
 Server:
 
 1. If `moved_at`: 409 `already_moved`.
-2. Resolve `Wine`: `wine_id` if set and still in household; else `WineCreateSerializer` from `payload` + snapshot fields; on unique constraint, fetch existing.
-3. `StockAddView` logic (extract a function rather than HTTP-to-self): create `StorageItem`.
-4. Set `item.wine`, `item.moved_at=now()`.
-5. Return stock-add payload + `list_item_id` so the bot can show undo/drawer/achievements.
+2. Resolve household via `get_household` (current / `X-Household`). 403 if none.
+3. Resolve `Wine`: `wine_id` if set **and that wine belongs to this household**; else `WineCreateSerializer` from `payload` + snapshot fields; on unique constraint, fetch existing.
+4. `StockAddView` logic (extract a function rather than HTTP-to-self): create `StorageItem`.
+5. Set `item.wine`, `item.moved_at=now()`.
+6. Return stock-add payload + `list_item_id` so the bot can show undo/drawer/achievements.
 
 ```json
 {
@@ -344,19 +359,21 @@ Undo of that stock add does **not** automatically restore the list row in phase 
 
 ## Permissions and privacy
 
-Household-scoped, same as stock. Any household member can add/remove/move. No extra role. Not visible to other households. Not visible to clubs in this phase.
+**User-scoped** (open-q #15). Only `list.owner` can GET/POST/DELETE/move. A household partner cannot list, mutate, or infer Sam’s rows. Not visible to clubs in this phase. Club lists in phase 3 are a different `kind` and a different ACL (club membership).
 
-`added_by` is provenance, not an ACL.
+`added_by` on personal items equals `owner`. Keep the column for club lists later.
+
+Move-to-cellar is the only list endpoint that reads household: it writes stock the partner *will* see (that is the shared fridge). The list row itself stays private.
 
 ## Notifications / Celery
 
-None. No fan-out. Do not ping the partner that Sam listed a shop bottle.
+None. No fan-out. Do not ping the partner that Sam listed a shop bottle (they cannot see the list anyway).
 
 ## Web UI
 
-Optional `/list/` template, Django + Pure CSS, `HouseholdScopedMixin`. **Not required to ship.** Admin:
+Optional `/list/` template, Django + Pure CSS, gated on `request.user` (**not** `HouseholdScopedMixin`). **Not required to ship.** Admin:
 
-- `WineListAdmin`: household, name, kind, item count
+- `WineListAdmin`: owner, name, kind, item count
 - `WineListItemAdmin`: list, name, vintage, moved_at, added_by
 
 No React.
@@ -365,14 +382,15 @@ No React.
 
 Django (`tests/test_winelist.py`):
 
-- default list created on GET
+- default list created on GET for **this user**
 - add item, not in `WineInStockView`
 - unique open `(list, wine)`
 - to-cellar creates stock + `moved_at`; second to-cellar 409
 - to-cellar unique-wine collision finds existing
 - to-cellar fires `award_for_add` (with gamification on)
 - flag off → 404
-- other household 404
+- other **user** 404 (household partner cannot GET/POST Sam’s list)
+- two users in one household → two lists
 - payload rejects giant / image keys
 
 Bot (`tests/test_lists.py`):
@@ -401,7 +419,7 @@ Scanner integration: `WineCellarAPI.add_list_item`, `list_items`, `move_list_ite
 | **1b** | API GET/POST/DELETE + tests (`test_winelist.py`), flag mixin | M |
 | **1c** | `POST .../to-cellar/` extracting shared stock-add helper; badge + unique-constraint tests | M |
 | **1d** | `WineCellarAPI` methods; `telegram_lists.py`; label-card button; `/list`; copy catalog EN+AF for new keys; `PUBLIC_COMMANDS` + presence | M |
-| **1e** | Wire new-cellar redeem to create default list; CLAUDE.md; `/help` line | S |
+| **1e** | CLAUDE.md; `/help` line; do **not** create a list on new-cellar redeem | S |
 
 **1a → 1b → 1c** (Django) then **1d** (bot) then **1e**. Do not combine 1b and 1d.
 

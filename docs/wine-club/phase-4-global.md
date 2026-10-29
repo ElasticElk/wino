@@ -29,7 +29,7 @@ Drink-by this month
 [Join New World Cab]
 ```
 
-Join card: **feed only**, no cellar stanza.
+Join card: **feed only**, no cellar stanza. Drink-opens **are** posted if the member drinks (decided, open-q #19) — the card must say so. Mute available. Do **not** auto-post household drink-by into global.
 
 EN:
 
@@ -61,7 +61,7 @@ Not a live web search per member. Staff writes the note. Optional later: beat co
 
 ### J4.3 Leave / mute
 
-Same as private clubs. No peek buttons on member cards.
+Same as private clubs. No peek buttons on member cards. Private-club **dismantle votes** (J2.10) do **not** apply here — staff freeze / kick / admin delete.
 
 ## Telegram
 

@@ -48,7 +48,7 @@ Nie 'n gedeelde yskas nie — elkeen hou sy eie.
 [Begin 'n klub]
 ```
 
-Tap → `What should we call it?` (type, 2–40 chars, same `NAME_MIN`/`NAME_MAX` as household). Then **sharing step** (required):
+Tap → `What should we call it?` (type, 2–40 chars, same `NAME_MIN`/`NAME_MAX` as household). Then **sharing step** (required — open-q #16 decided: must pick; UI default **Type and count** + badges on):
 
 ```
 What does Thursday reds share?
@@ -184,7 +184,9 @@ Mute: `feed_muted=True`. Copy: `Muted Thursday reds. Opens still go to the club;
 
 Leave: membership deleted. Copy: `You've left Thursday reds.` Historical events keep the denormalised name.
 
-Owner leave with others: must `[Hand over]` first (pick a member → they become owner). Last member leave **deletes** the club and its events (decided default).
+Owner leave with others: must `[Hand over]` first (pick a member → they become owner). Last member leave **deletes** the club and its events (decided, open-q #11).
+
+Owner who wants the **club itself gone** (not just to leave) uses **Dismantle** (J2.10) — a unanimous vote. If that vote fails, the owner can only leave via handover.
 
 Settings (owner): same sharing radios as create. Narrowing applies immediately, auto-acks `accepted_sharing_version`. Widening: J2.9.
 
@@ -218,7 +220,9 @@ No buttons. No club name. No member name. Set `club_share_notice_sent_at=now()`.
 
 Feed-only clubs (`none`): no heads-up.
 
-### J2.9 Owner widens sharing (recommended)
+### J2.9 Owner widens sharing — **OPEN (open-q #5)**
+
+Do **not** implement this journey until the owner closes #5. The copy below is the previous suggested call only, not a decision.
 
 Summary → full, or badges off → on, or none → summary: increment `sharing_version`, store previous visibility on the club. DM members (not the owner):
 
@@ -235,6 +239,114 @@ the full list, or leave.
 ```
 
 Peek at the **new** level only after Stay (`accepted_sharing_version = current`). Unacked members stay visible at the **previous** level. Narrowing: no DM required; apply now.
+
+### J2.10 Dismantle — unanimous vote (decided, open-q #11)
+
+Last member leave already deletes the club. This journey is **owner wants the club gone while other people are still in it**.
+
+Unanimous means: **every current member** has voted **yes** before expiry. Anyone votes **no**, or anyone has **not voted** when the clock runs out → **not unanimous**. The club stays. The owner can then only leave (handover).
+
+**Timeout: 48 hours** from proposal. One open vote per club.
+
+#### Owner starts it
+
+Settings → `[End this club]`. Solo owner (no other members) is last-member leave — skip the vote, delete now.
+
+Confirm card:
+
+EN:
+
+```
+End Thursday reds?
+
+Every member has to agree. If anyone says no,
+or doesn't reply within 48 hours, the club stays.
+
+This can't be undone.
+
+[Ask everyone]  [Cancel]
+```
+
+AF: `Beëindig Thursday reds?` / `Elke lid moet saamstem.` / `Vra almal` / `Kanselleer`.
+
+Tap **Ask everyone** → insert `ClubDismantleVote(status=open, expires_at=now+48h)`. Proposer’s ballot auto-**yes**. Every other member gets a DM (Celery). Freeze new joins / invite redeem until the vote resolves (`409 dismantle_in_progress`).
+
+#### Member ballot DM
+
+EN:
+
+```
+Riley wants to end Thursday reds.
+
+If everyone says yes, the club and its feed go away.
+If anyone says no, or doesn't reply in time, nothing changes.
+
+[Yes, end it]  [No, keep it]
+```
+
+AF: `Riley wil Thursday reds beëindig.` / `Ja, beëindig dit` / `Nee, hou dit`.
+
+Buttons: `cl:dy:<vote_id>` / `cl:dn:<vote_id>`. Changeable until the vote resolves (last tap wins). Mute does **not** skip the ballot — this is not a feed ping.
+
+Owner also gets a status card, edited as ballots land:
+
+```
+Ending Thursday reds — waiting on 3 votes.
+Yes: Riley
+Waiting: Sam, Lee, Pat
+
+Closes 31 Oct 18:00 if not everyone has voted.
+
+[Cancel vote]
+```
+
+AF: `Beëindig Thursday reds — wag op 3 stemme.`
+
+Do **not** name how anyone voted other than the owner’s own yes, until resolved — actually for a 4-person club “Waiting: Sam, Lee, Pat” leaks who hasn’t voted, which is required for unanimity. Naming **yes** voters besides the proposer is optional; recommended: show counts + waiting names, not a public yes-list of others (avoids pressure). Spec: **waiting names + yes/no counts**, not who said yes.
+
+#### Anyone votes No → fail immediately
+
+Edit every ballot DM and the owner status:
+
+EN: `Sam voted to keep Thursday reds. The club stays.`
+AF: `Sam het gestem om Thursday reds te hou. Die klub bly.`
+
+`status=rejected`. Invites unfrozen. Owner is still owner. Leave still requires handover.
+
+#### Everyone Yes → pass, delete
+
+When the last pending ballot becomes yes (and membership set is exactly those ballots, see edges):
+
+EN: `Thursday reds has ended.`
+AF: `Thursday reds is beëindig.`
+
+Delete the club (CASCADE memberships, events, invites, deliveries, this vote). Same as last-member leave. No leftover peek.
+
+#### Timeout → fail
+
+Beat `expire_dismantle_votes` (every 15 min is enough at this scale) or expire on the next read.
+
+EN: `Not everyone voted in time. Thursday reds stays.`
+AF: `Nie almal het betyds gestem nie. Thursday reds bly.`
+
+`status=expired`. Same as a no: club stays, invites unfrozen.
+
+#### Owner cancels
+
+`[Cancel vote]` while `open`: `status=cancelled`. Copy: `Cancelled. Thursday reds stays.`
+
+#### Edges for the vote
+
+| Case | Behaviour |
+| --- | --- |
+| Only one member | No vote. Leave deletes the club. Hide `[End this club]`. |
+| Second dismantle while one is open | 409 `vote_open`. Owner can cancel the first. |
+| Member leaves while open | Drop their ballot. Re-check remaining: if all remaining are yes, **pass** (the leavers opted out). If owner was the last remaining, that is last-member delete. |
+| Member joins while open | **Forbidden.** Invite redeem / mint 409 `dismantle_in_progress`. Preview card: `This club is deciding whether to close. Ask for a new link later.` |
+| Voter taps after resolved | `That vote is over.` |
+| Global club | Not this flow. Staff freeze / admin delete (phase 4). |
+| Mute | Still receive the ballot DM. |
+| Scanner restart | Buttons carry `vote_id`; no in-memory name needed. |
 
 ## Telegram — commands, callbacks, copy
 
@@ -255,9 +367,14 @@ Module: `scanner-service/integrations/telegram_clubs.py`. Invite `/start` dispat
 | `cl:u:<club_id>` | mute/unmute toggle |
 | `cl:l:<club_id>` | leave confirm |
 | `cl:s:<club_id>` | owner settings |
-| `cl:w:<club_id>:stay` | re-consent stay |
+| `cl:w:<club_id>:stay` | re-consent stay (**blocked** until open-q #5) |
 | `cl:fd:<club_id>:<page>` | feed page |
 | `cl:x:<club_id>` | picker / switch last-used |
+| `cl:z:<club_id>` | owner confirm dismantle |
+| `cl:za:<vote_id>` | Ask everyone (create vote) |
+| `cl:dy:<vote_id>` | ballot yes |
+| `cl:dn:<vote_id>` | ballot no |
+| `cl:zc:<vote_id>` | owner cancel vote |
 
 Club ids and user ids are integers; `cl:p:12:34` is well under 64 bytes.
 
@@ -308,6 +425,20 @@ Full table: [copy-catalog.md](copy-catalog.md). Phase 2 keys:
 | `club.widen.stay` | Stay | Bly |
 | `club.widen.leave` | Leave | Loop |
 | `club.switch.ask` | Use {household} for {club}? | Gebruik {household} vir {club}? |
+| `club.end.btn` | End this club | Beëindig hierdie klub |
+| `club.end.confirm` | End {name}?\n\nEvery member has to agree. If anyone says no, or doesn't reply within 48 hours, the club stays.\n\nThis can't be undone. | Beëindig {name}?\n\nElke lid moet saamstem. As iemand nee sê, of nie binne 48 uur antwoord nie, bly die klub.\n\nDit kan nie ontdoen word nie. |
+| `club.end.ask` | Ask everyone | Vra almal |
+| `club.end.cancel` | Cancel | Kanselleer |
+| `club.end.ballot` | {name} wants to end {club}.\n\nIf everyone says yes, the club and its feed go away. If anyone says no, or doesn't reply in time, nothing changes. | {name} wil {club} beëindig.\n\nAs almal ja sê, verdwyn die klub en sy lys. As iemand nee sê, of nie betyds antwoord nie, verander niks. |
+| `club.end.yes` | Yes, end it | Ja, beëindig dit |
+| `club.end.no` | No, keep it | Nee, hou dit |
+| `club.end.status` | Ending {club} — waiting on {n} votes.\nYes: {yes_n} · No: {no_n}\nWaiting: {waiting}\n\nCloses {date} if not everyone has voted. | Beëindig {club} — wag op {n} stemme.\nJa: {yes_n} · Nee: {no_n}\nWag: {waiting}\n\nSluit {date} as nie almal gestem het nie. |
+| `club.end.rejected` | {name} voted to keep {club}. The club stays. | {name} het gestem om {club} te hou. Die klub bly. |
+| `club.end.passed` | {club} has ended. | {club} is beëindig. |
+| `club.end.expired` | Not everyone voted in time. {club} stays. | Nie almal het betyds gestem nie. {club} bly. |
+| `club.end.cancelled` | Cancelled. {club} stays. | Gekanselleer. {club} bly. |
+| `club.end.in_progress` | This club is deciding whether to close. Ask for a new link later. | Hierdie klub besluit of dit toemaak. Vra later vir 'n nuwe skakel. |
+| `club.end.over` | That vote is over. | Daai stemming is verby. |
 
 Transport 5xx ≠ expired.
 
@@ -321,6 +452,7 @@ Transport 5xx ≠ expired.
 | Already member Join | Idempotent `already_member`, hot-add |
 | Stranger redeem without name | 400 like household |
 | Actor in 3 clubs | 3 events, 3 fan-outs (minus overlapping members once per chat_id per event) |
+| Club reaches 15 members | Still per-open DMs (open-q #7). Digest is a later flag, not this phase |
 | Bulk Apply 4 drunks | 4 events after commit |
 | Vote then undo | Event retracted; vote ignored |
 | Vote after window | Event stays; vote still updates glyph if delivery exists |
@@ -462,7 +594,47 @@ class ClubEventDelivery(models.Model):
         constraints = [
             models.UniqueConstraint(fields=["event", "chat_id"], name="unique_event_chat"),
         ]
+
+class ClubDismantleVote(models.Model):
+    STATUS = [
+        ("open", "Open"),
+        ("passed", "Passed"),
+        ("rejected", "Rejected"),
+        ("expired", "Expired"),
+        ("cancelled", "Cancelled"),
+    ]
+    club = models.ForeignKey(Club, on_delete=models.CASCADE, related_name="dismantle_votes")
+    proposed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    status = models.CharField(max_length=10, choices=STATUS, default="open")
+    created = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()  # created + 48h
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["club"],
+                condition=models.Q(status="open"),
+                name="one_open_dismantle_vote_per_club",
+            ),
+        ]
+
+class ClubDismantleBallot(models.Model):
+    CHOICE = [("yes", "Yes"), ("no", "No")]
+    vote = models.ForeignKey(ClubDismantleVote, on_delete=models.CASCADE, related_name="ballots")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    choice = models.CharField(max_length=3, choices=CHOICE, null=True, blank=True)  # null = pending
+    decided_at = models.DateTimeField(null=True, blank=True)
+    chat_id = models.CharField(max_length=50, blank=True, default="")
+    message_id = models.BigIntegerField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["vote", "user"], name="unique_dismantle_ballot"),
+        ]
 ```
+
+`DISMANTLE_TTL = timedelta(hours=48)`. Proposer ballot inserted with `choice="yes"` in the same transaction as the vote.
 
 Also on `Household`:
 
@@ -538,11 +710,36 @@ Staff preview/redeem: `IsAdminUser`, like household (token in body).
 
 404 if not a member. 404 `not_enabled` if flag off.
 
-**`PATCH /api/clubs/<id>/`** owner only. Body visibility/badges. If widening: bump `sharing_version`, set previous_* . 403 member.
+**`PATCH /api/clubs/<id>/`** owner only. Body visibility/badges. **Widening is blocked until open-q #5 is closed** — if a widen is posted before that, 400 `{ "error": "widen_not_enabled" }`. Narrowing (full→summary, summary→none, badges on→off) may ship: apply immediately, auto-ack `accepted_sharing_version`. 403 member.
 
 **`PATCH /api/clubs/<id>/membership/`** `{ "feed_muted": true } | { "household_id": 4 } | { "accepted_sharing_version": 2 }`. Stay must equal **current** club version (no jumping). `household_id` must be a household the user belongs to.
 
-**`POST /api/clubs/<id>/leave/`** 200. Owner with other members: 409 `{ "error": "hand_over_required" }` until `POST /api/clubs/<id>/handover/` `{ "user_id": 9 }`. Last member: 200 and club deleted.
+**`POST /api/clubs/<id>/leave/`** 200. Owner with other members: 409 `{ "error": "hand_over_required" }` until `POST /api/clubs/<id>/handover/` `{ "user_id": 9 }`. Last member: 200 and club deleted. If an open dismantle vote exists, leaving drops that user’s ballot and re-checks unanimity (J2.10).
+
+**`POST /api/clubs/<id>/dismantle/`** owner only. 201 vote object (proposer auto-yes, ballots for every other member `choice=null`). 409 `{ "error": "vote_open" }` if one is already open. 409 `{ "error": "sole_member" }` — client should `POST leave` instead (deletes). 403 member.
+
+201:
+
+```json
+{
+  "id": 5,
+  "club_id": 3,
+  "status": "open",
+  "expires_at": "2026-11-02T18:00:00+00:00",
+  "yes": 1,
+  "no": 0,
+  "pending": 3,
+  "waiting_names": ["Sam", "Lee", "Pat"]
+}
+```
+
+**`POST /api/clubs/<id>/dismantle/<vote_id>/ballot/`** `{ "choice": "yes"|"no" }`. Caller must have a ballot. 200 updated vote. On `no`: `status=rejected` immediately. On last `yes`: `status=passed` and **delete the club** (same CASCADE as last-member leave). 409 if vote not `open`.
+
+**`POST /api/clubs/<id>/dismantle/<vote_id>/cancel/`** proposer or staff. `status=cancelled`. 409 if not `open`.
+
+**`GET /api/clubs/<id>/dismantle/`** current open vote or 404. Members may read (they need the status card). Do not include other members’ yes/no identities — counts + `waiting_names` only.
+
+Invite mint/redeem while a vote is `open`: 409 `{ "error": "dismantle_in_progress" }`.
 
 **`POST /api/clubs/<id>/invites/`** 201 `{ code, expires_at, max_uses, use_count, cellar_visibility, badges_visible, club_name, inviter_display_name }`. Any member may mint.
 
@@ -671,6 +868,18 @@ def club_share_notice(household_id, exclude_user_id):
     # nameless heads-up; sets club_share_notice_sent_at
 ```
 
+```python
+@shared_task(name="deliver_dismantle_ballots")
+def deliver_dismantle_ballots(vote_id):
+    # DM each pending voter; store message_id on ClubDismantleBallot
+
+@shared_task(name="expire_dismantle_votes")
+def expire_dismantle_votes():
+    # beat ~15 min: open votes with expires_at < now → expired; notify
+```
+
+Do **not** add `club_widen_notice` until open-q #5 closes. Do **not** add a digest task in this phase (open-q #7: per-open until 15 members).
+
 Reuse `_send_telegram`. HTML. `parse_mode=HTML`. Retry once on Telegram 429 (backoff). Do not retry forever. Store `error` on delivery.
 
 Do not send to `actor`’s `chat_id`. Distinct `chat_id`s only.
@@ -679,7 +888,7 @@ Gunicorn must not wait on these.
 
 ## Web UI
 
-Admin for Club, Membership, Invite, Event. Optional read-only `/clubs/` and `/club/<id>/` (session auth, `ClubMembership` gate — **not** `HouseholdScopedMixin`). Owner settings form = the three radios. No React. Homepage cellar challenges unchanged.
+Admin for Club, Membership, Invite, Event, DismantleVote/Ballot. Optional read-only `/clubs/` and `/club/<id>/` (session auth, `ClubMembership` gate — **not** `HouseholdScopedMixin`). Owner settings form = the three radios (widen control **hidden** until open-q #5). No React. Homepage cellar challenges unchanged.
 
 ## Test plan
 
@@ -693,9 +902,10 @@ Django:
 - invite code not in `HouseholdInvite`
 - redeem compound creates household + club
 - redeem already_member idempotent
-- widen bumps version; unacked peek uses previous
-- stay sets accepted; leave deletes
+- PATCH widen returns 400 `widen_not_enabled` until open-q #5
 - owner leave 409 without handover; last leave deletes club
+- dismantle: proposer auto-yes; one no rejects; all yes deletes club; expiry not-unanimous; cancel; join 409 while open; leave mid-vote drops ballot
+- unique one open vote per club
 - publish no-op when flag off / no memberships
 - unique opened per (club, item_id)
 - `club_share_notice` copy has no club name, no display_name, not sent to joiner, sent once
@@ -710,6 +920,7 @@ Bot:
 - callback budget tests for `cl:p:` with large ids (still < 64)
 - EN/AF keys for all new copy
 - `/help` + command menu
+- dismantle: Ask everyone DMs, yes/no, no fails, timeout stays, cancel, 64-byte `cl:dy:`
 
 ## Rollout
 
@@ -730,12 +941,13 @@ Bot:
 | **2d** | Peek + badges GET; redacted serializer tests (forbidden keys) | S |
 | **2e** | `publish_club_event` + deliveries + stock/vote/undo hooks; no-op if flag off | M |
 | **2f** | `club_share_notice` task + tests (no names) | S |
-| **2g** | Widen/re-consent API + previous visibility | S |
+| **2g** | Widen/re-consent — **SKIP until open-q #5** | — |
 | **2h** | `telegram_clubs.py` found/invite/join/home/mute/leave; `/start` dispatcher; copy EN+AF; menu | L — **split if needed:** 2h-join vs 2h-home |
-| **2i** | Peek/members/feed bot screens; settings + widen Stay/Leave | M |
+| **2i** | Peek/members/feed bot screens; settings (narrowing only; no Stay/Leave widen) | M |
 | **2j** | `/help`, `/status`, CLAUDE.md, presence, feature flag wiring in `server.py` | S |
+| **2k** | Dismantle vote models + API + ballot DMs + expire beat + EN/AF copy (J2.10) | M |
 
-Order: **2a → 2b → 2c/2d → 2e/2f/2g → 2h → 2i → 2j**. Do not land 2h before 2c.
+Order: **2a → 2b → 2c/2d → 2e/2f → 2h → 2i → 2j → 2k**. Skip **2g** until open-q #5. Do not land 2h before 2c. 2k can follow 2b (API) and 2h (bot module).
 
 If 2h is too large, ship **2h1** found+invite+join (growth) before **2h2** home/feed UI (the join still works via `/start`).
 

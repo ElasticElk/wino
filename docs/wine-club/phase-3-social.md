@@ -42,17 +42,17 @@ Off-topic: still stored — we are not a moderator in private clubs.
 
 ### J3.2 Add to my To-drink from a feed item
 
-Button `[To-drink list]` on the opened event. Copies snapshot (`wine_name`, `vintage`, `producer`, …) onto the actor’s household default list, `source=club_feed`. **Not** a live FK to Lee’s `Wine`. Copy: `On your To-drink list.` Idempotent per `(list, name, vintage, producer)` best-effort, or always insert if no `wine_id`.
+Button `[To-drink list]` on the opened event. Copies snapshot (`wine_name`, `vintage`, `producer`, …) onto **the actor’s personal** default list (`WineList.owner = request.user`, open-q #15), `source=club_feed`. **Not** a live FK to Lee’s `Wine`. Not the household partner’s list. Copy: `On your To-drink list.` Idempotent per `(list, name, vintage, producer)` best-effort, or always insert if no `wine_id`.
 
 ### J3.3 Club list for the next tasting
 
-Owner `/club list` → get_or_create `WineList(kind=club, club_id=..., name="Thursday reds")`. Members can `Add` from a peek wine (full visibility) or type a label. Anyone in the club can view. Visibility of **items** is names/vintages only (never prices). Removing: owner or the adder.
+Owner `/club list` → get_or_create `WineList(kind=club, club_id=..., owner=null, name="Thursday reds")`. Members can `Add` from a peek wine (full visibility) or type a label. Anyone in the club can view. Visibility of **items** is names/vintages only (never prices). Removing: club owner or the adder (`added_by`).
 
-This is **not** peek of someone’s fridge. It is an explicit shared checklist.
+This is **not** peek of someone’s fridge and **not** anyone’s personal To-drink. It is an explicit shared checklist. Personal lists stay user-scoped; adding from the feed (J3.2) writes the caller’s personal list, never the club list, unless they are in `/club list`.
 
 ### J3.4 Taste-off
 
-Host (any member in MVP; recommended: any member, owner can close):
+Host (any member — decided, open-q #17; owner or host may close):
 
 1. `/club tasteoff` → `Name this tasting?` (type, default `Thursday reds · 5 Nov`).
 2. Add bottles: from club list, from a member’s **full** peek (404 if summary/none — copy: `This club only shares a summary — type a name instead.`), or type `Producer Name 2019`.
@@ -67,7 +67,7 @@ Host (any member in MVP; recommended: any member, owner can close):
 2. Merlot 2019 — 3.7 (3 scores)
 ```
 
-Do **not** write `StorageItem.vote` or `Wine.rating` (decided default). Feed thumbs stay 👎/—/👍; taste-offs are 1–5.
+Do **not** write `StorageItem.vote` or `Wine.rating` (decided, open-q #2). Feed thumbs stay 👎/—/👍; taste-offs are 1–5.
 
 Abandon: `/club` or `/fridge` cancels setup (not an open scoring). Open scoring stays until Close or 7 days then auto-close.
 
@@ -211,13 +211,13 @@ Body: `{ "text": "we had that in Stellenbosch" }`
 
 **`POST /api/clubs/<id>/events/<event_id>/to-list/`**
 
-No body. Copies `wine_name` / `vintage` / `producer` onto the caller’s default household To-drink list (`source=club_feed`). 201 list-item shape from phase 1. 200 if an open row with the same snapshot already exists. 409 if event retracted. 404 if lists flag off.
+No body. Copies `wine_name` / `vintage` / `producer` onto the caller’s **personal** default To-drink list (`owner=request.user`, `source=club_feed`). 201 list-item shape from phase 1. 200 if an open row with the same snapshot already exists. 409 if event retracted. 404 if lists flag off. 404 if the caller has no user (should not happen).
 
 Does **not** create `StorageItem`. Does **not** set `wine_id` to the actor’s wine (other household).
 
 ### Club list
 
-**`GET /api/clubs/<id>/list/`** — get_or_create `WineList(kind=club, club_id=id, name=club.name)` owned by the founder’s household for the unique-name constraint (or `household=null` — **recommended:** `household` of the club owner, `kind=club`, unique on `club_id` instead of household+name for club rows). Phase 3 migration:
+**`GET /api/clubs/<id>/list/`** — get_or_create `WineList(kind=club, club_id=id, owner=null, name=club.name)`. Phase 3 migration (personal unique is already on `owner`+`name`):
 
 ```python
 UniqueConstraint(fields=["club_id"], condition=Q(kind="club", club_id__isnull=False),
@@ -296,6 +296,7 @@ Admin for comments and taste-offs. Optional club page section. No React. Not req
 - non-member 404
 - retracted event 409
 - to-list does not create `StorageItem`
+- to-list writes the **caller’s** personal list, not a household partner’s
 - to-list 404 if lists flag off
 - taste-off 1–5 check constraint
 - one scoring per club

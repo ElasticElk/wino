@@ -2,7 +2,7 @@
 
 Planning only. Implementation lives in `scanner-service/integrations/copy.py`.
 
-**Rules:** English is the source of truth. Every new key in a phase PR must have an `af` value (CI fixture). Missing locale or key → English. Interpolated names go through `esc()` when `parse_mode=HTML`. Menu text stays English until a dedicated i18n PR. The bot must be designed so a third locale is a catalog addition, not a handler rewrite.
+**Rules (open-q #20 decided):** slash commands and the `/` menu stay English. All dialogue / message copy is multilingual. English is the source of truth. Every new key in a phase PR must have an `af` value (CI fixture). Missing locale or key → English. Interpolated names go through `esc()` when `parse_mode=HTML`. The bot must be designed so a third locale is a catalog addition, not a handler rewrite.
 
 Resolve locale: `UserSettings.language` if set → else Telegram `language_code` for unprovisioned chats → else `en`. Map `en* → en`, `af* → af`.
 
@@ -107,6 +107,20 @@ Existing label buttons (`Add to cellar`, `Drank this`, `Just looking`) stay Engl
 | `club.help` | Wine clubs | Wynklubs |
 | `club.status.ready` | Clubs: ready | Klubs: gereed |
 | `club.status.resting` | Clubs: off | Klubs: af |
+| `club.end.btn` | End this club | Beëindig hierdie klub |
+| `club.end.confirm` | End {name}?\n\nEvery member has to agree. If anyone says no, or doesn't reply within 48 hours, the club stays.\n\nThis can't be undone. | Beëindig {name}?\n\nElke lid moet saamstem. As iemand nee sê, of nie binne 48 uur antwoord nie, bly die klub.\n\nDit kan nie ontdoen word nie. |
+| `club.end.ask` | Ask everyone | Vra almal |
+| `club.end.cancel` | Cancel | Kanselleer |
+| `club.end.ballot` | {name} wants to end {club}.\n\nIf everyone says yes, the club and its feed go away. If anyone says no, or doesn't reply in time, nothing changes. | {name} wil {club} beëindig.\n\nAs almal ja sê, verdwyn die klub en sy lys. As iemand nee sê, of nie betyds antwoord nie, verander niks. |
+| `club.end.yes` | Yes, end it | Ja, beëindig dit |
+| `club.end.no` | No, keep it | Nee, hou dit |
+| `club.end.status` | Ending {club} — waiting on {n} votes.\nYes: {yes_n} · No: {no_n}\nWaiting: {waiting}\n\nCloses {date} if not everyone has voted. | Beëindig {club} — wag op {n} stemme.\nJa: {yes_n} · Nee: {no_n}\nWag: {waiting}\n\nSluit {date} as nie almal gestem het nie. |
+| `club.end.rejected` | {name} voted to keep {club}. The club stays. | {name} het gestem om {club} te hou. Die klub bly. |
+| `club.end.passed` | {club} has ended. | {club} is beëindig. |
+| `club.end.expired` | Not everyone voted in time. {club} stays. | Nie almal het betyds gestem nie. {club} bly. |
+| `club.end.cancelled` | Cancelled. {club} stays. | Gekanselleer. {club} bly. |
+| `club.end.in_progress` | This club is deciding whether to close. Ask for a new link later. | Hierdie klub besluit of dit toemaak. Vra later vir 'n nuwe skakel. |
+| `club.end.over` | That vote is over. | Daai stemming is verby. |
 
 `club.hh.notice` must never interpolate a club name, member name, or household name. Tests lock that.
 
@@ -155,12 +169,12 @@ Policy-of fragments for `club.join.known`: `a type-and-count summary of` / `'n t
 
 ---
 
-## Command menu (English until dedicated i18n PR)
+## Command menu (English — decided, open-q #20)
+
+Slash commands and `set_bot_presence` descriptions stay English. Dialogue on messages uses this catalog.
 
 | command | EN description |
 | --- | --- |
 | `/list` | Things to drink or buy |
 | `/club` | Wine clubs |
 | `/clubpost` (staff) | Post to a global club |
-
-Afrikaans descriptions (`Om te drink of te koop`, `Wynklubs`) wait for the i18n PR that sets per-user Telegram menus. Body copy uses this catalog from the first new string.
