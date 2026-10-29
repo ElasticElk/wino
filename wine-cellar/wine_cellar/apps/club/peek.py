@@ -141,6 +141,7 @@ def peek_full(household) -> dict:
             break
         wines.append(
             {
+                "id": wine.id,
                 "name": wine.name,
                 "producer": wine.producer or "",
                 "vintage": wine.vintage,

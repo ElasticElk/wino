@@ -30,7 +30,12 @@ from integrations.telegram_invites import (
 logger = logging.getLogger(__name__)
 
 STATE_TTL_SECONDS = 30 * 60
+COMMENT_TTL_SECONDS = 15 * 60
 VOTE_GLYPH = {"down": "\U0001F44E", "up": "\U0001F44D", "meh": ""}
+_MONTHS = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
 TYPE_LABEL = {
     "RE": "Red", "WH": "White", "RO": "Rosé", "SP": "Sparkling",
     "DE": "Dessert", "FO": "Fortified", "OR": "Orange",
@@ -99,6 +104,9 @@ def _wine_line(event: dict, loc: str) -> str:
     vintage = event.get("vintage") or ""
     if kind == "joined":
         return t(loc, "club.feed.joined", name=esc(name))
+    if kind == "tasteoff":
+        title = event.get("wine_name") or "Tasting"
+        return f"\U0001F3C6 {esc(title)}"
     if event.get("retracted"):
         body = t(loc, "club.feed.put_back", name=esc(name), vintage=vintage, wine=esc(wine))
         return " ".join(body.split())
@@ -108,7 +116,7 @@ def _wine_line(event: dict, loc: str) -> str:
     return f"{body} {glyph}".rstrip()
 
 
-def build_home(payload: dict, loc: str) -> tuple[str, InlineKeyboardMarkup]:
+def build_home(payload: dict, loc: str, flags=None) -> tuple[str, InlineKeyboardMarkup]:
     name = payload.get("name") or "Club"
     members = payload.get("member_count") or 1
     vis = payload.get("cellar_visibility") or "full"
@@ -126,6 +134,7 @@ def build_home(payload: dict, loc: str) -> tuple[str, InlineKeyboardMarkup]:
     else:
         for event in events[:5]:
             lines.append(_wine_line(event, loc))
+    flags = flags or {}
     keyboard = [
         [
             InlineKeyboardButton(t(loc, "club.home.invite"), callback_data=club_cb("i", payload["id"])),
@@ -138,10 +147,21 @@ def build_home(payload: dict, loc: str) -> tuple[str, InlineKeyboardMarkup]:
                 callback_data=club_cb("u", payload["id"]),
             ),
         ],
-        [
-            InlineKeyboardButton(t(loc, "club.home.leave"), callback_data=club_cb("l", payload["id"])),
-        ],
     ]
+    extra = []
+    if flags.get("feature_lists"):
+        extra.append(InlineKeyboardButton(
+            t(loc, "club.list.title"), callback_data=club_cb("li", payload["id"]),
+        ))
+    if flags.get("feature_tasteoffs"):
+        extra.append(InlineKeyboardButton(
+            t(loc, "club.home.tasteoff"), callback_data=club_cb("to", payload["id"]),
+        ))
+    if extra:
+        keyboard.append(extra)
+    keyboard.append([
+        InlineKeyboardButton(t(loc, "club.home.leave"), callback_data=club_cb("l", payload["id"])),
+    ])
     if payload.get("role") == "owner":
         keyboard[-1].insert(
             0,
@@ -223,6 +243,12 @@ class ClubFlow:
             return
         if sub == "leave":
             await self._leave_confirm(update)
+            return
+        if sub == "list":
+            await self._show_club_list(update)
+            return
+        if sub == "tasteoff":
+            await self._start_tasteoff(update)
             return
         await self._entry(update)
 
@@ -317,6 +343,14 @@ class ClubFlow:
             return True
         if step == "join" and text.casefold() == "skip":
             return True
+        if step == "comment":
+            return await self._submit_comment(update, text)
+        if step == "tasteoff_title":
+            return await self._tasteoff_named(update, text)
+        if step == "tasteoff_label":
+            return await self._tasteoff_add_typed(update, text)
+        if step == "club_list_add":
+            return await self._club_list_add_typed(update, text)
         return False
 
     async def on_location(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -496,7 +530,12 @@ class ClubFlow:
             else:
                 await update.message.reply_text(text)
             return
-        text, markup = build_home(payload, loc)
+        flags = {
+            "feature_lists": self.handler.flag_on("feature_lists"),
+            "feature_tasteoffs": self.handler.flag_on("feature_tasteoffs"),
+            "feature_club_comments": self.handler.flag_on("feature_club_comments"),
+        }
+        text, markup = build_home(payload, loc, flags=flags)
         if query is not None:
             from integrations.telegram_bot import _safe_edit
             await _safe_edit(query, text, parse_mode="HTML", reply_markup=markup)
@@ -1047,6 +1086,53 @@ class ClubFlow:
             else:
                 self.remember(chat_id, step="join", household_name=name)
                 await self._join_card(update, query=query)
+        elif action == "cm":
+            await self._start_comment(update, int(rest[0]) if rest else 0, query)
+        elif action == "td":
+            await self._event_to_list(update, int(rest[0]) if rest else 0, query)
+        elif action == "li":
+            await self._show_club_list(update, club_id=int(rest[0]), query=query)
+        elif action == "la":
+            await self._start_club_list_add(update, int(rest[0]), query)
+        elif action == "ld":
+            await self._delete_club_list_item(
+                update, int(rest[0]), int(rest[1]), query,
+            )
+        elif action == "to":
+            club_id = int(rest[0]) if rest else None
+            await self._start_tasteoff(update, club_id=club_id, query=query)
+        elif action == "tb":
+            await self._prompt_tasteoff_label(update, int(rest[0]), query)
+        elif action == "tl":
+            await self._tasteoff_from_list(update, int(rest[0]), query)
+        elif action == "ta":
+            await self._tasteoff_add_from_list(
+                update, int(rest[0]), int(rest[1]) if len(rest) > 1 else 0, query,
+            )
+        elif action == "tf":
+            await self._tasteoff_from_cellar(update, int(rest[0]), query)
+        elif action == "tm":
+            await self._tasteoff_member_wines(
+                update, int(rest[0]), int(rest[1]) if len(rest) > 1 else 0, query,
+            )
+        elif action == "tw":
+            await self._tasteoff_add_wine(
+                update, int(rest[0]), int(rest[1]) if len(rest) > 1 else 0, query,
+            )
+        elif action == "op":
+            await self._open_tasteoff(update, int(rest[0]), query)
+        elif action == "ts":
+            await self._score_tasteoff(
+                update,
+                int(rest[0]),
+                int(rest[1]) if len(rest) > 1 else 0,
+                int(rest[2]) if len(rest) > 2 else 0,
+                query,
+            )
+        elif action == "tc":
+            await self._close_tasteoff(update, int(rest[0]), query)
+        elif action == "tx":
+            await self._cancel_tasteoff_setup(update, int(rest[0]), query)
         else:
             return True
         return True
@@ -1146,6 +1232,568 @@ class ClubFlow:
                 await _safe_edit(query, t(loc, "club.end.cancelled", club=esc(club.get("name") or "club")))
                 return
         await _safe_edit(query, t(loc, "club.end.over"))
+
+    def _flags(self):
+        return {
+            "feature_lists": self.handler.flag_on("feature_lists"),
+            "feature_tasteoffs": self.handler.flag_on("feature_tasteoffs"),
+            "feature_club_comments": self.handler.flag_on("feature_club_comments"),
+        }
+
+    def _default_tasteoff_title(self, club_name: str) -> str:
+        from datetime import datetime, timezone as dt_timezone
+
+        now = datetime.now(dt_timezone.utc)
+        day = f"{now.day} {_MONTHS[now.month - 1]}"
+        name = (club_name or "Tasting").strip() or "Tasting"
+        return f"{name} · {day}"[:80]
+
+    async def _club_id_for_event(self, update, event_id: int):
+        api = self._api(update)
+        try:
+            clubs = (api.list_clubs() or {}).get("clubs") or []
+        except Exception:
+            return None
+        last = next((c for c in clubs if c.get("is_last_used")), None)
+        ordered = ([last] if last else []) + [
+            c for c in clubs if last is None or c["id"] != last["id"]
+        ]
+        for club in ordered:
+            try:
+                payload = api.club_feed(club["id"], limit=1, event_id=event_id)
+            except Exception:
+                continue
+            events = payload.get("events") or []
+            if any(e.get("id") == event_id for e in events):
+                return club["id"]
+        return last["id"] if last else None
+
+    async def _club_id_for_tasteoff(self, update, tid: int):
+        chat_id = str(update.effective_chat.id)
+        state = self.state_for(chat_id) or {}
+        if state.get("tasteoff_id") == tid and state.get("club_id"):
+            return state["club_id"]
+        api = self._api(update)
+        try:
+            clubs = (api.list_clubs() or {}).get("clubs") or []
+        except Exception:
+            return None
+        last = next((c for c in clubs if c.get("is_last_used")), None)
+        ordered = ([last] if last else []) + [
+            c for c in clubs if last is None or c["id"] != last["id"]
+        ]
+        for club in ordered:
+            try:
+                body = api.get_tasteoff(club["id"], tid)
+            except Exception:
+                continue
+            if body.get("id") == tid:
+                return club["id"]
+        return last["id"] if last else None
+
+    async def _start_comment(self, update, event_id, query):
+        loc = self.locale(update)
+        from integrations.telegram_bot import _safe_edit
+        if not self.handler.flag_on("feature_club_comments"):
+            await _safe_edit(query, t(loc, "club.comment.off"))
+            return
+        club_id = await self._club_id_for_event(update, event_id)
+        if not club_id:
+            await _safe_edit(query, t(loc, "club.err"))
+            return
+        chat_id = str(update.effective_chat.id)
+        self.remember(
+            chat_id,
+            step="comment",
+            event_id=event_id,
+            club_id=club_id,
+            comment_at=time.monotonic(),
+        )
+        await query.message.reply_text(t(loc, "club.comment.prompt"))
+
+    async def _submit_comment(self, update, text: str) -> bool:
+        loc = self.locale(update)
+        chat_id = str(update.effective_chat.id)
+        state = self.state_for(chat_id) or {}
+        started = state.get("comment_at") or 0
+        if time.monotonic() - started > COMMENT_TTL_SECONDS:
+            self.clear(chat_id)
+            await update.message.reply_text(t(loc, "club.comment.again"))
+            return True
+        note = (text or "").strip()
+        if not note or len(note) > 280:
+            await update.message.reply_text(t(loc, "club.comment.too_long"))
+            return True
+        api = self._api(update)
+        result = api.add_club_comment(state.get("club_id"), state.get("event_id"), note)
+        if result.get("error") == "retracted" or result.get("status_code") == 409:
+            self.clear(chat_id)
+            await update.message.reply_text(t(loc, "club.err"))
+            return True
+        if result.get("error"):
+            await update.message.reply_text(t(loc, "club.err"))
+            return True
+        self.clear(chat_id)
+        await update.message.reply_text(t(loc, "club.comment.saved"))
+        return True
+
+    async def _event_to_list(self, update, event_id, query):
+        loc = self.locale(update)
+        from integrations.telegram_bot import _safe_edit
+        if not self.handler.flag_on("feature_lists"):
+            await _safe_edit(query, t(loc, "club.td.off"))
+            return
+        club_id = await self._club_id_for_event(update, event_id)
+        if not club_id:
+            await _safe_edit(query, t(loc, "club.err"))
+            return
+        api = self._api(update)
+        result = api.event_to_list(club_id, event_id)
+        if result.get("status_code") == 404:
+            await _safe_edit(query, t(loc, "club.td.off"))
+            return
+        if result.get("error"):
+            await _safe_edit(query, t(loc, "club.err"))
+            return
+        await query.message.reply_text(t(loc, "club.td.added"))
+
+    async def _show_club_list(self, update, club_id=None, query=None):
+        loc = self.locale(update)
+        if not self.handler.flag_on("feature_lists"):
+            await self._reply(update, t(loc, "club.td.off"), query=query)
+            return
+        club_id = club_id or await self._current_club_id(update)
+        if not club_id:
+            await self._reply(update, t(loc, "club.err"), query=query)
+            return
+        api = self._api(update)
+        try:
+            payload = api.club_list(club_id)
+        except Exception:
+            payload = {"error": "err"}
+        if payload.get("error"):
+            await self._reply(update, t(loc, "club.err"), query=query)
+            return
+        items = payload.get("items") or []
+        lines = [f"<b>{esc(t(loc, 'club.list.title'))}</b>", ""]
+        keyboard = []
+        if not items:
+            lines.append(t(loc, "club.list.empty"))
+        for item in items:
+            vintage = item.get("vintage") or ""
+            producer = item.get("producer") or ""
+            who = item.get("added_by_name") or ""
+            bit = f"{esc(item.get('name') or '')} {vintage}".strip()
+            if producer:
+                bit += f" · {esc(producer)}"
+            if who:
+                bit += f" · {esc(who)}"
+            lines.append(bit)
+            keyboard.append([InlineKeyboardButton(
+                f"{t(loc, 'club.list.remove_btn')} {(item.get('name') or '')}"[:40],
+                callback_data=club_cb("ld", club_id, item["id"]),
+            )])
+        keyboard.append([InlineKeyboardButton(
+            t(loc, "club.list.add_btn"), callback_data=club_cb("la", club_id),
+        )])
+        keyboard.append([InlineKeyboardButton(
+            t(loc, "club.back"), callback_data=club_cb("h", club_id),
+        )])
+        text = "\n".join(lines)
+        markup = InlineKeyboardMarkup(keyboard)
+        if query is not None:
+            from integrations.telegram_bot import _safe_edit
+            await _safe_edit(query, text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _start_club_list_add(self, update, club_id, query):
+        loc = self.locale(update)
+        chat_id = str(update.effective_chat.id)
+        self.remember(chat_id, step="club_list_add", club_id=club_id)
+        from integrations.telegram_bot import _safe_edit
+        await _safe_edit(query, t(loc, "club.list.add_prompt"))
+
+    async def _club_list_add_typed(self, update, text: str) -> bool:
+        loc = self.locale(update)
+        chat_id = str(update.effective_chat.id)
+        state = self.state_for(chat_id) or {}
+        name = (text or "").strip()
+        if len(name) < 2:
+            await update.message.reply_text(t(loc, "club.list.add_prompt"))
+            return True
+        vintage = None
+        bits = name.rsplit(" ", 1)
+        if len(bits) == 2 and bits[1].isdigit() and len(bits[1]) == 4:
+            name, vintage = bits[0], int(bits[1])
+        api = self._api(update)
+        result = api.add_club_list_item(state.get("club_id"), name, vintage=vintage)
+        if result.get("error"):
+            await update.message.reply_text(t(loc, "club.err"))
+            return True
+        self.clear(chat_id)
+        await update.message.reply_text(t(loc, "club.list.added"))
+        await self._show_club_list(update, club_id=state.get("club_id"))
+        return True
+
+    async def _delete_club_list_item(self, update, club_id, item_id, query):
+        loc = self.locale(update)
+        api = self._api(update)
+        result = api.delete_club_list_item(club_id, item_id)
+        from integrations.telegram_bot import _safe_edit
+        if result.get("status_code") == 403:
+            await _safe_edit(query, t(loc, "club.forbidden"))
+            return
+        if result.get("error"):
+            await _safe_edit(query, t(loc, "club.err"))
+            return
+        await self._show_club_list(update, club_id=club_id, query=query)
+
+    async def _start_tasteoff(self, update, club_id=None, query=None):
+        loc = self.locale(update)
+        if not self.handler.flag_on("feature_tasteoffs"):
+            await self._reply(update, t(loc, "club.to.off"), query=query)
+            return
+        club_id = club_id or await self._current_club_id(update)
+        if not club_id:
+            await self._reply(update, t(loc, "club.err"), query=query)
+            return
+        api = self._api(update)
+        home = api.get_club(club_id) if club_id else {}
+        existing = None
+        try:
+            rows = (api.list_tasteoffs(club_id) or {}).get("tasteoffs") or []
+            existing = next(
+                (r for r in rows if r.get("status") in ("setup", "scoring")),
+                None,
+            )
+        except Exception:
+            existing = None
+        if existing and existing.get("status") == "scoring":
+            await self._reply(update, t(loc, "club.to.already"), query=query)
+            return
+        if existing and existing.get("status") == "setup":
+            chat_id = str(update.effective_chat.id)
+            self.remember(
+                chat_id, step="tasteoff_setup", club_id=club_id,
+                tasteoff_id=existing["id"], club_name=home.get("name"),
+            )
+            await self._show_tasteoff_setup(update, club_id, existing["id"], query=query)
+            return
+        chat_id = str(update.effective_chat.id)
+        default = self._default_tasteoff_title(home.get("name") or "Tasting")
+        self.remember(
+            chat_id, step="tasteoff_title", club_id=club_id,
+            club_name=home.get("name"), default_title=default,
+        )
+        prompt = t(loc, "club.to.title") + f"\n\n{default}"
+        if query is not None:
+            from integrations.telegram_bot import _safe_edit
+            await _safe_edit(query, prompt)
+        else:
+            await update.message.reply_text(prompt)
+
+    async def _tasteoff_named(self, update, text: str) -> bool:
+        loc = self.locale(update)
+        chat_id = str(update.effective_chat.id)
+        state = self.state_for(chat_id) or {}
+        title = (text or "").strip()
+        if not title or title in {".", "-"}:
+            title = state.get("default_title") or self._default_tasteoff_title(
+                state.get("club_name") or "Tasting",
+            )
+        if len(title) < 2:
+            await update.message.reply_text(t(loc, "club.to.title"))
+            return True
+        api = self._api(update)
+        result = api.create_tasteoff(state.get("club_id"), title)
+        if result.get("error") == "already_open":
+            tid = result.get("id")
+            if tid:
+                self.remember(
+                    chat_id, step="tasteoff_setup", tasteoff_id=tid,
+                    club_id=state.get("club_id"),
+                )
+                await update.message.reply_text(t(loc, "club.to.already"))
+                await self._show_tasteoff_setup(update, state.get("club_id"), tid)
+            else:
+                await update.message.reply_text(t(loc, "club.to.already"))
+            return True
+        if result.get("error") or not result.get("id"):
+            await update.message.reply_text(t(loc, "club.err"))
+            return True
+        self.remember(
+            chat_id, step="tasteoff_setup", tasteoff_id=result["id"],
+            club_id=state.get("club_id"), club_name=state.get("club_name"),
+        )
+        await self._show_tasteoff_setup(update, state.get("club_id"), result["id"])
+        return True
+
+    async def _show_tasteoff_setup(self, update, club_id, tid, query=None):
+        loc = self.locale(update)
+        api = self._api(update)
+        body = api.get_tasteoff(club_id, tid)
+        if body.get("error"):
+            await self._reply(update, t(loc, "club.err"), query=query)
+            return
+        bottles = body.get("bottles") or []
+        lines = [
+            f"<b>{esc(body.get('title') or '')}</b>",
+            t(loc, "club.to.setup", n=len(bottles)),
+            "",
+        ]
+        for bottle in bottles:
+            lines.append(esc(bottle.get("label") or ""))
+        keyboard = [
+            [InlineKeyboardButton(t(loc, "club.to.type_btn"), callback_data=club_cb("tb", tid))],
+            [InlineKeyboardButton(t(loc, "club.to.from_list"), callback_data=club_cb("tl", tid))],
+            [InlineKeyboardButton(t(loc, "club.to.from_cellar"), callback_data=club_cb("tf", tid))],
+            [InlineKeyboardButton(t(loc, "club.to.open"), callback_data=club_cb("op", tid))],
+            [InlineKeyboardButton(t(loc, "club.to.cancel_setup"), callback_data=club_cb("tx", tid))],
+            [InlineKeyboardButton(t(loc, "club.back"), callback_data=club_cb("h", club_id))],
+        ]
+        text = "\n".join(lines)
+        markup = InlineKeyboardMarkup(keyboard)
+        if query is not None:
+            from integrations.telegram_bot import _safe_edit
+            await _safe_edit(query, text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _prompt_tasteoff_label(self, update, tid, query):
+        loc = self.locale(update)
+        chat_id = str(update.effective_chat.id)
+        club_id = await self._club_id_for_tasteoff(update, tid)
+        self.remember(
+            chat_id, step="tasteoff_label", tasteoff_id=tid, club_id=club_id,
+        )
+        from integrations.telegram_bot import _safe_edit
+        await _safe_edit(query, t(loc, "club.to.type_btn"))
+
+    async def _tasteoff_add_typed(self, update, text: str) -> bool:
+        loc = self.locale(update)
+        chat_id = str(update.effective_chat.id)
+        state = self.state_for(chat_id) or {}
+        label = (text or "").strip()
+        if len(label) < 2:
+            await update.message.reply_text(t(loc, "club.to.type_btn"))
+            return True
+        api = self._api(update)
+        result = api.add_tasteoff_bottle(state.get("club_id"), state.get("tasteoff_id"), label)
+        if result.get("error"):
+            await update.message.reply_text(t(loc, "club.err"))
+            return True
+        self.remember(chat_id, step="tasteoff_setup")
+        await update.message.reply_text(t(loc, "club.to.added_bottle", label=label))
+        await self._show_tasteoff_setup(update, state.get("club_id"), state.get("tasteoff_id"))
+        return True
+
+    async def _tasteoff_from_list(self, update, tid, query):
+        loc = self.locale(update)
+        club_id = await self._club_id_for_tasteoff(update, tid)
+        api = self._api(update)
+        from integrations.telegram_bot import _safe_edit
+        if not self.handler.flag_on("feature_lists"):
+            await _safe_edit(query, t(loc, "club.td.off"))
+            return
+        payload = api.club_list(club_id)
+        items = payload.get("items") or []
+        if not items:
+            await _safe_edit(query, t(loc, "club.list.empty"))
+            return
+        rows = []
+        for item in items[:8]:
+            label = f"{item.get('name') or ''} {item.get('vintage') or ''}".strip()
+            rows.append([InlineKeyboardButton(
+                label[:40] or "wine",
+                callback_data=club_cb("ta", tid, item["id"]),
+            )])
+        rows.append([InlineKeyboardButton(t(loc, "club.back"), callback_data=club_cb("to", club_id))])
+        await _safe_edit(
+            query, t(loc, "club.to.from_list"),
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    async def _tasteoff_add_from_list(self, update, tid, item_id, query):
+        loc = self.locale(update)
+        club_id = await self._club_id_for_tasteoff(update, tid)
+        api = self._api(update)
+        payload = api.club_list(club_id)
+        item = next((i for i in (payload.get("items") or []) if i.get("id") == item_id), None)
+        from integrations.telegram_bot import _safe_edit
+        if item is None:
+            await _safe_edit(query, t(loc, "club.err"))
+            return
+        label = f"{item.get('name') or ''} {item.get('vintage') or ''}".strip()
+        result = api.add_tasteoff_bottle(club_id, tid, label)
+        if result.get("error"):
+            await _safe_edit(query, t(loc, "club.err"))
+            return
+        await self._show_tasteoff_setup(update, club_id, tid, query=query)
+
+    async def _tasteoff_from_cellar(self, update, tid, query):
+        loc = self.locale(update)
+        club_id = await self._club_id_for_tasteoff(update, tid)
+        api = self._api(update)
+        home = api.get_club(club_id)
+        from integrations.telegram_bot import _safe_edit
+        if (home.get("cellar_visibility") or "none") != "full":
+            await _safe_edit(query, t(loc, "club.to.summary_only"))
+            return
+        members = (api.club_members(club_id) or {}).get("members") or []
+        rows = []
+        for member in members:
+            if (member.get("peek") or home.get("cellar_visibility")) != "full":
+                continue
+            rows.append([InlineKeyboardButton(
+                member.get("display_name") or "Member",
+                callback_data=club_cb("tm", tid, member["user_id"]),
+            )])
+        if not rows:
+            await _safe_edit(query, t(loc, "club.to.summary_only"))
+            return
+        rows.append([InlineKeyboardButton(t(loc, "club.back"), callback_data=club_cb("to", club_id))])
+        await _safe_edit(
+            query, t(loc, "club.to.from_cellar"),
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    async def _tasteoff_member_wines(self, update, tid, user_id, query):
+        loc = self.locale(update)
+        club_id = await self._club_id_for_tasteoff(update, tid)
+        api = self._api(update)
+        from integrations.telegram_bot import _safe_edit
+        peek = api.club_peek(club_id, user_id)
+        if peek.get("error") or peek.get("visibility") != "full":
+            await _safe_edit(query, t(loc, "club.to.summary_only"))
+            return
+        wines = peek.get("wines") or []
+        if not wines:
+            await _safe_edit(query, t(loc, "club.to.summary_only"))
+            return
+        chat_id = str(update.effective_chat.id)
+        self.remember(chat_id, tasteoff_id=tid, club_id=club_id, step="tasteoff_setup")
+        rows = []
+        for wine in wines[:8]:
+            label = f"{wine.get('name') or ''} {wine.get('vintage') or ''}".strip()
+            wine_id = wine.get("id")
+            if not wine_id:
+                continue
+            rows.append([InlineKeyboardButton(
+                label[:40] or "wine",
+                callback_data=club_cb("tw", tid, int(wine_id)),
+            )])
+        if not rows:
+            await _safe_edit(query, t(loc, "club.to.summary_only"))
+            return
+        rows.append([InlineKeyboardButton(t(loc, "club.back"), callback_data=club_cb("tf", tid))])
+        await _safe_edit(
+            query, t(loc, "club.to.from_cellar"),
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    async def _tasteoff_add_wine(self, update, tid, wine_id, query):
+        loc = self.locale(update)
+        club_id = await self._club_id_for_tasteoff(update, tid)
+        api = self._api(update)
+        from integrations.telegram_bot import _safe_edit
+        peek = None
+        members = (api.club_members(club_id) or {}).get("members") or []
+        wine = None
+        for member in members:
+            payload = api.club_peek(club_id, member.get("user_id"))
+            if payload.get("visibility") != "full":
+                continue
+            wine = next(
+                (w for w in (payload.get("wines") or []) if w.get("id") == wine_id),
+                None,
+            )
+            if wine is not None:
+                break
+        if wine is None:
+            await _safe_edit(query, t(loc, "club.to.summary_only"))
+            return
+        label = f"{wine.get('name') or ''} {wine.get('vintage') or ''}".strip()
+        result = api.add_tasteoff_bottle(club_id, tid, label, wine_id=wine_id)
+        if result.get("error"):
+            await _safe_edit(query, t(loc, "club.err"))
+            return
+        await self._show_tasteoff_setup(update, club_id, tid, query=query)
+
+    async def _open_tasteoff(self, update, tid, query):
+        loc = self.locale(update)
+        club_id = await self._club_id_for_tasteoff(update, tid)
+        api = self._api(update)
+        result = api.open_tasteoff(club_id, tid)
+        from integrations.telegram_bot import _safe_edit
+        if result.get("error") == "need_two":
+            await _safe_edit(query, t(loc, "club.to.need_two"))
+            return
+        if result.get("error"):
+            await _safe_edit(query, t(loc, "club.err"))
+            return
+        chat_id = str(update.effective_chat.id)
+        self.clear(chat_id)
+        await _safe_edit(query, t(loc, "club.to.host_open"), reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(t(loc, "club.to.close"), callback_data=club_cb("tc", tid)),
+        ]]))
+
+    async def _score_tasteoff(self, update, tid, bottle_id, score, query):
+        loc = self.locale(update)
+        club_id = await self._club_id_for_tasteoff(update, tid)
+        api = self._api(update)
+        result = api.score_tasteoff(club_id, tid, bottle_id, score)
+        from integrations.telegram_bot import _safe_edit
+        if result.get("error"):
+            await _safe_edit(query, t(loc, "club.err"))
+            return
+        body = api.get_tasteoff(club_id, tid)
+        bottle = next(
+            (b for b in (body.get("bottles") or []) if b.get("id") == bottle_id),
+            None,
+        )
+        label = (bottle or {}).get("label") or "wine"
+        await _safe_edit(query, t(loc, "club.to.scored", label=esc(label), n=score))
+
+    async def _close_tasteoff(self, update, tid, query):
+        loc = self.locale(update)
+        club_id = await self._club_id_for_tasteoff(update, tid)
+        api = self._api(update)
+        result = api.close_tasteoff(club_id, tid)
+        from integrations.telegram_bot import _safe_edit
+        if result.get("error"):
+            await _safe_edit(query, t(loc, "club.err"))
+            return
+        rankings = (result.get("bottles") or [])
+        # Prefer payload rankings from a follow-up feed event if present.
+        lines = [t(loc, "club.to.closed"), ""]
+        scored = []
+        for bottle in rankings:
+            if bottle.get("average") is not None:
+                scored.append(bottle)
+        scored.sort(key=lambda b: (-(b.get("average") or 0), b.get("label") or ""))
+        for index, bottle in enumerate(scored, 1):
+            avg = bottle.get("average")
+            n = bottle.get("n") or 0
+            lines.append(
+                f"{index}. {esc(bottle.get('label') or '')} — {avg} "
+                f"({t(loc, 'club.to.n_scores', n=n)})"
+            )
+        title = result.get("title") or ""
+        if title:
+            lines[0] = f"\U0001F3C6 {esc(title)}"
+        await _safe_edit(query, "\n".join(lines), parse_mode="HTML")
+
+    async def _cancel_tasteoff_setup(self, update, tid, query):
+        loc = self.locale(update)
+        chat_id = str(update.effective_chat.id)
+        club_id = await self._club_id_for_tasteoff(update, tid)
+        self.clear(chat_id)
+        from integrations.telegram_bot import _safe_edit
+        if club_id:
+            await self._show_home(update, club_id, query=query)
+        else:
+            await _safe_edit(query, t(loc, "club.end.cancelled", club=""))
 
     async def after_household_switch(self, update_or_query, chat_id, household_id, household_name):
         if not clubs_enabled(self.handler):

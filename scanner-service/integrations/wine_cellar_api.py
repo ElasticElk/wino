@@ -791,10 +791,15 @@ class WineCellarAPI:
             return self._list_response(resp)
         return resp.json()
 
-    def club_feed(self, club_id: int, limit: int = 5, offset: int = 0) -> dict:
+    def club_feed(
+        self, club_id: int, limit: int = 5, offset: int = 0, event_id: int | None = None,
+    ) -> dict:
+        params = {"limit": limit, "offset": offset}
+        if event_id is not None:
+            params["event_id"] = event_id
         resp = self.session.get(
             f"{self.base_url}/api/clubs/{club_id}/feed/",
-            params={"limit": limit, "offset": offset}, timeout=10,
+            params=params, timeout=10,
         )
         if resp.status_code >= 400:
             return self._list_response(resp)
@@ -899,3 +904,162 @@ class WineCellarAPI:
         if resp.status_code >= 400:
             return self._list_response(resp)
         return resp.json()
+
+    def club_comments(self, club_id: int, event_id: int) -> dict:
+        resp = self.session.get(
+            f"{self.base_url}/api/clubs/{club_id}/events/{event_id}/comments/",
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()
+
+    def add_club_comment(self, club_id: int, event_id: int, text: str) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/{club_id}/events/{event_id}/comments/",
+            json={"text": text}, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json()
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
+    def event_to_list(self, club_id: int, event_id: int) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/{club_id}/events/{event_id}/to-list/",
+            json={}, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json() if resp.content else {}
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
+    def club_list(self, club_id: int) -> dict:
+        resp = self.session.get(
+            f"{self.base_url}/api/clubs/{club_id}/list/", timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()
+
+    def add_club_list_item(self, club_id: int, name: str, vintage=None, producer="", wine_id=None) -> dict:
+        data = {"name": name, "producer": producer or ""}
+        if vintage is not None:
+            data["vintage"] = vintage
+        if wine_id is not None:
+            data["wine_id"] = wine_id
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/{club_id}/list/items/", json=data, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json()
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
+    def delete_club_list_item(self, club_id: int, item_id: int) -> dict:
+        resp = self.session.delete(
+            f"{self.base_url}/api/clubs/{club_id}/list/items/{item_id}/", timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json() if resp.content else {"status": "deleted"}
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
+    def list_tasteoffs(self, club_id: int) -> dict:
+        resp = self.session.get(
+            f"{self.base_url}/api/clubs/{club_id}/tasteoffs/", timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()
+
+    def create_tasteoff(self, club_id: int, title: str) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/{club_id}/tasteoffs/",
+            json={"title": title}, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json()
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
+    def get_tasteoff(self, club_id: int, tid: int) -> dict:
+        resp = self.session.get(
+            f"{self.base_url}/api/clubs/{club_id}/tasteoffs/{tid}/", timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()
+
+    def add_tasteoff_bottle(self, club_id: int, tid: int, label: str, wine_id=None) -> dict:
+        data = {"label": label}
+        if wine_id is not None:
+            data["wine_id"] = wine_id
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/{club_id}/tasteoffs/{tid}/bottles/",
+            json=data, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json()
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
+    def delete_tasteoff_bottle(self, club_id: int, tid: int, bid: int) -> dict:
+        resp = self.session.delete(
+            f"{self.base_url}/api/clubs/{club_id}/tasteoffs/{tid}/bottles/{bid}/",
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json() if resp.content else {"status": "deleted"}
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
+    def open_tasteoff(self, club_id: int, tid: int) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/{club_id}/tasteoffs/{tid}/open/",
+            json={}, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json()
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
+    def score_tasteoff(self, club_id: int, tid: int, bottle_id: int, score: int) -> dict:
+        resp = self.session.patch(
+            f"{self.base_url}/api/clubs/{club_id}/tasteoffs/{tid}/scores/",
+            json={"bottle_id": bottle_id, "score": score}, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json()
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
+    def close_tasteoff(self, club_id: int, tid: int) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/{club_id}/tasteoffs/{tid}/close/",
+            json={}, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json()
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body

@@ -4,6 +4,8 @@ The scanner service has its own copy.py; gunicorn/celery must not import it.
 Keep keys in sync when adding a server-sent club message.
 """
 
+import html
+
 MESSAGES = {
     "en": {
         "club.feed.opened": "{name} opened a {vintage} {wine}",
@@ -43,6 +45,17 @@ MESSAGES = {
         "club.end.expired": "Not everyone voted in time. {club} stays.",
         "club.end.cancelled": "Cancelled. {club} stays.",
         "club.end.cancel": "Cancel vote",
+        "club.comment.btn": "Say something",
+        "club.comment.more": "and {n} more",
+        "club.td.btn": "To-drink list",
+        "club.to.running": (
+            "{host} is running a taste-off: {title}. Score 1–5."
+        ),
+        "club.to.closed": "Tasting closed.",
+        "club.to.score": "How was it? 1 (low) – 5 (high)",
+        "club.to.n_scores": "{n} scores",
+        "club.to.close": "Close tasting",
+        "club.to.host_open": "Scoring is open. Close when you're done.",
     },
     "af": {
         "club.feed.opened": "{name} het 'n {vintage} {wine} oopgemaak",
@@ -82,6 +95,17 @@ MESSAGES = {
         "club.end.expired": "Nie almal het betyds gestem nie. {club} bly.",
         "club.end.cancelled": "Gekanselleer. {club} bly.",
         "club.end.cancel": "Kanselleer stemming",
+        "club.comment.btn": "Sê iets",
+        "club.comment.more": "en nog {n}",
+        "club.td.btn": "To-drink-lys",
+        "club.to.running": (
+            "{host} hou 'n proe: {title}. Tel 1–5."
+        ),
+        "club.to.closed": "Proe is afgesluit.",
+        "club.to.score": "Hoe was dit? 1 (swak) – 5 (sterk)",
+        "club.to.n_scores": "{n} tellings",
+        "club.to.close": "Sluit die proe",
+        "club.to.host_open": "Telling is oop. Sluit as julle klaar is.",
     },
 }
 
@@ -139,3 +163,32 @@ def put_back_text(locale, actor_name, vintage, wine_name) -> str:
         name=actor_name, vintage="", wine=phrase,
     )
     return " ".join(body.split())
+
+
+def comment_card_text(locale, actor_name, vintage, wine_name, vote, comments) -> str:
+    """Opened card plus up to 5 escaped comments. `comments` is [(name, text), ...]."""
+    head = opened_text(locale, actor_name, vintage, wine_name, vote)
+    if not comments:
+        return head
+    lines = [head, ""]
+    shown = list(comments)[:5]
+    for name, text in shown:
+        who = html.escape(name or "")
+        note = html.escape(text or "")
+        lines.append(f"{who}: {note}")
+    extra = len(comments) - 5
+    if extra > 0:
+        lines.append(t(locale, "club.comment.more", n=extra))
+    return "\n".join(lines)
+
+
+def trophy_text(locale, title, rankings) -> str:
+    lines = [f"\U0001F3C6 {html.escape(title or '')}", ""]
+    for index, row in enumerate(rankings or [], 1):
+        average = row.get("average")
+        avg_s = f"{average:.1f}" if isinstance(average, (int, float)) else "—"
+        n = row.get("n") or 0
+        label = html.escape(row.get("label") or "")
+        scores = t(locale, "club.to.n_scores", n=n)
+        lines.append(f"{index}. {label} — {avg_s} ({scores})")
+    return "\n".join(lines)

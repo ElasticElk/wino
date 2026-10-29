@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 
 from celery import shared_task
 from django.contrib.auth import get_user_model
@@ -10,18 +11,22 @@ from django.db import IntegrityError
 from django.utils import timezone
 
 from wine_cellar.apps.club.copy import (
+    comment_card_text,
     locale_for_user,
     opened_text,
     put_back_text,
     t,
+    trophy_text,
 )
 from wine_cellar.apps.club.dates import format_until
 from wine_cellar.apps.club.models import (
+    Club,
     ClubDismantleBallot,
     ClubDismantleVote,
     ClubEvent,
     ClubEventDelivery,
     ClubMembership,
+    TasteOff,
 )
 from wine_cellar.apps.scanner.flags import flag_on
 from wine_cellar.apps.scanner.models import Household, TelegramUser
@@ -60,6 +65,29 @@ def _send(
         reply_markup=reply_markup,
         message_id=message_id,
     )
+
+
+def _opened_markup(event, loc):
+    if event.kind != ClubEvent.KIND_OPENED or event.retracted:
+        return None
+    row = []
+    if flag_on("feature_club_comments"):
+        row.append(
+            {
+                "text": t(loc, "club.comment.btn"),
+                "callback_data": f"cl:cm:{event.id}",
+            }
+        )
+    if flag_on("feature_lists"):
+        row.append(
+            {
+                "text": t(loc, "club.td.btn"),
+                "callback_data": f"cl:td:{event.id}",
+            }
+        )
+    if not row:
+        return None
+    return {"inline_keyboard": [row]}
 
 
 @shared_task(name="publish_club_event")
@@ -152,6 +180,8 @@ def deliver_club_event(event_id):
     )
     if event is None:
         return
+    if event.kind in (ClubEvent.KIND_TASTEOFF, ClubEvent.KIND_COMMENT):
+        return
     token = _bot_token()
     if not token:
         logger.warning("deliver_club_event: bot_token missing")
@@ -176,6 +206,7 @@ def deliver_club_event(event_id):
                 from wine_cellar.apps.club.services import display_name
 
                 actor = display_name(event.actor)
+            markup = None
             if event.kind == ClubEvent.KIND_JOINED:
                 text = t(loc, "club.feed.joined", name=actor)
             elif event.retracted:
@@ -184,6 +215,7 @@ def deliver_club_event(event_id):
                 text = opened_text(
                     loc, actor, event.vintage, event.wine_name, event.vote,
                 )
+                markup = _opened_markup(event, loc)
             delivery = ClubEventDelivery.objects.filter(
                 event=event, chat_id=tu.chat_id,
             ).first()
@@ -191,6 +223,7 @@ def deliver_club_event(event_id):
             result = _send(
                 token, tu.chat_id, text,
                 purpose="club_event",
+                reply_markup=markup,
                 message_id=message_id,
             )
             error = ""
@@ -470,3 +503,174 @@ def expire_dismantle_votes():
 
     for vote in open_votes:
         resolve_dismantle(vote, ClubDismantleVote.STATUS_EXPIRED)
+
+
+def _comment_pairs(event):
+    from wine_cellar.apps.club.services import display_name
+
+    pairs = []
+    for comment in event.comments.select_related("user"):
+        name = display_name(comment.user) if comment.user_id else ""
+        pairs.append((name, comment.text))
+    return pairs
+
+
+@shared_task(name="refresh_event_comment_card")
+def refresh_event_comment_card(event_id):
+    if not flag_on("feature_clubs") or not flag_on("feature_club_comments"):
+        return
+    event = (
+        ClubEvent.objects.select_related("club", "actor")
+        .filter(id=event_id)
+        .first()
+    )
+    if event is None or event.retracted:
+        return
+    comments = _comment_pairs(event)
+    if len(comments) > 3:
+        return
+    token = _bot_token()
+    if not token:
+        return
+    from wine_cellar.apps.club.services import display_name
+
+    actor = display_name(event.actor) if event.actor_id else ""
+    for delivery in event.deliveries.exclude(message_id__isnull=True):
+        tu = TelegramUser.objects.filter(
+            chat_id=delivery.chat_id, is_active=True,
+        ).select_related("user").first()
+        loc = locale_for_user(tu.user) if tu is not None else "en"
+        text = comment_card_text(
+            loc, actor, event.vintage, event.wine_name, event.vote, comments,
+        )
+        markup = _opened_markup(event, loc)
+        _send(
+            token, delivery.chat_id, text,
+            purpose="club_comment",
+            reply_markup=markup,
+            message_id=delivery.message_id,
+        )
+
+
+def _score_markup(tasteoff, loc):
+    keyboard = []
+    for bottle in tasteoff.bottles.all():
+        row = []
+        for score in range(1, 6):
+            label = str(score)
+            if score == 1:
+                label = f"1 · {(bottle.label or 'wine')[:28]}"
+            row.append(
+                {
+                    "text": label,
+                    "callback_data": f"cl:ts:{tasteoff.id}:{bottle.id}:{score}",
+                }
+            )
+        keyboard.append(row)
+    return {"inline_keyboard": keyboard} if keyboard else None
+
+
+@shared_task(name="deliver_tasteoff_open")
+def deliver_tasteoff_open(tasteoff_id):
+    if not flag_on("feature_tasteoffs"):
+        return
+    tasteoff = (
+        TasteOff.objects.select_related("club", "host")
+        .prefetch_related("bottles")
+        .filter(id=tasteoff_id)
+        .first()
+    )
+    if tasteoff is None or tasteoff.status != TasteOff.STATUS_SCORING:
+        return
+    token = _bot_token()
+    if not token:
+        logger.warning("deliver_tasteoff_open: bot_token missing")
+        return
+    from wine_cellar.apps.club.services import display_name
+
+    host_name = display_name(tasteoff.host) if tasteoff.host_id else ""
+    host_chats = _actor_chats(tasteoff.host_id) if tasteoff.host_id else set()
+    members = (
+        ClubMembership.objects.filter(club=tasteoff.club, feed_muted=False)
+        .select_related("user")
+    )
+    seen = set()
+    for membership in members:
+        for tu in TelegramUser.objects.filter(user=membership.user, is_active=True):
+            if tu.chat_id in seen:
+                continue
+            seen.add(tu.chat_id)
+            loc = locale_for_user(membership.user)
+            if tu.chat_id in host_chats:
+                markup = {
+                    "inline_keyboard": [[
+                        {
+                            "text": t(loc, "club.to.close"),
+                            "callback_data": f"cl:tc:{tasteoff.id}",
+                        },
+                    ]],
+                }
+                _send(
+                    token, tu.chat_id, t(loc, "club.to.host_open"),
+                    purpose="tasteoff_host",
+                    reply_markup=markup,
+                )
+                continue
+            text = t(
+                loc, "club.to.running",
+                host=host_name, title=tasteoff.title,
+            )
+            _send(
+                token, tu.chat_id, text,
+                purpose="tasteoff_open",
+                reply_markup=_score_markup(tasteoff, loc),
+            )
+
+
+@shared_task(name="deliver_tasteoff_closed")
+def deliver_tasteoff_closed(tasteoff_id):
+    if not flag_on("feature_tasteoffs"):
+        return
+    tasteoff = (
+        TasteOff.objects.select_related("club", "host")
+        .filter(id=tasteoff_id)
+        .first()
+    )
+    if tasteoff is None:
+        return
+    token = _bot_token()
+    if not token:
+        logger.warning("deliver_tasteoff_closed: bot_token missing")
+        return
+    event = (
+        ClubEvent.objects.filter(
+            club=tasteoff.club, kind=ClubEvent.KIND_TASTEOFF, wine_name=tasteoff.title,
+        )
+        .order_by("-created")
+        .first()
+    )
+    rankings = (event.payload or {}).get("rankings") if event else []
+    members = ClubMembership.objects.filter(
+        club=tasteoff.club, feed_muted=False,
+    ).select_related("user")
+    seen = set()
+    for membership in members:
+        for tu in TelegramUser.objects.filter(user=membership.user, is_active=True):
+            if tu.chat_id in seen:
+                continue
+            seen.add(tu.chat_id)
+            loc = locale_for_user(membership.user)
+            text = trophy_text(loc, tasteoff.title, rankings)
+            _send(token, tu.chat_id, text, purpose="tasteoff_closed")
+
+
+@shared_task(name="close_stale_tasteoffs")
+def close_stale_tasteoffs():
+    cutoff = timezone.now() - timedelta(days=7)
+    stale = TasteOff.objects.filter(
+        status=TasteOff.STATUS_SCORING, opened_at__lte=cutoff,
+    )
+    from wine_cellar.apps.club.services import close_tasteoff
+
+    for tasteoff in stale:
+        close_tasteoff(tasteoff)

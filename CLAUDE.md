@@ -31,8 +31,8 @@ start.sh / stop.sh    # Service orchestration
 - `Scanner` — Registered barcode devices with API keys + notify_users M2M
 - `TelegramUser` — Links Django users to Telegram chat IDs
 - `ServiceConfig` — Key-value config store (bot_token, grok_api_key, web_url, `feature_lists` / `feature_clubs` / …)
-- `WineList` / `WineListItem` — Personal To-drink list (**user-scoped**, not household). Club lists come in a later phase.
-- `Club` / `ClubMembership` / `ClubInvite` / `ClubEvent` — Private wine clubs (own app `wine_cellar.apps.club`). Sharing policy is club-wide. Flag `feature_clubs`.
+- `WineList` / `WineListItem` — Personal To-drink list (**user-scoped**, not household). Club lists (`kind=club`, `owner` null, FK to `Club`) share a names-only checklist. Flag `feature_lists` (club lists also need `feature_clubs`).
+- `Club` / `ClubMembership` / `ClubInvite` / `ClubEvent` / `ClubComment` / `TasteOff` — Private wine clubs (own app `wine_cellar.apps.club`). Sharing policy is club-wide. Flag `feature_clubs`. Comments `feature_club_comments`; taste-offs `feature_tasteoffs`.
 
 ### REST API (`/api/`)
 Auth: `Authorization: Token <token>` header. Optional `X-Household: <id>` header.
@@ -82,6 +82,10 @@ Auth: `Authorization: Token <token>` header. Optional `X-Household: <id>` header
 - `GET /api/clubs/<id>/members/<user_id>/cellar/` — Peek (summary/full). Forbidden: prices, drawers, notes, barcodes, critic/Vivino
 - `POST /api/scanner/club-invites/redeem/` — Staff. Compound: new cellar + club membership in one call. 409 `dismantle_in_progress` while a unanimous end-vote is open
 - `POST /api/scanner/invites/preview/` — Household invite first, then club invite (`kind=club`)
+- `GET/POST /api/clubs/<id>/events/<event_id>/comments/` — Club-visible notes, max 280. Flag `feature_club_comments`. 409 `retracted`
+- `POST /api/clubs/<id>/events/<event_id>/to-list/` — Snapshot onto the **caller's** personal To-drink list (`source=club_feed`). No `wine_id` of the actor's bottle. Flag `feature_lists`
+- `GET/POST /api/clubs/<id>/list/` and `.../list/items/` — Shared club checklist (names/vintages only). Delete if owner or `added_by`
+- `POST /api/clubs/<id>/tasteoffs/` — Setup a scored tasting (1–5, not `Wine.rating`). One setup/scoring flight per club. Flag `feature_tasteoffs`. Host or owner may close; beat auto-closes after 7 days
 
 ### Frontend
 - **Templates:** `wine_cellar/templates/` — Django templates with `base.html` layout
@@ -119,7 +123,7 @@ Bridges physical barcode scanners to the Wine Cellar API. Runs as FastAPI server
 - `integrations/wine_cellar_api.py` — HTTP client for Wine Cellar REST API
 - `integrations/telegram_bot.py` — Telegram bot (notifications, photos, disambiguation, household switching)
 - `integrations/telegram_lists.py` — `/list` To-drink flow and label-card `td` button
-- `integrations/telegram_clubs.py` — `/club` found/invite/join/home/peek/mute/leave/dismantle; `/start` club codes
+- `integrations/telegram_clubs.py` — `/club` found/invite/join/home/peek/mute/leave/dismantle; `/club list`; `/club tasteoff`; feed `Say something` / `To-drink list`; `/start` club codes
 - `integrations/copy.py` — EN/AF dialogue catalog (menus stay English)
 - `integrations/telegram_catchup.py` — `/fridge` Catch up drawer walk (staged Drunk/Moved, bulk apply)
 - `integrations/grok_vision.py` — xAI Grok Vision for label analysis
@@ -163,7 +167,7 @@ Callers POST to queue, then poll the same URL with `?task_id=`. The Telegram cli
 ## Key Config Files
 - `wine-cellar/wine_cellar/conf/settings.py` — Base Django settings
 - `wine-cellar/wine_cellar/conf/docker_settings.py` — Docker/prod overrides (env vars)
-- `wine-cellar/wine_cellar/conf/celery.py` — Celery + beat schedule (drink_by_reminder at 2:30 AM daily)
+- `wine-cellar/wine_cellar/conf/celery.py` — Celery + beat schedule (drink_by_reminder at 2:30 AM daily; expire_dismantle_votes every 15 min; close_stale_tasteoffs at 03:15)
 - `scanner-service/config.yaml` — Scanner bootstrap config
 - `wine-cellar/pyproject.toml` — Project metadata, deps, test config (AGPL-3.0 license)
 
@@ -194,7 +198,7 @@ Available to authorized users via the bot:
 - `/fridge` — Browse fridge contents. **Catch up** walks one drawer: tap Drunk / Moved (1 or both), then Apply. Empty here means those bottles moved, not drunk. One Undo. Not a new slash command. Buttons carry `wine_id` / `item_id`, never a list position (the list shrinks per tap, so an index would hit another wine). Bottles with no drawer (fridge `+` adds them so) get a *No drawer* bucket. A move may be *Not sure which drawer* (row null). Undo carries its batch id, so it still works after a new Catch up. Stale Apply keeps the changes that are still valid and drops the rest.
 - `/recent` — Recent bottles (notes + label photo, pages of 5)
 - `/list` — Personal To-drink list (bottles you don't own yet). **User-scoped** — a household partner does not see it. Gated on `ServiceConfig.feature_lists`. Move to cellar writes stock on the current household. Not created on new-cellar redeem; first `/list` or first add creates the default list.
-- `/club` — Private wine clubs (own cellar each, automatic drink feed, club-wide peek). Gated on `ServiceConfig.feature_clubs`. `/club invite` is social; `/invite` stays cellar. Default policy is full cellar + badges. Owner widen asks Stay/Leave. Last member leave deletes the club; owner can propose a unanimous 48h dismantle instead.
+- `/club` — Private wine clubs (own cellar each, automatic drink feed, club-wide peek). Gated on `ServiceConfig.feature_clubs`. `/club invite` is social; `/invite` stays cellar. Default policy is full cellar + badges. Owner widen asks Stay/Leave. Last member leave deletes the club; owner can propose a unanimous 48h dismantle instead. `/club list` is a shared names-only checklist (`feature_lists`). `/club tasteoff` is a 1–5 scored flight (`feature_tasteoffs`) that does not write `Wine.rating` or stock votes. Feed cards gain **Say something** (`feature_club_comments`, 280 chars) and **To-drink list** (caller's personal list, `source=club_feed`).
 - `/help` — List available commands
 - `/pending` — Show barcodes awaiting label photos
 - `/flush` — Clear pending barcodes
