@@ -92,6 +92,7 @@ def test_parse_sends_model_schema_and_temperature_zero():
     assert schema["strict"] is True
     assert "intent" in schema["schema"]["properties"]
     assert "help" in schema["schema"]["properties"]["intent"]["enum"]
+    assert "drink" in schema["schema"]["properties"]["intent"]["enum"]
     assert "help_topic" in schema["schema"]["properties"]
     assert seen["timeout"] == PARSE_TIMEOUT
 
