@@ -5089,7 +5089,7 @@ class TelegramBotHandler:
             except Exception as e:
                 logger.info(f"[callback] answer() failed (likely a stale button): {e}")
 
-        if action in ("cf", "cc", "cq", "ck", "cn", "co", "cx", "cr", "cw"):
+        if action in ("cf", "cc", "cq", "ck", "cn", "co", "cx", "cr", "cw", "cg", "cm", "ca"):
             router = getattr(self, "_router", None)
             if router is None:
                 await query.message.reply_text("That's finished — just type again.")

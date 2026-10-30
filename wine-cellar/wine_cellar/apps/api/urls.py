@@ -117,6 +117,7 @@ urlpatterns = [
         name="api-list-item-to-cellar",
     ),
     path("clubs/", club_views.ClubCollectionView.as_view(), name="api-clubs"),
+    path("clubs/ask/", club_views.ClubAskView.as_view(), name="api-clubs-ask"),
     path(
         "clubs/global/",
         global_views.GlobalClubCreateView.as_view(),

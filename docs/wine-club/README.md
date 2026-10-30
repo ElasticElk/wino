@@ -229,7 +229,7 @@ Never Telegram I/O in gunicorn. Retry Telegram 429 once with backoff; store `err
 
 ## Natural language chat
 
-Do **not** route “what did Riley open?” or “add this to my list” through `ChatRouter` in these phases. Parser + `cellar_facts` are household-scoped. `/club` and `/list` are the interface so we don’t invent commands in `wine_chat`. A later PR can add `club` / `list` intents; it is not in 0–4.
+`ChatRouter` has a `club` intent (parser + `POST /api/clubs/ask/`). Slash commands stay. With `feature_clubs` off, typed chat is unchanged and never mentions clubs. Sub-features (`feature_lists`, `feature_club_comments`, `feature_tasteoffs`, `feature_global_clubs`) likewise fall back to the previous path when off. Privacy is enforced in Django, not only in the bot. Example names in copy and tests: Riley, Sam, Lee, Pat. Example club: Thursday reds.
 
 ## Risks
 

@@ -39,7 +39,12 @@ TYPE_TO_WORD = {code: word for word, code in COLOUR_TO_TYPE.items()}
 
 INTENTS = {
     "fact", "recommend", "price", "correct", "answer", "wine_chat", "place", "help",
-    "offtopic", "search", "unsure", "drink",
+    "offtopic", "search", "unsure", "drink", "club",
+}
+CLUB_KINDS = {
+    "none", "members", "my_clubs", "cellar", "who_has", "oldest", "feed",
+    "top_rated", "who_drinks", "avg_rating", "tasteoff", "badges",
+    "badge_progress", "list", "comments",
 }
 HELP_TOPICS = {
     "invite", "new_cellar", "switch", "photo", "take_out", "commands", "other",
@@ -69,6 +74,7 @@ intent:
 - answer: only when context.open_question is set and the message answers it. Set answer_index if it matches one of context.options (0-based), else null.
 - search: a wine name or producer on its own.
 - unsure: anything else.
+{club_block}
 
 Rules:
 - country_code is ISO 3166 alpha-2 ("South Africa", "the Cape" -> "ZA").
@@ -110,7 +116,7 @@ Facts:
 - /help lists commands. /search finds a name. /stock /recent /status /storages are browsing.
 - Badges are cellar challenges; owners can turn them off with /badges.
 - If something is stuck or odd: screenshot and send it to whoever set Whiney up.
-{staff_line}"""
+{club_facts}{staff_line}"""
 
 
 WINE_CHAT_PROMPT = """You are Whiney, a friendly sommelier in a Telegram chat. Answer the wine, drink or food-pairing question in at most 90 words of plain text, no markdown or headings.
@@ -157,6 +163,80 @@ def _enum(values: set[str]) -> dict:
     return {"type": "string", "enum": sorted(values)}
 
 
+def parse_prompt(features: dict | None) -> str:
+    return PARSE_PROMPT.replace("{club_block}", _club_parse_block(features or {}))
+
+
+def _club_parse_block(features: dict) -> str:
+    if not features.get("clubs"):
+        return ""
+    kinds = [
+        "members", "my_clubs", "cellar", "who_has", "oldest", "feed",
+        "top_rated", "who_drinks", "avg_rating", "badges", "badge_progress",
+    ]
+    extras = []
+    if features.get("tasteoffs"):
+        kinds.append("tasteoff")
+        extras.append("taste-offs")
+    if features.get("lists"):
+        kinds.append("list")
+        extras.append("a to-drink list")
+    if features.get("comments"):
+        kinds.append("comments")
+        extras.append("comments on a bottle")
+    extra = (", " + ", ".join(extras)) if extras else ""
+    return (
+        "- club: a question about a wine club they belong to — other members' "
+        "cellars (\"how many Merlots does Sam have?\", \"who has a 2015 Barolo?\", "
+        "\"oldest bottle in the club\"), what the club opened (\"what did Riley drink "
+        f"this week?\"), votes in the club, who is in a club, what clubs they are in, badges{extra}. Not "
+        "bottles in their own fridge (that is fact) and not a pick from their own "
+        "cellar (that is recommend).\n"
+        "  Set club.kind to one of: "
+        + ", ".join(kinds)
+        + ".\n"
+        "  member_name is the person they named, else empty. club_name is the club "
+        "they named, else empty. wine_text is the wine words they used. grape is a "
+        "grape they named. vintage is a year they said, else null. period is week, "
+        "month, lately, or empty. when is next, last, a weekday, or empty."
+    )
+
+
+def _blank_club() -> dict:
+    return {
+        "kind": "none",
+        "member_name": "",
+        "club_name": "",
+        "wine_text": "",
+        "grape": "",
+        "vintage": None,
+        "period": "",
+        "when": "",
+    }
+
+
+def club_support_facts(features: dict | None) -> str:
+    features = features or {}
+    if not features.get("clubs"):
+        return ""
+    lines = [
+        "- Wine clubs: /club. They can also ask in plain language who is in a club, "
+        "what the club opened, or what a member has if the club shares cellars.",
+    ]
+    if features.get("lists"):
+        lines.append(
+            "- To-drink lists: /list is personal. A club shared list is /club list. "
+            "Another person's personal list stays private."
+        )
+    if features.get("tasteoffs"):
+        lines.append("- Taste-offs: /club tasteoff. They can ask who won or when the next one is.")
+    if features.get("comments"):
+        lines.append("- Club comments: they can ask what people said about a bottle the club opened.")
+    if features.get("global_clubs"):
+        lines.append("- Clubs for everyone: /club discover. Those clubs never share cellars.")
+    return "\n".join(lines) + "\n"
+
+
 def parse_schema() -> dict:
     fact = _obj({
         "kind": _enum(FACT_KINDS),
@@ -180,6 +260,16 @@ def parse_schema() -> dict:
         "grape": _string(),
         "country_code": _string(),
     })
+    club = _obj({
+        "kind": _enum(CLUB_KINDS),
+        "member_name": _string(),
+        "club_name": _string(),
+        "wine_text": _string(),
+        "grape": _string(),
+        "vintage": _nullable_int(),
+        "period": _string(),
+        "when": _string(),
+    })
     return _obj({
         "intent": _enum(INTENTS),
         "fact": fact,
@@ -190,6 +280,7 @@ def parse_schema() -> dict:
         "answer_index": _nullable_int(),
         "area": _string(),
         "help_topic": _enum(HELP_TOPICS),
+        "club": club,
     })
 
 
@@ -466,10 +557,11 @@ class ChatModels:
             return data
 
     def parse(self, text: str, context: dict) -> dict:
+        features = (context or {}).get("features") if isinstance(context, dict) else {}
         data = self._call(
             PARSE_MODEL,
             [
-                {"role": "system", "content": PARSE_PROMPT},
+                {"role": "system", "content": parse_prompt(features or {})},
                 {"role": "user", "content": json.dumps({"text": text, "context": context}, default=str)},
             ],
             "whiney_parse",
@@ -534,7 +626,8 @@ class ChatModels:
             raise ChatFailure("bad_output", "empty reply")
         return reply[:1200]
 
-    def support(self, sentence: str, *, staff: bool = False, household_id: int | None = None) -> str:
+    def support(self, sentence: str, *, staff: bool = False, household_id: int | None = None,
+                features: dict | None = None) -> str:
         staff_line = (
             "- This person is staff: they have /newcellar, /chatstats and /admin."
             if staff else
@@ -543,7 +636,9 @@ class ChatModels:
         data = self._call(
             PARSE_MODEL,
             [
-                {"role": "system", "content": SUPPORT_PROMPT.format(staff_line=staff_line)},
+                {"role": "system", "content": SUPPORT_PROMPT.format(
+                    staff_line=staff_line, club_facts=club_support_facts(features),
+                )},
                 {"role": "user", "content": sentence},
             ],
             "whiney_support",
@@ -717,6 +812,12 @@ def _validate_parse(data: dict) -> dict:
     data.setdefault("area", "")
     topic = data.get("help_topic") or "other"
     data["help_topic"] = topic if topic in HELP_TOPICS else "other"
+    club = data.get("club") if isinstance(data.get("club"), dict) else _blank_club()
+    blank = _blank_club()
+    blank.update({k: club.get(k, blank[k]) for k in blank})
+    kind = blank.get("kind") or "none"
+    blank["kind"] = kind if kind in CLUB_KINDS else "none"
+    data["club"] = blank
     return data
 
 

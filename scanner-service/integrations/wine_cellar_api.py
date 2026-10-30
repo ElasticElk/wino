@@ -726,6 +726,19 @@ class WineCellarAPI:
             body["status_code"] = resp.status_code
         return body
 
+    def club_ask(self, payload: dict) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/ask/",
+            json=payload or {},
+            timeout=15,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json() if resp.content else {}
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
     def list_clubs(self) -> dict:
         resp = self.session.get(f"{self.base_url}/api/clubs/", timeout=10)
         if resp.status_code >= 400:

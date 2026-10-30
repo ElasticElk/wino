@@ -33,6 +33,7 @@ from wine_cellar.apps.club.peek import (
     peek_summary,
     tighter_visibility,
 )
+from wine_cellar.apps.club.ask import answer_club_ask
 from wine_cellar.apps.club.services import (
     add_member,
     apply_policy,
@@ -109,6 +110,14 @@ def _member_or_404(request, club_id):
 def lock_club_invite_qs(code):
     """Lock the invite row only. Do not join club under FOR UPDATE."""
     return ClubInvite.objects.select_for_update().filter(code=code)
+
+
+class ClubAskView(ClubsEnabledMixin, ScannerAPIView):
+    """Typed club questions. Privacy is enforced in `club.ask`, not the bot."""
+
+    def post(self, request):
+        data = request.data if isinstance(request.data, dict) else {}
+        return Response(answer_club_ask(request.user, data))
 
 
 class ClubCollectionView(ClubsEnabledMixin, ScannerAPIView):
