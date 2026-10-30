@@ -37,7 +37,13 @@ def _response(content, status=200, headers=None):
 
 def _parse_body():
     return {
-        "intent": "fact",
+        "intent": "cellar_query",
+        "confidence": 0.92,
+        "slots": {
+            "wine": "", "producer": "", "appellation": "", "vintage": None,
+            "colour": "", "grape": "", "person": "", "club": "",
+            "location": "small fridge", "quantity": None,
+        },
         "fact": {
             "kind": "drawer", "storage_text": "small fridge",
             "drawer": 3, "country_code": "", "grape": "",
@@ -51,6 +57,15 @@ def _parse_body():
             "name": "", "producer": "", "vintage": None, "grape": "", "country_code": "",
         },
         "answer_index": None,
+        "area": "",
+        "help_topic": "other",
+        "club": {
+            "kind": "none", "member_name": "", "club_name": "", "wine_text": "",
+            "grape": "", "vintage": None, "period": "", "when": "",
+        },
+        "list_op": "none",
+        "unknown_kind": "none",
+        "language": "en",
     }
 
 
@@ -91,11 +106,22 @@ def test_parse_sends_model_schema_and_temperature_zero():
     schema = seen["json"]["response_format"]["json_schema"]
     assert schema["strict"] is True
     assert "intent" in schema["schema"]["properties"]
-    assert "help" in schema["schema"]["properties"]["intent"]["enum"]
-    assert "drink" in schema["schema"]["properties"]["intent"]["enum"]
-    assert "club" in schema["schema"]["properties"]["intent"]["enum"]
-    assert "help_topic" in schema["schema"]["properties"]
-    assert "club" in schema["schema"]["properties"]
+    props = schema["schema"]["properties"]
+    intents = props["intent"]["enum"]
+    for name in (
+        "cellar_query", "club_query", "drink_remove", "add_wine", "search",
+        "recommend", "list_action", "smalltalk_help", "unknown",
+    ):
+        assert name in intents
+    assert "confidence" in props
+    assert "slots" in props
+    for slot in (
+        "wine", "producer", "appellation", "vintage", "colour", "grape",
+        "person", "club", "location", "quantity",
+    ):
+        assert slot in props["slots"]["properties"]
+    assert "help_topic" in props
+    assert "club" in props
     assert seen["timeout"] == PARSE_TIMEOUT
 
 
@@ -175,13 +201,31 @@ def test_support_sends_the_manual_and_replies_in_the_payload():
     assert "moet my vrou" in seen["messages"][1]["content"]
 
 
+def test_chat_models_has_no_phrase_step():
+    assert not hasattr(ChatModels, "phrase")
+
+
 def test_parse_returns_dict_on_valid_json():
     def post(url, headers, json, timeout):
         return _response(_parse_body())
 
     data = _models(post).parse("list my wines", {})
-    assert data["intent"] == "fact"
+    assert data["intent"] == "cellar_query"
     assert data["fact"]["drawer"] == 3
+    assert data["confidence"] == 0.92
+
+
+def test_parse_offtopic_alias_sets_unknown_kind():
+    body = _parse_body()
+    body["intent"] = "offtopic"
+
+    def post(url, headers, json, timeout):
+        return _response(body)
+
+    data = _models(post).parse("how high do planes fly?", {})
+    assert data["intent"] == "unknown"
+    assert data["unknown_kind"] == "offtopic"
+    assert data["raw_intent"] == "offtopic"
 
 
 @pytest.mark.parametrize("boom,kind", [
@@ -257,7 +301,7 @@ def test_429_with_short_retry_after_retries_once_then_succeeds():
 
     slept = []
     data = _models(post, sleep=slept.append).parse("list them", {})
-    assert data["intent"] == "fact"
+    assert data["intent"] == "cellar_query"
     assert calls["n"] == 2
     assert slept == [1.0]
 
@@ -297,7 +341,7 @@ def test_breaker_probes_after_cooldown_and_closes_on_success():
             chat.parse("sentence one two", {})
     clock["t"] = 120.0
     data = chat.parse("sentence one two", {})
-    assert data["intent"] == "fact"
+    assert data["intent"] == "cellar_query"
     assert chat.healthy(PARSE_MODEL) is True
     chat.parse("sentence one two", {})
     assert calls["n"] == 5

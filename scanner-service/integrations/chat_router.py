@@ -21,76 +21,46 @@ from telegram.error import BadRequest
 from integrations.card_store import StoreError
 from integrations.cellar_facts import answer as answer_fact
 from integrations.cellar_facts import quick_pick
+from integrations.chat_intent import (
+    canonical_parse,
+    gated_flag,
+    needs_clarification,
+    note_turn,
+    slot_summary,
+    turn_pacer,
+)
 from integrations.chat_models import (
     PARSE_MODEL,
     RECOMMEND_MODEL,
     ChatFailure,
     compact_cellar,
 )
+from integrations.copy import sniff_locale
+from integrations.copy import t as copy_t
 
 logger = logging.getLogger(__name__)
 
-CHAT_ACTIONS = {"cf", "cc", "cq", "ck", "cn", "co", "cx", "cr", "cw", "cg", "cm", "ca"}
+CHAT_ACTIONS = {
+    "cf", "cc", "cq", "ck", "cn", "co", "cx", "cr", "cw", "cg", "cm", "ca",
+    "ct", "cp", "cl",
+}
 
-CHAT_RESTING = (
-    "💤 My chat side is having a rest for a moment. Everything else still works: "
-    "/stock, /fridge, or type a wine name to search. Try me again in a minute."
-)
-REC_SLOW = "⏳ That took longer than it should. Want me to try again?"
-REC_QUICK = "🍷 My sommelier brain is offline, so here's a quick pick from your cellar:"
-CELLAR_DOWN = (
-    "🍷 I can't reach your cellar right now, so I can't check the shelves. "
-    "Give it a minute and tap Try again."
-)
-WRITE_FAILED = "Couldn't save that just now, and nothing was changed. Tap Try again."
-WINE_GONE = "That wine isn't in your cellar any more."
-WRITE_REJECTED_FALLBACK = "That value didn't look right."
-ASK_LOST = "I lost track of that suggestion. Just ask me again."
-FOLLOWUP_FOOTER = "(I can't remember follow-ups right now, so just ask again for another.)"
-FINISHED = "That one's finished — just ask again."
-PLACE_ASK_LOCATION = (
-    "📍 Tap the button to share where you are and I'll find somewhere nearby "
-    "with a good wine list for your taste. Or just type a suburb or town."
-)
-PLACES_DOWN = "I couldn't search for places just now. Try again in a minute."
-PLACES_NONE = (
-    "I couldn't find anywhere there I'd vouch for. Try a nearby suburb or town."
-)
-OFF_TOPIC = (
-    "🍷 I'm only any good at wine, I'm afraid. Ask me what to open tonight, "
-    "what goes with dinner, what to order when you're out, or what's in your fridge. "
-    "Or ask how to add someone, start a cellar, or send /help."
-)
-HELP_INVITE = (
-    "To add someone to this cellar, send /invite. I'll give you a link to share. "
-    "They open it, pick a name, and they're in."
-)
-HELP_NEW_CELLAR_STAFF = (
-    "To start a new cellar, send /newcellar. I'll give you a link; they pick a name "
-    "and get their own cellar. To add someone to <i>this</i> one instead, send /invite."
-)
-HELP_NEW_CELLAR = (
-    "A new cellar needs a staff invite. If /newcellar is in your / menu, send that. "
-    "Otherwise ask whoever set Whiney up. To add someone to <i>this</i> cellar, send /invite."
-)
-HELP_SWITCH = (
-    "Send /switch to pick another cellar. /household shows which one you're on and who is in it."
-)
-HELP_PHOTO = (
-    "Just send a photo of the label, or of the barcode. No command needed. "
-    "I'll read it and you can add it."
-)
-HELP_TAKE_OUT = (
-    "Scan the bottle out, or ask me what to open, tap <i>That's the one</i>, then "
-    "<i>Take it out now</i>. After a shuffle, /fridge then Catch up walks a drawer."
-)
-HELP_COMMANDS = (
-    "Ask me what to open, what's in a fridge, or send a label photo.\n"
-    "/invite — add someone to this cellar\n"
-    "/household — who's in it\n"
-    "/switch — another cellar\n"
-    "/help — the full list"
-)
+# English fallbacks so existing tests that import PLACE_LINES keep working.
+# User-facing replies go through copy_t with the turn locale.
+CHAT_RESTING = copy_t("en", "chat.resting")
+REC_SLOW = copy_t("en", "chat.rec_slow")
+REC_QUICK = copy_t("en", "chat.rec_quick")
+CELLAR_DOWN = copy_t("en", "chat.cellar_down")
+WRITE_FAILED = copy_t("en", "chat.write_failed")
+WINE_GONE = copy_t("en", "chat.wine_gone")
+WRITE_REJECTED_FALLBACK = copy_t("en", "chat.write_rejected")
+ASK_LOST = copy_t("en", "chat.ask_lost")
+FOLLOWUP_FOOTER = copy_t("en", "chat.followup_footer")
+FINISHED = copy_t("en", "chat.finished")
+PLACE_ASK_LOCATION = copy_t("en", "chat.place.ask_location")
+PLACES_DOWN = copy_t("en", "chat.place.down")
+PLACES_NONE = copy_t("en", "chat.place.none")
+HELP_COMMANDS = copy_t("en", "chat.help.commands")
 
 PROGRESS_STEPS = (
     (1.5, "matching"),
@@ -115,6 +85,16 @@ PLACE_STEPS = tuple(
 
 def _esc(value) -> str:
     return html.escape(str(value if value is not None else ""), quote=False)
+
+
+def _place_lines(locale: str) -> tuple[str, ...]:
+    return tuple(
+        copy_t(locale, key)
+        for key in (
+            "chat.place.searching", "chat.place.reading", "chat.place.reviews",
+            "chat.place.matching", "chat.place.narrowing", "chat.place.still",
+        )
+    )
 
 
 def _tools():
@@ -257,15 +237,64 @@ class ChatRouter:
         except Exception:
             return getattr(self.handler, "api", None)
 
+    def _note(self, **kwargs) -> None:
+        meta = note_turn(**kwargs)
+        if meta is not None:
+            handler_meta = getattr(self.handler, "_text_meta", None)
+            if isinstance(handler_meta, dict):
+                handler_meta.update(kwargs)
+            return
+        meta = getattr(self.handler, "_text_meta", None)
+        if not isinstance(meta, dict):
+            meta = {}
+            self.handler._text_meta = meta
+        meta.update(kwargs)
+
+    def _min_reply_ms(self) -> int:
+        fn = getattr(self.handler, "min_reply_ms", None)
+        if callable(fn):
+            try:
+                return max(0, int(fn()))
+            except (TypeError, ValueError):
+                return 0
+        return int(getattr(self.handler, "_min_reply_ms", 0) or 0)
+
+    async def _wait_pace(self) -> None:
+        pacer = turn_pacer()
+        if pacer is None:
+            pacer = getattr(self.handler, "_text_pacer", None)
+        if pacer is not None:
+            await pacer.wait()
+
+    def _reply_locale(self, update, chat_id, parsed=None, text: str = "") -> str:
+        lang = (parsed or {}).get("language") or ""
+        if lang in ("en", "af"):
+            return lang
+        if not text:
+            message = getattr(update, "message", None)
+            text = getattr(message, "text", "") or ""
+        return sniff_locale(text, self._locale(update, chat_id))
+
+    def _c(self, locale: str, key: str, **kwargs) -> str:
+        return copy_t(locale or "en", key, **kwargs)
+
     async def handle_text(self, update, context, text: str) -> bool:
         box: dict = {}
         try:
             await self._handle_text(update, context, text, box)
         except Exception:
             logger.exception("[chat] kind=unexpected chat=%s", getattr(update.effective_chat, "id", ""))
+            self._note(outcome="unknown")
             message = box.get("placeholder")
+            if asyncio.isfuture(message) or isinstance(message, asyncio.Task):
+                try:
+                    message = await message
+                except Exception:
+                    message = None
             if message is not None:
-                await self._edit(message, CHAT_RESTING, update)
+                chat_id = str(getattr(getattr(update, "effective_chat", None), "id", "") or "")
+                locale = box.get("locale") or self._reply_locale(update, chat_id, text=text)
+                await self._edit(message, self._c(locale, "chat.resting"), update)
                 return True
             return False
         return bool(box.get("handled"))
@@ -282,7 +311,7 @@ class ChatRouter:
             cellar_down = True
             logger.warning("[chat] kind=cellar_down model=cellar chat=%s detail=%s", chat_id, exc)
             if not self._clubs_on():
-                await self._say(update, CELLAR_DOWN, self._retry_button())
+                await self._say(update, self._c(self._reply_locale(update, chat_id, text=text), "chat.cellar_down"), self._retry_button())
                 self._save(chat_id, {"retry_text": text})
                 box["handled"] = True
                 return
@@ -306,10 +335,7 @@ class ChatRouter:
             "label_card_open": bool(self._open_cards(api)),
             "features": self._chat_features(),
         }
-        try:
-            await self._typing(context, chat_id)
-        except Exception:
-            pass
+        started_classify = self._now()
 
         async def _parsed():
             try:
@@ -329,100 +355,82 @@ class ChatRouter:
             parsed, storages = await asyncio.gather(_parsed(), _storages())
         except Exception as exc:
             logger.warning("[chat] kind=cellar_down model=cellar chat=%s detail=%s", chat_id, exc)
-            await self._say(update, CELLAR_DOWN, self._retry_button())
+            locale = self._reply_locale(update, chat_id, text=text)
+            await self._say(update, self._c(locale, "chat.cellar_down"), self._retry_button())
             self._save(chat_id, {"retry_text": text})
             box["handled"] = True
             return
+        classify_ms = _ms(self._now() - started_classify) if started_classify else 0
         if isinstance(parsed, ChatFailure):
             await self._alert_staff(context, parsed, PARSE_MODEL)
+            self._note(intent="unknown", confidence="", slots="-", outcome="unknown",
+                       classify_ms=classify_ms)
             if _short_phrase(text):
                 box["handled"] = False
                 return
             logger.warning("[chat] kind=%s model=%s chat=%s", parsed.kind, PARSE_MODEL, chat_id)
-            await self._say(update, CHAT_RESTING)
+            await self._say(update, self._c(self._reply_locale(update, chat_id, text=text), "chat.resting"))
             box["handled"] = True
             return
-        intent = parsed.get("intent")
-        logger.info("[chat] parse intent=%s chat=%s text=%r", intent, chat_id, text[:60])
-        if cellar_down and intent not in ("club", "help", "offtopic", "wine_chat", "place"):
-            await self._say(update, CELLAR_DOWN, self._retry_button())
+        parsed = canonical_parse(parsed)
+        intent = parsed["intent"]
+        confidence = parsed["confidence"]
+        slots = parsed["slots"]
+        locale = self._reply_locale(update, chat_id, parsed, text)
+        box["locale"] = locale
+        self._note(
+            intent=intent, confidence=f"{confidence:.2f}", slots=slot_summary(slots),
+            classify_ms=classify_ms,
+        )
+        logger.info(
+            "[chat] parse intent=%s confidence=%.2f slots=%s",
+            intent, confidence, slot_summary(slots),
+        )
+        execute_at = self._now()
+        features = self._chat_features()
+        blocked = gated_flag(parsed, features)
+        if blocked:
+            await self._flag_off(update, chat_id, locale)
+            self._note(outcome="flag_off", execute_ms=_ms(self._now() - execute_at))
+            box["handled"] = True
+            return
+        cellar_ok_intents = {
+            "club_query", "smalltalk_help", "unknown", "wine_knowledge", "place",
+            "list_action", "add_wine",
+        }
+        if cellar_down and intent not in cellar_ok_intents:
+            await self._say(update, self._c(locale, "chat.cellar_down"), self._retry_button())
             self._save(chat_id, {"retry_text": text})
+            self._note(outcome="unknown", execute_ms=_ms(self._now() - execute_at))
             box["handled"] = True
             return
-        if intent == "club":
-            if not self._clubs_on():
-                intent = "wine_chat" if not _short_phrase(text) else "search"
-            else:
-                box["handled"] = await self._club(update, context, api, chat_id, parsed, text)
-                return
-        if intent == "offtopic":
-            await self._say(update, OFF_TOPIC)
-            box["handled"] = True
-            return
-        if intent == "help":
-            await self._help(update, context, api, chat_id, text, parsed)
-            box["handled"] = True
-            return
-        if intent == "unsure" and not _short_phrase(text):
-            intent = "wine_chat"
-        if intent in ("search", "unsure", None):
+        if intent == "search":
             box["handled"] = False
+            self._note(outcome="answered")
             return
-        if intent == "drink":
-            wine_ref = (parsed.get("wine_ref") or "").strip()
-            fact = parsed.get("fact") if isinstance(parsed.get("fact"), dict) else {}
-            location = (fact.get("storage_text") or "").strip()
-            if not wine_ref or wine_ref.casefold() in {
-                "this", "it", "that", "dit", "hierdie",
-            }:
-                box["handled"] = await self.handler._maybe_typed_stock(
-                    update, context, "Drank this",
-                )
-            else:
-                box["handled"] = await self.handler._typed_drink_named(
-                    update, context, api, None, wine_ref, location,
-                )
+        if intent == "unknown" and parsed.get("unknown_kind") != "offtopic" and _short_phrase(text):
+            box["handled"] = False
+            self._note(outcome="answered")
             return
-        if intent == "wine_chat":
-            await self._wine_chat(update, context, api, chat_id, text)
+        if intent == "unknown" and parsed.get("unknown_kind") == "offtopic":
+            await self._say(update, f"🍷 {self._c(locale, 'chat.offtopic')}", self._pipeline_markup())
+            self._note(outcome="unknown", execute_ms=_ms(self._now() - execute_at))
             box["handled"] = True
             return
-        if intent == "place":
-            await self._place(update, context, api, chat_id, text, (parsed.get("area") or "").strip())
+        if needs_clarification(parsed):
+            await self._clarify(update, chat_id, parsed, locale)
+            self._note(outcome="clarified", execute_ms=_ms(self._now() - execute_at))
             box["handled"] = True
             return
-        if intent == "fact":
-            box["handled"] = await self._fact(
-                update, context, api, chat_id, parsed, wines, storages,
-            )
-            return
-        if intent in ("recommend", "answer"):
-            if not wines:
-                await self._empty(update, api)
-                box["handled"] = True
-                return
-            placeholder = await self._placeholder(update, wines)
-            box["placeholder"] = placeholder
-            if intent == "answer" and ask.get("stage") == "question":
-                answer = _answer_text(parsed, text, ask)
-                sentence = ask.get("sentence") or text
-                taste = ask.get("taste") or parsed.get("taste") or {}
-                await self._recommend(
-                    chat_id, api, sentence, taste, placeholder, False, update, context,
-                    wines, answer=answer, ask=ask,
-                )
-            else:
-                await self._recommend(
-                    chat_id, api, text, parsed.get("taste") or {}, placeholder, True,
-                    update, context, wines,
-                )
-            box["handled"] = True
-            return
-        if intent in ("price", "correct"):
-            await self._write(update, context, api, chat_id, parsed, wines, ask)
-            box["handled"] = True
-            return
-        box["handled"] = False
+        handled = await self._execute(
+            update, context, api, chat_id, text, parsed, wines, storages, ask, box,
+            locale=locale,
+        )
+        self._note(
+            outcome=self._outcome_of(box, handled),
+            execute_ms=_ms(self._now() - execute_at),
+        )
+        box["handled"] = handled
 
     def _pending_place(self, chat_id) -> dict | None:
         try:
@@ -450,18 +458,27 @@ class ChatRouter:
             [[KeyboardButton("📍 Send my location", request_location=True)]],
             resize_keyboard=True, one_time_keyboard=True,
         )
-        await update.message.reply_text(PLACE_ASK_LOCATION, reply_markup=keyboard)
+        locale = self._reply_locale(update, chat_id, text=text)
+        await update.message.reply_text(
+            self._c(locale, "chat.place.ask_location"), reply_markup=keyboard,
+        )
 
     async def _search_places(self, update, context, api, chat_id, query, *, area="", lat=None, lon=None,
                              clear_keyboard=False):
         loop = asyncio.get_running_loop()
+        locale = self._reply_locale(update, chat_id, text=query)
+        lines = _place_lines(locale)
         if clear_keyboard:
             # Telegram won't edit a message that carries a reply-keyboard removal,
             # so it goes on its own message and the placeholder stays editable.
             from telegram import ReplyKeyboardRemove
-            got = "📍 Got your location." if lat is not None else f"📍 Got it — {area}."
+            got = (
+                self._c(locale, "chat.place.got_location")
+                if lat is not None
+                else self._c(locale, "chat.place.got_area", area=area)
+            )
             await update.message.reply_text(got, reply_markup=ReplyKeyboardRemove())
-        placeholder = await update.message.reply_text(PLACE_LINES[0])
+        placeholder = await update.message.reply_text(lines[0])
         try:
             taste = await loop.run_in_executor(None, api.get_taste)
             profile = (taste or {}).get("summary") or ""
@@ -472,7 +489,7 @@ class ChatRouter:
         started = self._now()
         try:
             async with ProgressTicker(
-                placeholder, dict(enumerate(PLACE_LINES)), typing=lambda: self._typing(context, chat_id),
+                placeholder, dict(enumerate(lines)), typing=lambda: self._typing(context, chat_id),
                 sleep=self._sleep, steps=PLACE_STEPS,
             ):
                 places = await loop.run_in_executor(
@@ -484,13 +501,13 @@ class ChatRouter:
         except ChatFailure as exc:
             await self._alert_staff(context, exc, "places")
             logger.warning("[chat] kind=%s model=places chat=%s", exc.kind, chat_id)
-            await self._edit(placeholder, PLACES_DOWN, update)
+            await self._edit(placeholder, self._c(locale, "chat.place.down"), update)
             return
         logger.info("[chat] places n=%s ms=%s chat=%s", len(places), _ms(self._now() - started), chat_id)
         if not places:
-            await self._edit(placeholder, PLACES_NONE, update)
+            await self._edit(placeholder, self._c(locale, "chat.place.none"), update)
             return
-        await self._edit(placeholder, _render_places(places, area), update)
+        await self._edit(placeholder, _render_places(places, area, locale), update)
 
     def _staff(self, chat_id) -> bool:
         return str(chat_id) in getattr(self.handler, "admin_chat_ids", [])
@@ -519,11 +536,212 @@ class ChatRouter:
             return fn(update=update, chat_id=chat_id)
         return "en"
 
-    async def _club(self, update, context, api, chat_id, parsed, text) -> bool:
-        from integrations.club_chat import render_club
-        from integrations.copy import t as copy_t
+    def _outcome_of(self, box: dict, handled: bool) -> str:
+        if box.get("outcome"):
+            return box["outcome"]
+        if handled:
+            return "answered"
+        return "answered"
 
+    def _pipeline_markup(self):
+        from integrations.copy import t as copy_t
+        cb, *_rest = _tools()
+        return _markup([
+            (copy_t("en", "chat.btn.stock"), cb("ct")),
+            (copy_t("en", "chat.btn.drink"), cb("cp")),
+            (copy_t("en", "chat.btn.help"), cb("cl")),
+        ])
+
+    async def _flag_off(self, update, chat_id, locale: str | None = None) -> None:
+        locale = locale or self._reply_locale(update, chat_id)
+        await self._say(update, f"🍷 {self._c(locale, 'chat.flag_off')}", self._pipeline_markup())
+
+    async def _clarify(self, update, chat_id, parsed, locale: str | None = None) -> None:
+        locale = locale or self._reply_locale(update, chat_id, parsed)
+        kind = parsed.get("unknown_kind") or "unclear"
+        key = "chat.unknown" if kind == "unclear" or parsed.get("intent") == "unknown" else "chat.clarify"
+        await self._say(update, f"🤔 {self._c(locale, key)}", self._pipeline_markup())
+
+    async def _execute(self, update, context, api, chat_id, text, parsed, wines, storages, ask, box,
+                       locale: str = "en") -> bool:
+        intent = parsed.get("intent")
+        if intent == "club_query":
+            return await self._club(update, context, api, chat_id, parsed, text, locale)
+        if intent == "smalltalk_help":
+            await self._help(update, context, api, chat_id, text, parsed, locale)
+            return True
+        if intent == "drink_remove":
+            wine_ref = (parsed.get("wine_ref") or parsed.get("slots", {}).get("wine") or "").strip()
+            fact = parsed.get("fact") if isinstance(parsed.get("fact"), dict) else {}
+            location = (fact.get("storage_text") or parsed.get("slots", {}).get("location") or "").strip()
+            if not wine_ref or wine_ref.casefold() in {
+                "this", "it", "that", "dit", "hierdie",
+            }:
+                return await self.handler._maybe_typed_stock(update, context, "Drank this")
+            return await self.handler._typed_drink_named(
+                update, context, api, None, wine_ref, location, locale=locale,
+            )
+        if intent == "wine_knowledge":
+            await self._wine_chat(update, context, api, chat_id, text, locale)
+            return True
+        if intent == "place":
+            area = (parsed.get("area") or parsed.get("slots", {}).get("location") or "").strip()
+            await self._place(update, context, api, chat_id, text, area)
+            return True
+        if intent == "cellar_query":
+            return await self._fact(update, context, api, chat_id, parsed, wines, storages, locale)
+        if intent in ("recommend", "answer"):
+            if not wines:
+                await self._empty(update, api, locale)
+                return True
+            placeholder = asyncio.create_task(self._placeholder(update, wines, locale))
+            box["placeholder"] = placeholder
+            if intent == "answer" and ask.get("stage") == "question":
+                answer = _answer_text(parsed, text, ask)
+                sentence = ask.get("sentence") or text
+                taste = ask.get("taste") or parsed.get("taste") or {}
+                await self._recommend(
+                    chat_id, api, sentence, taste, placeholder, False, update, context,
+                    wines, answer=answer, ask=ask, locale=locale,
+                )
+            else:
+                await self._recommend(
+                    chat_id, api, text, parsed.get("taste") or {}, placeholder, True,
+                    update, context, wines, locale=locale,
+                )
+            return True
+        if intent in ("price", "correct"):
+            await self._write(update, context, api, chat_id, parsed, wines, ask, locale)
+            return True
+        if intent == "add_wine":
+            return await self._add_wine(update, context, api, parsed, locale)
+        if intent == "list_action":
+            return await self._list_action(update, context, api, chat_id, parsed, locale)
+        return False
+
+    async def _add_wine(self, update, context, api, parsed, locale: str = "en") -> bool:
+        from integrations.telegram_bot import TYPED_ADD_TTL
+        wine = ((parsed.get("slots") or {}).get("wine") or "").strip()
+        if not wine or wine.casefold() in {"this", "it", "that", "dit", "hierdie"}:
+            try:
+                cards = self.handler._open_label_cards(
+                    api, max_age=TYPED_ADD_TTL, include_complete=True,
+                )
+            except Exception:
+                cards = []
+            if cards and await self.handler._maybe_typed_add(update, context, "add"):
+                return True
+        if wine and wine.casefold() not in {"this", "it", "that", "dit", "hierdie"}:
+            await self._say(update, f"📷 {self._c(locale, 'chat.add_photo_named', name=_esc(wine))}")
+        else:
+            await self._say(update, f"📷 {self._c(locale, 'chat.add_photo')}")
+        return True
+
+    async def _list_action(self, update, context, api, chat_id, parsed, locale: str = "en") -> bool:
+        op = parsed.get("list_op") or "show"
+        slots = parsed.get("slots") or {}
+        wine = (slots.get("wine") or "").strip()
+        if op == "add" and not wine:
+            await self._say(update, f"📝 {self._c(locale, 'chat.list_add_need_wine')}")
+            return True
+        if op == "add" and wine:
+            flow = self.handler._list_flow()
+            list_id = flow._personal_list_id(api)
+            if not list_id:
+                await self._say(update, self._c(locale, "list.err"))
+                return True
+            payload = {
+                "name": wine[:100],
+                "producer": (slots.get("producer") or "")[:100],
+                "source": "typed",
+            }
+            if slots.get("vintage"):
+                payload["vintage"] = slots["vintage"]
+            if slots.get("grape"):
+                payload["grape"] = slots["grape"]
+            try:
+                result = api.add_list_item(list_id, payload)
+            except Exception as exc:
+                logger.warning("[chat] list add failed chat=%s detail=%s", chat_id, exc)
+                await self._say(update, self._c(locale, "list.err"))
+                return True
+            if not isinstance(result, dict) or result.get("error"):
+                await self._say(update, self._c(locale, "list.err"))
+                return True
+            key = "chat.list.already_named" if result.get("already") else "chat.list.added_named"
+            await self._say(update, self._c(locale, key, name=_esc(wine)))
+            return True
+        if op == "remove" and wine:
+            flow = self.handler._list_flow()
+            list_id = flow._personal_list_id(api)
+            if not list_id:
+                await self._say(update, self._c(locale, "list.err"))
+                return True
+            try:
+                payload = api.get_list(list_id, limit=50, offset=0) or {}
+            except Exception as exc:
+                logger.warning("[chat] list get failed chat=%s detail=%s", chat_id, exc)
+                await self._say(update, self._c(locale, "list.err"))
+                return True
+            items = payload.get("items") or []
+            needle = wine.casefold()
+            hits = [
+                item for item in items
+                if needle in (item.get("name") or "").casefold()
+            ]
+            if len(hits) == 1:
+                item = hits[0]
+                try:
+                    api.delete_list_item(list_id, item.get("id"))
+                except Exception as exc:
+                    logger.warning("[chat] list remove failed chat=%s detail=%s", chat_id, exc)
+                    await self._say(update, self._c(locale, "list.err"))
+                    return True
+                await self._say(
+                    update,
+                    self._c(locale, "chat.list.removed_named", name=_esc(item.get("name") or wine)),
+                )
+                return True
+            if not hits:
+                await self._say(update, self._c(locale, "chat.list.not_on_list", name=_esc(wine)))
+                return True
+            cb, *_rest = _tools()
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            rows = []
+            for item in hits[:8]:
+                item_id = item.get("id")
+                if not item_id:
+                    continue
+                rows.append([InlineKeyboardButton(
+                    (item.get("name") or wine)[:30],
+                    callback_data=cb("lx", item_id=item_id),
+                )])
+            if rows:
+                await self._say(
+                    update,
+                    self._c(locale, "chat.list.which"),
+                    InlineKeyboardMarkup(rows),
+                )
+                return True
+        await self.handler._list_flow().cmd_list(update, context)
+        return True
+
+    async def _club(self, update, context, api, chat_id, parsed, text, locale: str | None = None) -> bool:
+        from integrations.club_chat import render_club
+
+        locale = locale or self._reply_locale(update, chat_id, parsed, text)
         payload = dict(parsed.get("club") or {})
+        slots = parsed.get("slots") or {}
+        if not payload.get("wine_text") and slots.get("wine"):
+            payload["wine_text"] = slots["wine"]
+        if not payload.get("grape") and slots.get("grape"):
+            payload["grape"] = slots["grape"]
+        if payload.get("vintage") in (None, "") and slots.get("vintage"):
+            payload["vintage"] = slots["vintage"]
+        if not payload.get("member_name") and slots.get("person"):
+            payload["member_name"] = slots["person"]
+        if not payload.get("club_name") and slots.get("club"):
+            payload["club_name"] = slots["club"]
         kind = payload.get("kind") or "none"
         if kind in ("none", ""):
             payload["kind"] = "members"
@@ -538,16 +756,15 @@ class ChatRouter:
             result = await loop.run_in_executor(None, lambda: api.club_ask(payload))
         except Exception as exc:
             logger.warning("[chat] club status=down chat=%s detail=%s", chat_id, exc)
-            await self._say(update, copy_t(self._locale(update, chat_id), "chat.club.down"))
+            await self._say(update, self._c(locale, "chat.club.down"))
             return True
         if not isinstance(result, dict):
             result = {}
         status = result.get("status") or result.get("error") or ""
         logger.info("[chat] club kind=%s status=%s chat=%s", payload.get("kind"), status, chat_id)
         if result.get("error") == "not_enabled" or status in ("fallback", "not_enabled"):
-            await self._wine_chat(update, context, api, chat_id, text)
+            await self._flag_off(update, chat_id, locale)
             return True
-        locale = self._locale(update, chat_id)
         text_out = render_club(result, locale)
         self._save(chat_id, {
             **remembered,
@@ -582,31 +799,29 @@ class ChatRouter:
         ask = self._load(chat_id)
         payload = dict(ask.get("club_ask") or {})
         payload.update(fields)
-        parsed = {"club": payload, "intent": "club"}
-        await self._club(update, context, api, chat_id, parsed, "")
+        parsed = {"club": payload, "intent": "club_query"}
+        locale = self._reply_locale(update, chat_id)
+        await self._club(update, context, api, chat_id, canonical_parse(parsed), "", locale)
 
-    async def _help(self, update, context, api, chat_id, text, parsed) -> None:
+    async def _help(self, update, context, api, chat_id, text, parsed, locale: str = "en") -> None:
         # Known topics still have a canned line if the model is down.
         topic = parsed.get("help_topic") or "other"
-        fallback = HELP_COMMANDS
+        fallback = self._c(locale, "chat.help.commands")
         if topic == "invite":
-            fallback = HELP_INVITE
+            fallback = self._c(locale, "chat.help.invite")
         elif topic == "new_cellar":
-            fallback = HELP_NEW_CELLAR_STAFF if self._staff(chat_id) else HELP_NEW_CELLAR
+            key = "chat.help.new_cellar_staff" if self._staff(chat_id) else "chat.help.new_cellar"
+            fallback = self._c(locale, key)
         elif topic == "switch":
-            fallback = HELP_SWITCH
+            fallback = self._c(locale, "chat.help.switch")
         elif topic == "photo":
-            fallback = HELP_PHOTO
+            fallback = self._c(locale, "chat.help.photo")
         elif topic == "take_out":
-            fallback = HELP_TAKE_OUT
+            fallback = self._c(locale, "chat.help.take_out")
         markup = None
         if topic == "take_out":
             markup = _markup([("Catch up", "a:cu,o:go")])
         loop = asyncio.get_running_loop()
-        try:
-            await self._typing(context, chat_id)
-        except Exception:
-            pass
         started = self._now()
         try:
             reply = await loop.run_in_executor(
@@ -625,7 +840,7 @@ class ChatRouter:
         logger.info("[chat] support topic=%s ms=%s chat=%s", topic, _ms(self._now() - started), chat_id)
         await self._say(update, f"🍷 {_esc(reply)}", markup)
 
-    async def _wine_chat(self, update, context, api, chat_id, text) -> None:
+    async def _wine_chat(self, update, context, api, chat_id, text, locale: str = "en") -> None:
         loop = asyncio.get_running_loop()
         try:
             taste = await loop.run_in_executor(None, api.get_taste)
@@ -648,14 +863,16 @@ class ChatRouter:
         except ChatFailure as exc:
             await self._alert_staff(context, exc, RECOMMEND_MODEL)
             logger.warning("[chat] kind=%s model=%s chat=%s", exc.kind, RECOMMEND_MODEL, chat_id)
-            await self._say(update, CHAT_RESTING)
+            await self._say(update, self._c(locale, "chat.resting"))
             return
         logger.info("[chat] wine_chat ms=%s chat=%s", _ms(self._now() - started), chat_id)
         await self._say(update, f"🍷 {_esc(reply)}")
 
-    async def _fact(self, update, context, api, chat_id, parsed, wines, storages) -> bool:
+    async def _fact(self, update, context, api, chat_id, parsed, wines, storages,
+                    locale: str | None = None) -> bool:
+        locale = locale or self._reply_locale(update, chat_id, parsed)
         if not wines:
-            await self._empty(update, api)
+            await self._empty(update, api, locale)
             return True
         fact = parsed.get("fact") or {}
         # Storages the payload doesn't mention still count when the user names one.
@@ -669,9 +886,16 @@ class ChatRouter:
             name = storage.get("name") if isinstance(storage, dict) else ""
             if name and name not in known:
                 known.append(name)
-        reply = answer_fact(fact, wines)
+        reply = answer_fact(fact, wines, locale=locale)
         if reply is None:
-            return False
+            reply = _slot_fact(parsed, wines, locale=locale)
+        if reply is None:
+            await self._say(
+                update,
+                f"🍷 {self._c(locale, 'chat.dont_know')}",
+                self._pipeline_markup(),
+            )
+            return True
         if reply.kind == "list_all":
             await self.handler._cmd_stock(update, context)
             return True
@@ -693,25 +917,35 @@ class ChatRouter:
         return True
 
     async def _recommend(self, chat_id, api, sentence, taste, placeholder, allow_question,
-                         update, context, wines, answer=None, ask=None, retried=False):
+                         update, context, wines, answer=None, ask=None, retried=False,
+                         locale: str = "en"):
         loop = asyncio.get_running_loop()
         taste_summary = ""
         history = []
-        try:
-            taste_payload, history_payload = await asyncio.gather(
-                loop.run_in_executor(None, api.get_taste),
-                loop.run_in_executor(None, lambda: api.stock_history(limit=5)),
+
+        async def _taste_history():
+            try:
+                taste_payload, history_payload = await asyncio.gather(
+                    loop.run_in_executor(None, api.get_taste),
+                    loop.run_in_executor(None, lambda: api.stock_history(limit=5)),
+                )
+                return (taste_payload or {}).get("summary") or "", (history_payload or {}).get("items") or []
+            except Exception as exc:
+                logger.warning("[chat] kind=taste chat=%s detail=%s", chat_id, exc)
+                return "", []
+
+        if asyncio.isfuture(placeholder) or isinstance(placeholder, asyncio.Task):
+            (taste_summary, history), placeholder = await asyncio.gather(
+                _taste_history(), placeholder,
             )
-            taste_summary = (taste_payload or {}).get("summary") or ""
-            history = (history_payload or {}).get("items") or []
-        except Exception as exc:
-            logger.warning("[chat] kind=taste chat=%s detail=%s", chat_id, exc)
+        else:
+            taste_summary, history = await _taste_history()
         colour = (taste or {}).get("colour") or ""
         # Taste words stay in the prompt. They must not drop a bottle here.
         block, lookup = compact_cellar(wines, colour=colour)
         # Taste words must not filter the cellar. Colour, when explicit, may,
         # and only inside compact_cellar once the list is past the cap.
-        lines = _progress_lines(taste, sum(w.get("stock_count") or 0 for w in wines))
+        lines = _progress_lines(taste, sum(w.get("stock_count") or 0 for w in wines), locale)
         started = self._now()
         try:
             async with ProgressTicker(placeholder, lines, typing=lambda: self._typing(context, chat_id), sleep=self._sleep):
@@ -723,6 +957,7 @@ class ChatRouter:
                         household_id=getattr(api, "household_id", None),
                         answer=answer,
                         valid_ids=set(lookup),
+                        locale=locale,
                     ),
                 )
         except ChatFailure as exc:
@@ -737,12 +972,13 @@ class ChatRouter:
                 await self._recommend(
                     chat_id, api, sentence, taste, placeholder, allow_question,
                     update, context, wines, answer=answer, ask=ask, retried=True,
+                    locale=locale,
                 )
                 return
             await self._quick(
                 chat_id, api, sentence, taste, placeholder, wines, history, update,
                 meta={"model": "quick", "latency_ms": _ms(self._now() - started)},
-                ask=ask,
+                ask=ask, locale=locale,
             )
             return
         meta = {"model": RECOMMEND_MODEL, "latency_ms": _ms(self._now() - started)}
@@ -752,7 +988,7 @@ class ChatRouter:
             return
         await self._show_pick(
             chat_id, api, sentence, taste, placeholder, result, lookup, wines, update,
-            answer=answer, ask=ask, meta=meta,
+            answer=answer, ask=ask, meta=meta, locale=locale,
         )
 
     async def _ask_question(self, chat_id, api, sentence, taste, placeholder, result, wines, meta=None):
@@ -775,12 +1011,13 @@ class ChatRouter:
             self._save(chat_id, current)
 
     async def _show_pick(self, chat_id, api, sentence, taste, placeholder, result, lookup,
-                         wines, update, answer=None, fallback=False, ask=None, meta=None):
+                         wines, update, answer=None, fallback=False, ask=None, meta=None,
+                         locale: str = "en"):
         cb, *_ = _tools()
         pick = result.get("pick") or {}
         wine = lookup.get(pick.get("id")) or _by_id(wines, pick.get("id"))
         if wine is None:
-            await self._edit(placeholder, REC_SLOW, update, self._retry_button())
+            await self._edit(placeholder, self._c(locale, "chat.rec_slow"), update, self._retry_button())
             return
         runner = result.get("runner_up") or {}
         runner_wine = lookup.get(runner.get("id")) if runner.get("id") else None
@@ -790,9 +1027,12 @@ class ChatRouter:
         for alt in result.get("alternatives") or []:
             if lookup.get(alt.get("id")) or _by_id(wines, alt.get("id")):
                 queue.append({"id": alt.get("id"), "reason": alt.get("reason") or "", "evidence": alt.get("evidence") or "none"})
-        text = _render_pick(wine, pick.get("reason") or "", runner_wine, runner.get("reason") or "", result.get("no_evidence_for") or [])
+        text = _render_pick(
+            wine, pick.get("reason") or "", runner_wine, runner.get("reason") or "",
+            result.get("no_evidence_for") or [], locale=locale,
+        )
         if fallback:
-            text = REC_QUICK + "\n" + text
+            text = self._c(locale, "chat.rec_quick") + "\n" + text
         buttons = _pick_buttons(cb, wine, runner_wine, fallback=fallback)
         previous = (ask or {}).get("intent_id")
         remembered = True
@@ -803,7 +1043,7 @@ class ChatRouter:
             "fallback": fallback, "intent_id": previous,
         }
         if not self._save(chat_id, state):
-            text += f"\n<i>{FOLLOWUP_FOOTER}</i>"
+            text += f"\n<i>{self._c(locale, 'chat.followup_footer')}</i>"
             buttons = [b for b in buttons if "Something else" not in b[0]]
             remembered = False
         await self._edit(placeholder, text, update, _markup(buttons))
@@ -825,10 +1065,10 @@ class ChatRouter:
                 self._save(chat_id, current)
 
     async def _quick(self, chat_id, api, sentence, taste, placeholder, wines, history, update,
-                     meta=None, ask=None):
-        picked = quick_pick(taste or {}, wines, history)
+                     meta=None, ask=None, locale: str = "en"):
+        picked = quick_pick(taste or {}, wines, history, locale=locale)
         if not picked:
-            await self._edit(placeholder, CHAT_RESTING, update)
+            await self._edit(placeholder, self._c(locale, "chat.resting"), update)
             return
         first, *rest = picked
         lookup = {row["id"]: row["wine"] for row in picked}
@@ -843,44 +1083,44 @@ class ChatRouter:
         }
         await self._show_pick(
             chat_id, api, sentence, taste, placeholder, result, lookup, wines, update,
-            fallback=True, ask=ask, meta=meta,
+            fallback=True, ask=ask, meta=meta, locale=locale,
         )
 
-    async def _write(self, update, context, api, chat_id, parsed, wines, ask):
+    async def _write(self, update, context, api, chat_id, parsed, wines, ask, locale: str = "en"):
         intent = parsed.get("intent")
         if intent == "price":
             amount = (parsed.get("price") or {}).get("amount")
             if amount is None:
-                await self._say(update, "I didn't catch the price.")
+                await self._say(update, self._c(locale, "chat.write.no_price"))
                 return
-            target = await self._price_target(api, parsed, wines, ask)
+            target = await self._price_target(api, parsed, wines, ask, locale)
             payload = {"price": amount}
             currency = (parsed.get("price") or {}).get("currency") or ""
         else:
-            target = await self._correct_target(api, parsed, wines)
+            target = await self._correct_target(api, parsed, wines, locale)
             payload = _correction_payload(parsed.get("correction") or {})
             currency = ""
             if target is not None and target.get("card"):
-                await self._correct_card(api, target, payload, update)
+                await self._correct_card(api, target, payload, update, locale)
                 return
         if target is None:
             return
         if target.get("down"):
-            await self._say(update, CELLAR_DOWN, self._retry_button())
+            await self._say(update, self._c(locale, "chat.cellar_down"), self._retry_button())
             self._save(chat_id, {**self._load(chat_id), "retry_text": parsed.get("wine_ref") or ""})
             return
         if target.get("missing"):
-            await self._say(update, target.get("prompt") or "Which bottle do you mean?")
+            await self._say(update, target.get("prompt") or self._c(locale, "chat.write.which_mean"))
             return
         if target.get("card") and intent == "price":
-            await self._price_card(api, target, amount, currency, update, chat_id)
+            await self._price_card(api, target, amount, currency, update, chat_id, locale)
             return
         if target.get("choose"):
-            await self._choose_wine(update, chat_id, target["choose"], intent, payload, currency, parsed)
+            await self._choose_wine(update, chat_id, target["choose"], intent, payload, currency, parsed, locale)
             return
-        await self._apply_write(update, api, chat_id, target["wine"], intent, payload, currency, parsed)
+        await self._apply_write(update, api, chat_id, target["wine"], intent, payload, currency, parsed, locale)
 
-    async def _price_card(self, api, target, amount, currency, update, chat_id):
+    async def _price_card(self, api, target, amount, currency, update, chat_id, locale: str = "en"):
         barcode, data = target["card"]
         merged = dict(data.get("grok_merged") or {})
         merged["price"] = amount
@@ -888,11 +1128,12 @@ class ChatRouter:
         _cb, glyph, *_rest = _tools()
         shown = f"{glyph(currency)}{float(amount):.2f}" if currency else f"{float(amount):.2f}"
         name = _esc(merged.get("name") or "that wine")
-        await self._say(update, f"💷 Set <b>{name}</b> to {shown}.")
+        await self._say(update, self._c(locale, "chat.write.set_price", name=name, shown=shown, note=""))
 
-    async def _apply_write(self, update, api, chat_id, wine, intent, payload, currency, parsed):
+    async def _apply_write(self, update, api, chat_id, wine, intent, payload, currency, parsed,
+                           locale: str = "en"):
         if not payload:
-            await self._say(update, "I didn't catch what to change.")
+            await self._say(update, self._c(locale, "chat.write.no_change"))
             return
         loop = asyncio.get_running_loop()
         try:
@@ -900,19 +1141,19 @@ class ChatRouter:
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else 500
             if status == 404:
-                await self._say(update, WINE_GONE)
+                await self._say(update, self._c(locale, "chat.wine_gone"))
                 return
             if status == 400:
-                detail = _first_error(exc.response) or WRITE_REJECTED_FALLBACK
+                detail = _first_error(exc.response) or self._c(locale, "chat.write_rejected")
                 await self._say(update, _esc(detail))
                 return
             self._remember_write(chat_id, intent, payload, currency, wine["id"], parsed)
-            await self._say(update, WRITE_FAILED, self._retry_button())
+            await self._say(update, self._c(locale, "chat.write_failed"), self._retry_button())
             return
         except Exception as exc:
             logger.warning("[chat] kind=write chat=%s detail=%s", chat_id, exc)
             self._remember_write(chat_id, intent, payload, currency, wine["id"], parsed)
-            await self._say(update, WRITE_FAILED, self._retry_button())
+            await self._say(update, self._c(locale, "chat.write_failed"), self._retry_button())
             return
         name = _esc(wine.get("name") or "that wine")
         if intent == "price":
@@ -921,11 +1162,11 @@ class ChatRouter:
             household = self._currency(chat_id)
             note = ""
             if currency and household and currency.upper() != household.upper():
-                note = f" (stored as {household})"
-            await self._say(update, f"💷 Set <b>{name}</b> to {shown}.{note}")
+                note = self._c(locale, "chat.write.currency_note", currency=household)
+            await self._say(update, self._c(locale, "chat.write.set_price", name=name, shown=shown, note=note))
             return
         bits = [f"{key} {_esc(value)}" for key, value in payload.items()]
-        await self._say(update, f"✏️ Updated <b>{name}</b>: {', '.join(bits)}.")
+        await self._say(update, self._c(locale, "chat.write.updated", name=name, bits=", ".join(bits)))
 
     def _remember_write(self, chat_id, intent, payload, currency, wine_id, parsed):
         merged = self._load(chat_id)
@@ -935,7 +1176,8 @@ class ChatRouter:
         }
         self._save(chat_id, merged)
 
-    async def _choose_wine(self, update, chat_id, wines, intent, payload, currency, parsed):
+    async def _choose_wine(self, update, chat_id, wines, intent, payload, currency, parsed,
+                           locale: str = "en"):
         cb, *_ = _tools()
         buttons = [(w.get("name") or "wine", cb("cw", wine_id=w["id"])) for w in wines[:4]]
         merged = self._load(chat_id)
@@ -944,12 +1186,12 @@ class ChatRouter:
             "choices": {str(w["id"]): w for w in wines[:4]},
         }
         self._save(chat_id, merged)
-        await self._say(update, "Which bottle?", _markup(buttons))
+        await self._say(update, self._c(locale, "chat.write.which"), _markup(buttons))
 
-    async def _price_target(self, api, parsed, wines, ask):
+    async def _price_target(self, api, parsed, wines, ask, locale: str = "en"):
         ref = (parsed.get("wine_ref") or "").strip().lower()
         if ref and ref != "this":
-            return await self._named(api, parsed, wines)
+            return await self._named(api, parsed, wines, locale)
         if ask.get("shown"):
             wine = _by_id(wines, ask.get("shown"))
             if wine:
@@ -957,20 +1199,19 @@ class ChatRouter:
         card = self._first_card(api)
         if card and not card[1].get("wine_id"):
             return {"card": card}
-        return await self._named(api, parsed, wines)
+        return await self._named(api, parsed, wines, locale)
 
-    async def _correct_target(self, api, parsed, wines):
+    async def _correct_target(self, api, parsed, wines, locale: str = "en"):
         card = self._first_card(api)
         if card and not card[1].get("wine_id"):
             return {"card": card}
-        return await self._named(api, parsed, wines)
+        return await self._named(api, parsed, wines, locale)
 
-    async def _named(self, api, parsed, wines):
+    async def _named(self, api, parsed, wines, locale: str = "en"):
         ref = (parsed.get("wine_ref") or "").strip()
         if not ref or ref.lower() == "this":
-            await_target = None
             # The caller sends the prompt. Signal with a wine-less result.
-            return {"missing": True, "prompt": "Which bottle do you mean?"}
+            return {"missing": True, "prompt": self._c(locale, "chat.write.which_mean")}
         loop = asyncio.get_running_loop()
         try:
             found = await loop.run_in_executor(None, lambda: api.search_wines(ref))
@@ -982,9 +1223,9 @@ class ChatRouter:
             return {"choose": found}
         if len(found) == 1:
             return {"wine": found[0]}
-        return {"missing": True, "prompt": f"I couldn't find '{_esc(ref)}' in your cellar."}
+        return {"missing": True, "prompt": self._c(locale, "chat.write.not_found", name=_esc(ref))}
 
-    async def _correct_card(self, api, target, payload, update):
+    async def _correct_card(self, api, target, payload, update, locale: str = "en"):
         barcode, data = target["card"]
         merged = dict(data.get("grok_merged") or {})
         # grape_variety is a saved-wine field. On a card the key the add flow
@@ -998,7 +1239,10 @@ class ChatRouter:
         self.handler._update_pending(api, barcode, grok_merged=merged)
         bits = [f"{key} {_esc(value)}" for key, value in payload.items()]
         name = _esc(merged.get("name") or "that wine")
-        await self._say(update, f"✏️ Updated <b>{name}</b>: {', '.join(bits)}. Add will use this.")
+        await self._say(
+            update,
+            self._c(locale, "chat.write.updated_card", name=name, bits=", ".join(bits)),
+        )
 
     def _first_card(self, api):
         cards = self._open_cards(api)
@@ -1016,7 +1260,12 @@ class ChatRouter:
         except StoreError:
             logger.warning("[chat] kind=store")
             try:
-                await query.message.reply_text(ASK_LOST)
+                chat_id = str(getattr(query.message, "chat_id", "") or "")
+                locale = self._reply_locale(
+                    SimpleNamespace(message=query.message, effective_chat=SimpleNamespace(id=chat_id)),
+                    chat_id,
+                )
+                await query.message.reply_text(self._c(locale, "chat.ask_lost"))
             except Exception:
                 logger.exception("[chat] kind=unexpected")
 
@@ -1027,51 +1276,54 @@ class ChatRouter:
         ask = self._load(chat_id)
         update = SimpleNamespace(message=message, effective_chat=SimpleNamespace(id=chat_id), edited_message=None)
         api = self._api_for(chat_id)
+        locale = self._reply_locale(update, chat_id)
         if action == "cf":
             choices = ask.get("choices") or []
             page = data.get("page") or 0
             fact = dict(ask.get("fact") or {})
             if page >= len(choices) or not fact:
-                await self._edit(message, FINISHED, update)
+                await self._edit(message, self._c(locale, "chat.finished"), update)
                 return
             fact["storage_text"] = choices[page]
             wines = await self._wines_or_down(api, update, chat_id)
             if wines is None:
                 return
-            await self._fact(update, context, api, chat_id, {"fact": fact}, wines, [])
+            await self._fact(update, context, api, chat_id, {"fact": fact}, wines, [], locale)
             return
         if action == "cc":
             grape = ask.get("close") or ""
             if not grape:
-                await self._edit(message, FINISHED, update)
+                await self._edit(message, self._c(locale, "chat.finished"), update)
                 return
             wines = await self._wines_or_down(api, update, chat_id)
             if wines is None:
                 return
-            placeholder = await message.reply_text(_looking(wines), parse_mode="HTML")
+            placeholder = await message.reply_text(_looking(wines, locale), parse_mode="HTML")
             await self._recommend(
                 chat_id, api, f"something close to {grape}",
                 {"colour": "any", "words": [grape]}, placeholder, False, update, context, wines,
+                locale=locale,
             )
             return
         if action == "cq":
             options = ask.get("options") or []
             page = data.get("page") or 0
             if page >= len(options):
-                await self._edit(message, FINISHED, update)
+                await self._edit(message, self._c(locale, "chat.finished"), update)
                 return
             wines = await self._wines_or_down(api, update, chat_id)
             if wines is None:
                 return
-            placeholder = await message.reply_text(_looking(wines), parse_mode="HTML")
+            placeholder = await message.reply_text(_looking(wines, locale), parse_mode="HTML")
             await self._recommend(
                 chat_id, api, ask.get("sentence") or "", ask.get("taste") or {},
                 placeholder, False, update, context, wines, answer=options[page], ask=ask,
+                locale=locale,
             )
             return
         if action == "cn":
             if ask.get("stage") != "shown":
-                await self._edit(message, FINISHED, update)
+                await self._edit(message, self._c(locale, "chat.finished"), update)
                 return
             await self._next(chat_id, ask, message, update, api)
             return
@@ -1086,7 +1338,7 @@ class ChatRouter:
             if ask.get("intent_id"):
                 await self._call(api.update_intent, ask["intent_id"], {"outcome": "abandoned"})
             self._clear(chat_id)
-            await self._edit(message, "No problem.", update)
+            await self._edit(message, self._c(locale, "chat.no_problem"), update)
             return
         if action == "cr":
             await self._retry(chat_id, ask, update, context, api)
@@ -1096,17 +1348,17 @@ class ChatRouter:
             choices = write.get("choices") or {}
             wine = choices.get(str(data.get("wine_id")))
             if not wine:
-                await self._edit(message, FINISHED, update)
+                await self._edit(message, self._c(locale, "chat.finished"), update)
                 return
             await self._apply_write(
                 update, api, chat_id, wine, write.get("intent"), write.get("payload") or {},
-                write.get("currency") or "", write.get("parsed") or {},
+                write.get("currency") or "", write.get("parsed") or {}, locale=locale,
             )
             return
         if action == "cg":
             club_id = data.get("wine_id")
             if not club_id:
-                await self._edit(message, FINISHED, update)
+                await self._edit(message, self._c(locale, "chat.finished"), update)
                 return
             await self._club_from_pick(
                 update, context, api, chat_id, club_id=club_id, club_name="",
@@ -1136,6 +1388,27 @@ class ChatRouter:
             if club_id:
                 extra["club_id"] = club_id
             await self._club_from_pick(update, context, api, chat_id, **extra)
+            return
+        if action == "ct":
+            await self.handler._cmd_stock(update, context)
+            return
+        if action == "cp":
+            wines = await self._wines_or_down(api, update, chat_id)
+            if wines is None:
+                return
+            if not wines:
+                await self._empty(update, api, locale)
+                return
+            placeholder = await message.reply_text(_looking(wines, locale), parse_mode="HTML")
+            await self._recommend(
+                chat_id, api, "what should I drink",
+                {"colour": "any", "words": []}, placeholder, True, update, context, wines,
+                locale=locale,
+            )
+            return
+        if action == "cl":
+            await self._say(update, f"🍷 {self._c(locale, 'chat.help.commands')}")
+            return
 
     async def _next(self, chat_id, ask, message, update, api):
         queue = list(ask.get("queue") or [])
@@ -1143,7 +1416,8 @@ class ChatRouter:
             if ask.get("intent_id"):
                 await self._call(api.update_intent, ask["intent_id"], {"outcome": "rejected"})
             self._clear(chat_id)
-            await self._edit(message, "That's everything that fits — ask me another way and I'll look again.", update)
+            locale = self._reply_locale(update, chat_id)
+            await self._edit(message, self._c(locale, "chat.pick.exhausted"), update)
             return
         nxt = queue.pop(0)
         rejected = list(ask.get("rejected") or [])
@@ -1154,7 +1428,7 @@ class ChatRouter:
             return
         wine = _by_id(wines, nxt.get("id"))
         if wine is None:
-            await self._edit(message, FINISHED, update)
+            await self._edit(message, self._c(self._reply_locale(update, chat_id), "chat.finished"), update)
             return
         ask.update({"queue": queue, "shown": wine.get("id"), "rejected": rejected, "stage": "shown"})
         self._save(chat_id, ask)
@@ -1163,7 +1437,8 @@ class ChatRouter:
                 "shown": wine.get("id"), "rejected": rejected,
             })
         cb, *_ = _tools()
-        text = _render_pick(wine, nxt.get("reason") or "", None, "", [])
+        locale = self._reply_locale(update, chat_id)
+        text = _render_pick(wine, nxt.get("reason") or "", None, "", [], locale=locale)
         await self._edit(message, text, update, _markup(_pick_buttons(cb, wine, None)))
 
     async def _keep(self, chat_id, ask, message, update, api, wine_id):
@@ -1183,7 +1458,8 @@ class ChatRouter:
             })
         self._clear(chat_id)
         cb, *_ = _tools()
-        await self._edit(message, _enjoy(wine), update, _markup(_checkout_buttons(cb, wine, storages)))
+        locale = self._reply_locale(update, chat_id)
+        await self._edit(message, _enjoy(wine, locale), update, _markup(_checkout_buttons(cb, wine, storages)))
 
     async def _checkout(self, message, update, api, data):
         """Take the chosen bottle out of stock so it needn't be scanned out."""
@@ -1202,25 +1478,32 @@ class ChatRouter:
             )
         except Exception as exc:
             logger.warning("[chat] kind=checkout wine=%s detail=%s", wine_id, exc)
-            await self._say(update, "Couldn't take that out just now, and nothing changed. Tap it again in a moment.")
+            chat_id = str(getattr(getattr(update, "effective_chat", None), "id", "") or "")
+            locale = self._reply_locale(update, chat_id)
+            await self._say(update, self._c(locale, "chat.checkout.fail"))
             return
         if not isinstance(result, dict) or result.get("error"):
             if isinstance(result, dict) and result.get("error"):
                 logger.info("[chat] kind=checkout wine=%s error=%s", wine_id, result.get("error"))
-            await self._edit(message, "That bottle's already out of stock.", update)
+            chat_id = str(getattr(getattr(update, "effective_chat", None), "id", "") or "")
+            locale = self._reply_locale(update, chat_id)
+            await self._edit(message, self._c(locale, "chat.checkout.gone"), update)
             return
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        from integrations.telegram_bot import VOTE_PROMPT, vote_keyboard_row
+        from integrations.telegram_bot import vote_keyboard_row
         cb, *_ = _tools()
+        chat_id = str(getattr(getattr(update, "effective_chat", None), "id", "") or "")
+        locale = self._reply_locale(update, chat_id)
         item_id = result.get("item_id")
         undo = cb("ul", wine_id=wine_id, item_id=item_id) if item_id else cb("ur", wine_id=wine_id)
-        lines = [f"📤 <b>Taken out:</b> {_esc(result.get('wine_name') or 'that bottle')}"]
+        name = _esc(result.get("wine_name") or "that bottle")
+        lines = [self._c(locale, "chat.checkout.taken", name=name)]
         if result.get("storage") or storage_name:
-            lines.append(f"📍 from {_esc(result.get('storage') or storage_name)}")
-        lines.append(f"📊 In stock: {result.get('stock_count', 0)}")
+            lines.append(self._c(locale, "chat.checkout.from", storage=_esc(result.get("storage") or storage_name)))
+        lines.append(self._c(locale, "chat.checkout.stock", n=result.get("stock_count", 0)))
         keyboard = [[InlineKeyboardButton("↩️ Undo", callback_data=undo)]]
         if item_id:
-            lines += ["", VOTE_PROMPT]
+            lines += ["", self._c(locale, "chat.vote_prompt")]
             keyboard.append(vote_keyboard_row(item_id))
         await self._edit(message, "\n".join(lines), update, InlineKeyboardMarkup(keyboard))
 
@@ -1228,26 +1511,28 @@ class ChatRouter:
         write = ask.get("write")
         if write and write.get("wine_id"):
             wine = {"id": write["wine_id"], "name": "that wine"}
+            locale = self._reply_locale(update, chat_id)
             await self._apply_write(
                 update, api, chat_id, wine, write.get("intent"), write.get("payload") or {},
-                write.get("currency") or "", write.get("parsed") or {},
+                write.get("currency") or "", write.get("parsed") or {}, locale=locale,
             )
             return
         text = ask.get("retry_text")
         if text and not ask.get("sentence"):
             await self._handle_text(update, context, text, {})
             return
+        locale = self._reply_locale(update, chat_id)
         if not ask.get("sentence"):
-            await self._edit(update.message, FINISHED, update)
+            await self._edit(update.message, self._c(locale, "chat.finished"), update)
             return
         wines = await self._wines_or_down(api, update, chat_id)
         if wines is None:
             return
-        placeholder = await update.message.reply_text(_looking(wines), parse_mode="HTML")
+        placeholder = await update.message.reply_text(_looking(wines, locale), parse_mode="HTML")
         await self._recommend(
             chat_id, api, ask.get("sentence"), ask.get("taste") or {}, placeholder,
             bool(ask.get("allow_question", True)), update, context, wines,
-            answer=ask.get("answer"), ask=ask,
+            answer=ask.get("answer"), ask=ask, locale=locale,
         )
 
     async def on_location(self, update, context=None) -> bool:
@@ -1286,7 +1571,7 @@ class ChatRouter:
         await self._call(api.update_intent, ask["intent_id"], {"place": place})
         ask["place"] = place
         self._save(chat_id, ask)
-        await message.reply_text("📍 Thanks — noted where you are.")
+        await message.reply_text(self._c(self._reply_locale(update, chat_id), "chat.place.thanks"))
         return True
 
     async def _wines_or_down(self, api, update, chat_id):
@@ -1295,7 +1580,7 @@ class ChatRouter:
             return await loop.run_in_executor(None, api.wines_in_stock)
         except Exception as exc:
             logger.warning("[chat] kind=cellar_down model=cellar chat=%s detail=%s", chat_id, exc)
-            await self._say(update, CELLAR_DOWN, self._retry_button())
+            await self._say(update, self._c(self._reply_locale(update, chat_id), "chat.cellar_down"), self._retry_button())
             return None
 
     async def _record(self, api, payload) -> int | None:
@@ -1337,19 +1622,25 @@ class ChatRouter:
     def _currency(self, chat_id) -> str:
         return (getattr(self.handler, "_chat_id_to_currency", {}) or {}).get(str(chat_id), "")
 
-    async def _empty(self, update, api):
+    async def _empty(self, update, api, locale: str | None = None):
         _cb, _glyph, _nm, unconfigured_storage, empty = _tools()
+        chat_id = str(getattr(getattr(update, "effective_chat", None), "id", "") or "")
+        locale = locale or self._reply_locale(update, chat_id)
         try:
             unconfigured, storage_name = unconfigured_storage(api)
         except Exception:
             unconfigured, storage_name = False, ""
-        text, keyboard = empty(unconfigured=unconfigured, storage_name=storage_name)
-        await update.message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
+        text, keyboard = empty(
+            unconfigured=unconfigured, storage_name=storage_name, locale=locale,
+        )
+        await self._say(update, text, keyboard)
 
-    async def _placeholder(self, update, wines):
-        return await update.message.reply_text(_looking(wines), parse_mode="HTML")
+    async def _placeholder(self, update, wines, locale: str = "en"):
+        await self._wait_pace()
+        return await update.message.reply_text(_looking(wines, locale), parse_mode="HTML")
 
     async def _say(self, update, text, markup=None):
+        await self._wait_pace()
         kwargs = {"parse_mode": "HTML"}
         if markup is not None:
             kwargs["reply_markup"] = markup
@@ -1400,6 +1691,51 @@ def _short_phrase(text: str) -> bool:
     return len(stripped.split()) <= 2
 
 
+def _slot_fact(parsed: dict, wines: list[dict], locale: str = "en"):
+    """Match a named wine/producer/appellation against stock when fact.kind
+    did not already answer. Empty is a fact, not a guess. Try every slot
+    before saying nothing matched.
+    """
+    from integrations.cellar_facts import FactReply
+    from integrations.telegram_bot import match_in_stock_wines
+
+    slots = parsed.get("slots") or {}
+    stock = [w for w in wines if (w.get("stock_count") or 0) > 0]
+    last_empty = None
+    for key in ("appellation", "wine", "producer"):
+        query = str(slots.get(key) or "").strip()
+        if not query:
+            continue
+        hits = match_in_stock_wines(stock, query)
+        if hits:
+            lines = []
+            ids = []
+            for wine in hits:
+                ids.append(wine.get("id"))
+                name = _esc(wine.get("name") or "a bottle")
+                lines.append(f"• <b>{name}</b>")
+            return FactReply(
+                text=copy_t(locale, "chat.fact.named_hit", query=_esc(query)) + "\n" + "\n".join(lines),
+                kind="name",
+                wine_ids=[i for i in ids if i is not None],
+            )
+        last_empty = FactReply(
+            text=copy_t(locale, "chat.fact.none_matching", query=_esc(query)),
+            kind="empty",
+        )
+    grape = str(slots.get("grape") or "").strip()
+    if grape:
+        return answer_fact(
+            {
+                "kind": "grape", "grape": grape, "storage_text": "",
+                "drawer": None, "country_code": "",
+            },
+            wines,
+            locale=locale,
+        )
+    return last_empty
+
+
 def _shown_name(ask: dict, wines: list[dict]) -> str | None:
     wine = _by_id(wines, ask.get("shown"))
     if wine:
@@ -1422,11 +1758,11 @@ def _answer_text(parsed: dict, text: str, ask: dict) -> str:
     return text
 
 
-def _looking(wines: list[dict]) -> str:
-    return "🍷 Looking through your cellar…"
+def _looking(wines: list[dict], locale: str = "en") -> str:
+    return copy_t(locale, "chat.looking")
 
 
-def _progress_lines(taste: dict, bottles: int) -> dict[str, str]:
+def _progress_lines(taste: dict, bottles: int, locale: str = "en") -> dict[str, str]:
     colour = (taste or {}).get("colour") or ""
     words = [w for w in (taste or {}).get("words") or [] if w]
     bits = []
@@ -1435,31 +1771,30 @@ def _progress_lines(taste: dict, bottles: int) -> dict[str, str]:
     bits.extend(words)
     phrase = ", ".join(bits)[:40]
     if phrase:
-        matching = f"🔎 Matching \"{_esc(phrase)}\" against your tasting notes…"
+        matching = copy_t(locale, "chat.progress.matching_phrase", phrase=_esc(phrase))
     else:
-        matching = "🔎 Checking what's drinking well right now…"
+        matching = copy_t(locale, "chat.progress.matching")
     return {
         "matching": matching,
-        "narrowing": "⚖️ Down to a few — picking the best one…",
-        "slow": "⏳ Taking a little longer than usual — nearly there.",
+        "narrowing": copy_t(locale, "chat.progress.narrowing"),
+        "slow": copy_t(locale, "chat.progress.slow"),
     }
 
 
-def _render_pick(wine, reason, runner, runner_reason, no_evidence) -> str:
+def _render_pick(wine, reason, runner, runner_reason, no_evidence, locale: str = "en") -> str:
     evidence = ""
     if no_evidence:
         words = ", ".join(_esc(w) for w in no_evidence)
-        evidence = f"<i>None of your notes mention {words} — this is the closest.</i>\n"
+        evidence = copy_t(locale, "chat.pick.none_notes", words=words)
     if runner is not None:
-        return (
-            f"{evidence}🍷 Two fit equally well:\n"
-            f"{_bullet(wine, reason)}\n"
-            f"{_bullet(runner, runner_reason)}\n\n"
-            "Either one — or shall I suggest something else?"
+        return evidence + copy_t(
+            locale, "chat.pick.tie",
+            first=_bullet(wine, reason),
+            second=_bullet(runner, runner_reason),
         )
-    return (
-        f"{evidence}{_bottle(wine)}\n{_esc(reason)}\n\n"
-        "Does that look right, or shall I suggest something else?"
+    return copy_t(
+        locale, "chat.pick.ask",
+        evidence=evidence, bottle=_bottle(wine), reason=_esc(reason),
     )
 
 
@@ -1489,7 +1824,7 @@ def _bullet(wine, reason) -> str:
     return f"• <b>{name}</b> — {place}: {_esc(reason)}"
 
 
-def _enjoy(wine) -> str:
+def _enjoy(wine, locale: str = "en") -> str:
     name = _esc(wine.get("name") or "that bottle")
     items = wine.get("items") or []
     item = items[0] if items else {}
@@ -1499,7 +1834,7 @@ def _enjoy(wine) -> str:
     if drawer is not None and place:
         place = f"{place}, D{drawer}"
     loc = f" — {place}" if place else ""
-    return f"🍷 Enjoy the <b>{name}</b>{loc}."
+    return copy_t(locale, "chat.enjoy", name=name, loc=loc)
 
 
 def _looks_like_area(text: str) -> bool:
@@ -1508,9 +1843,12 @@ def _looks_like_area(text: str) -> bool:
     return 0 < len(words) <= 4 and "?" not in text and not text.startswith("/")
 
 
-def _render_places(places: list[dict], area: str) -> str:
-    where = f" in {_esc(area)}" if area else " near you"
-    lines = [f"📍 <b>Good wine{where}</b>", ""]
+def _render_places(places: list[dict], area: str, locale: str = "en") -> str:
+    if area:
+        header = copy_t(locale, "chat.place.header_area", area=_esc(area))
+    else:
+        header = copy_t(locale, "chat.place.header")
+    lines = [header, ""]
     for index, place in enumerate(places, 1):
         name = _esc(place["name"])
         if place.get("url"):
@@ -1521,7 +1859,7 @@ def _render_places(places: list[dict], area: str) -> str:
         lines.append(head)
         if place.get("why"):
             lines.append(f"   {_esc(place['why'])}")
-    lines += ["", "<i>Found with a live web search — worth checking they're open.</i>"]
+    lines += ["", copy_t(locale, "chat.place.footnote")]
     return "\n".join(lines)
 
 

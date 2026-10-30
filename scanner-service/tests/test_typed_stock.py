@@ -395,7 +395,7 @@ async def test_afrikaans_drank_barolos_picks_name_and_appellation():
     api.remove_stock.assert_not_called()
     handler._router.handle_text.assert_not_called()
     text = update.message.reply_text.call_args.args[0]
-    assert "Which one" in text
+    assert "Watter een" in text
     labels = _pick_labels(update)
     assert any("Terre del Barolo" in t for t in labels)
     assert any("I Siglati" in t for t in labels)
@@ -509,7 +509,7 @@ async def test_typed_stock_logs_handler_without_chat_id(caplog):
         await handler._unknown_text(update, MagicMock())
     logged = [r.getMessage() for r in caplog.records if "[text]" in r.getMessage()]
     assert any("handler=typed_stock" in msg for msg in logged)
-    assert any("Remove one of my chenins" in msg for msg in logged)
+    assert all("Remove one of my chenins" not in msg for msg in logged)
     assert all("4242" not in msg for msg in logged)
 
 
@@ -518,3 +518,40 @@ def test_similar_in_stock_wines_token_overlap():
     assert hits == []
     close = similar_in_stock_wines(HOUSEHOLD + [CHIANTI], "classico")
     assert [w["id"] for w in close] == [20]
+
+
+@pytest.mark.asyncio
+async def test_drank_this_dispatch_does_not_mutate_frozen_update():
+    from datetime import datetime, timezone
+    from telegram import Chat, Message, Update, User
+
+    api = MagicMock()
+    api.household_id = 1
+    api.list_all_wines.return_value = []
+    handler = _handler(api)
+    handler.pending_store["_label_1"] = {
+        "grok_merged": {"name": "Old Vine Chenin Blanc", "producer": "Bosman"},
+        "time": time.time(),
+        "household_id": 1,
+        "barcode": "_label_1",
+        "photo_data": b"jpeg",
+    }
+    handler._dispatch_callback = AsyncMock()
+    user = User(id=1, first_name="Sam", is_bot=False)
+    chat = Chat(id=4242, type="private")
+    message = Message(
+        message_id=7,
+        date=datetime.now(timezone.utc),
+        chat=chat,
+        from_user=user,
+        text="Drank this",
+    )
+    update = Update(update_id=11, message=message)
+    with pytest.raises(AttributeError, match="can't be set"):
+        update.callback_query = object()
+    await handler._maybe_typed_stock(update, MagicMock(), "Drank this")
+    handler._dispatch_callback.assert_awaited_once()
+    fake = handler._dispatch_callback.await_args.args[0]
+    assert fake.callback_query is not None
+    assert getattr(update, "callback_query", None) is None
+    assert fake.callback_query.data.startswith("a:dk")

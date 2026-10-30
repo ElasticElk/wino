@@ -950,6 +950,18 @@ def test_vote_thanks_replaces_the_prompt():
     assert "\U0001F44E Got it." in again
 
 
+def test_drank_view_follows_locale_and_escapes():
+    body, _ = build_drank_view("Foo <bar>", 2, 99, locale="af")
+    assert "Gedrink" in body
+    assert "Hoe was dit?" in body
+    assert "Foo &lt;bar&gt;" in body
+    assert "<bar>" not in body
+    thanks = apply_vote_thanks(body, "up")
+    assert "Hoe was dit?" not in thanks
+    assert "Het dit." in thanks
+    assert "Got it." not in thanks
+
+
 def test_apply_vote_choice_keeps_other_buttons():
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 

@@ -13,6 +13,8 @@ from datetime import date, timedelta
 
 import pycountry
 
+from integrations.copy import t as copy_t
+
 # Same map as chat_models.COLOUR_TO_TYPE. Kept here so this module stays
 # free of the chat client.
 COLOUR_TO_TYPE = {
@@ -138,29 +140,40 @@ def _items_in(wine: dict, storage: str | None, drawer: int | None) -> list[dict]
     return found
 
 
-def _choose(choices: list[str]) -> FactReply:
+_COUNTRY_AF = {
+    "ZA": "Suid-Afrika", "FR": "Frankryk", "IT": "Italië", "ES": "Spanje",
+    "DE": "Duitsland", "PT": "Portugal", "US": "die VSA", "AU": "Australië",
+    "AR": "Argentinië", "CL": "Chili", "NZ": "Nieu-Seeland", "GB": "Brittanje",
+    "AT": "Oostenryk", "HU": "Hongarye", "GR": "Griekeland", "LE": "Libanon",
+}
+
+
+def _choose(choices: list[str], locale: str = "en") -> FactReply:
     names = ", ".join(_esc(name) for name in choices)
     return FactReply(
-        text=f"Which one? {names}",
+        text=copy_t(locale, "chat.fact.which_storage", names=names),
         kind="choose_storage",
         storage_choices=list(choices),
     )
 
 
-def _missing_storage(text: str, storages: list[str]) -> FactReply:
+def _missing_storage(text: str, storages: list[str], locale: str = "en") -> FactReply:
     names = ", ".join(_esc(name) for name in storages) or "none yet"
     return FactReply(
-        text=f"I can't find a storage called '{_esc(text)}'. You have: {names}.",
+        text=copy_t(locale, "chat.fact.missing_storage", name=_esc(text), names=names),
         kind="storage",
     )
 
 
-def _country_name(code: str) -> str:
-    country = pycountry.countries.get(alpha_2=(code or "").upper())
+def _country_name(code: str, locale: str = "en") -> str:
+    key = (code or "").upper()
+    if locale == "af" and key in _COUNTRY_AF:
+        return _COUNTRY_AF[key]
+    country = pycountry.countries.get(alpha_2=key)
     return country.name if country is not None else code
 
 
-def answer(fact: dict, wines: list[dict]) -> FactReply | None:
+def answer(fact: dict, wines: list[dict], locale: str = "en") -> FactReply | None:
     kind = (fact or {}).get("kind") or "none"
     if kind in ("none", ""):
         return None
@@ -178,12 +191,12 @@ def answer(fact: dict, wines: list[dict]) -> FactReply | None:
         if storage_text:
             hits = resolve_storage(storage_text, storages)
             if len(hits) >= 2:
-                return _choose(hits)
+                return _choose(hits, locale)
             if not hits:
-                return _missing_storage(storage_text, storages)
+                return _missing_storage(storage_text, storages, locale)
             storage = hits[0]
         elif len(storages) > 1:
-            return _choose(storages)
+            return _choose(storages, locale)
         elif len(storages) == 1:
             storage = storages[0]
         else:
@@ -195,8 +208,15 @@ def answer(fact: dict, wines: list[dict]) -> FactReply | None:
                 rows.append((wine, items, ""))
         title = f"D{drawer} — {_esc(storage)}" if storage else f"D{drawer}"
         if not rows:
-            where = f" in the {_esc(storage)}" if storage else ""
-            return FactReply(text=f"D{drawer}{where} is empty.", kind="empty")
+            if storage:
+                return FactReply(
+                    text=copy_t(locale, "chat.fact.empty_drawer_in", n=drawer, storage=_esc(storage)),
+                    kind="empty",
+                )
+            return FactReply(
+                text=copy_t(locale, "chat.fact.empty_drawer", n=drawer),
+                kind="empty",
+            )
         body, ids = _lines(rows)
         return FactReply(text=f"{title}\n{body}", kind="drawer", wine_ids=ids)
 
@@ -205,9 +225,9 @@ def answer(fact: dict, wines: list[dict]) -> FactReply | None:
             return None
         hits = resolve_storage(storage_text, storages)
         if len(hits) >= 2:
-            return _choose(hits)
+            return _choose(hits, locale)
         if not hits:
-            return _missing_storage(storage_text, storages)
+            return _missing_storage(storage_text, storages, locale)
         storage = hits[0]
         by_drawer: dict[int | None, list] = {}
         ids = []
@@ -220,7 +240,8 @@ def answer(fact: dict, wines: list[dict]) -> FactReply | None:
                 by_drawer.setdefault(item.get("drawer"), []).append((wine, [item], ""))
         if not ids:
             return FactReply(
-                text=f"{_esc(storage)} is empty.", kind="empty",
+                text=copy_t(locale, "chat.fact.storage_empty", storage=_esc(storage)),
+                kind="empty",
             )
         chunks = [f"<b>{_esc(storage)}</b>"]
         for drawer in sorted(by_drawer, key=lambda d: (d is None, d or 0)):
@@ -239,13 +260,16 @@ def answer(fact: dict, wines: list[dict]) -> FactReply | None:
             if fold(wine.get("country") or "") != fold(code):
                 continue
             rows.append((wine, wine.get("items") or [], ""))
-        name = _country_name(code)
+        name = _country_name(code, locale)
         if not rows:
             return FactReply(
-                text=f"Nothing from {_esc(name)} in the cellar.", kind="country",
+                text=copy_t(locale, "chat.fact.country_none", name=_esc(name)), kind="country",
             )
         body, ids = _lines(rows)
-        return FactReply(text=f"From {_esc(name)}\n{body}", kind="country", wine_ids=ids)
+        return FactReply(
+            text=f"{copy_t(locale, 'chat.fact.country_hit', name=_esc(name))}\n{body}",
+            kind="country", wine_ids=ids,
+        )
 
     if kind == "grape":
         asked = (fact.get("grape") or "").strip()
@@ -263,18 +287,18 @@ def answer(fact: dict, wines: list[dict]) -> FactReply | None:
                 literal = True
             extra = ""
             if len(grapes) > 1:
-                extra = f"(blend with {_esc(matched[0])})"
+                extra = copy_t(locale, "chat.fact.blend", grape=_esc(matched[0]))
             rows.append((wine, wine.get("items") or [], extra))
         label = _label(asked)
         if not rows:
             return FactReply(
-                text=f"You don't have a {_esc(label)}.",
+                text=copy_t(locale, "chat.fact.grape_none", grape=_esc(label)),
                 kind="grape",
                 suggest_close=label,
             )
         body, ids = _lines(rows)
         if literal:
-            title = f"{_esc(label)} in your cellar:"
+            title = copy_t(locale, "chat.fact.grape_hit", grape=_esc(label))
         else:
             # The name printed on the bottle, not the word they typed.
             shown = _esc(next(
@@ -282,7 +306,9 @@ def answer(fact: dict, wines: list[dict]) -> FactReply | None:
                 for g in (wine.get("grapes") or [])
                 if canonical_grape(g) == wanted
             ))
-            title = f"No bottle labelled {_esc(label)}, but these are the same grape ({shown}):"
+            title = copy_t(
+                locale, "chat.fact.grape_alias", asked=_esc(label), shown=shown,
+            )
         return FactReply(text=f"{title}\n{body}", kind="grape", wine_ids=ids)
 
     return None
@@ -298,7 +324,7 @@ def _parse_day(value) -> date | None:
 
 
 def quick_pick(taste: dict, wines: list[dict], history: list[dict],
-               today: date | None = None) -> list[dict]:
+               today: date | None = None, locale: str = "en") -> list[dict]:
     """A bottle chosen in code, for when the sommelier model is down.
 
     Best first, at most five. Empty when the colour filter or the
@@ -349,13 +375,13 @@ def quick_pick(taste: dict, wines: list[dict], history: list[dict],
     picked = []
     for _score, _wine_id, wine, evidence in scored[:5]:
         if evidence == "note":
-            reason = "The tasting note matches what you asked for."
+            reason = copy_t(locale, "chat.quick.note")
         elif evidence == "attribute":
-            reason = "It's marked with what you asked for."
+            reason = copy_t(locale, "chat.quick.attribute")
         elif evidence == "grape":
-            reason = "The grape matches what you asked for."
+            reason = copy_t(locale, "chat.quick.grape")
         else:
-            reason = "A solid bottle from what's open in the cellar."
+            reason = copy_t(locale, "chat.quick.solid")
         picked.append({
             "id": wine.get("id"),
             "reason": reason,
