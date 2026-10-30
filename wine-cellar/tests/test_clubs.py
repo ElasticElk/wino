@@ -16,7 +16,12 @@ from wine_cellar.apps.club.models import (
     ClubMembership,
 )
 from wine_cellar.apps.club.peek import FORBIDDEN_PEEK_KEYS, collect_keys
-from wine_cellar.apps.club.tasks import club_share_notice, publish_club_event
+from wine_cellar.apps.club.tasks import (
+    club_share_notice,
+    club_widen_notice,
+    expire_dismantle_votes,
+    publish_club_event,
+)
 from wine_cellar.apps.scanner.models import (
     Household,
     HouseholdInvite,
@@ -549,8 +554,76 @@ def test_founding_notifies_other_household_members(
 
 @patch("wine_cellar.apps.club.tasks._bot_token", return_value="token")
 @patch("wine_cellar.apps.club.tasks._send")
+def test_share_notice_noop_when_flag_off(mock_send, _mock_token, db, django_user_model):
+    mock_send.return_value = 11
+    hillside, _riverside, riley, _sam, lee = _people(django_user_model)
+    club = Club.objects.create(
+        name="Thursday reds", created_by=lee, cellar_visibility="full",
+    )
+    ClubMembership.objects.create(
+        club=club, user=lee, role="owner",
+        household=Household.objects.get(name="Riverside"),
+    )
+    ClubMembership.objects.create(
+        club=club, user=riley, role="member", household=hillside,
+        accepted_sharing_version=1,
+    )
+    club_share_notice(hillside.id, riley.id)
+    mock_send.assert_not_called()
+    hillside.refresh_from_db()
+    assert hillside.club_share_notice_sent_at is None
+
+
+@patch("wine_cellar.apps.club.tasks._bot_token", return_value="token")
+@patch("wine_cellar.apps.club.tasks._send")
+def test_widen_notice_noop_when_flag_off(mock_send, _mock_token, db, django_user_model):
+    mock_send.return_value = 11
+    hillside, _riverside, riley, sam, lee = _people(django_user_model)
+    club = Club.objects.create(
+        name="Thursday reds", created_by=lee, cellar_visibility="full",
+        sharing_version=2, previous_cellar_visibility="summary",
+    )
+    ClubMembership.objects.create(
+        club=club, user=lee, role="owner",
+        household=Household.objects.get(name="Riverside"),
+    )
+    ClubMembership.objects.create(
+        club=club, user=riley, role="member", household=hillside,
+        accepted_sharing_version=1,
+    )
+    ClubMembership.objects.create(
+        club=club, user=sam, role="member", household=hillside,
+        accepted_sharing_version=1,
+    )
+    club_widen_notice(club.id)
+    mock_send.assert_not_called()
+
+
+def test_expire_dismantle_noop_when_flag_off(db, django_user_model):
+    hillside, _riverside, riley, sam, _lee = _people(django_user_model)
+    club = Club.objects.create(name="Thursday reds", created_by=riley)
+    ClubMembership.objects.create(
+        club=club, user=riley, role="owner", household=hillside,
+    )
+    ClubMembership.objects.create(
+        club=club, user=sam, role="member", household=hillside,
+    )
+    vote = ClubDismantleVote.objects.create(
+        club=club,
+        proposed_by=riley,
+        expires_at=timezone.now() - timedelta(hours=1),
+    )
+    expire_dismantle_votes()
+    vote.refresh_from_db()
+    assert vote.status == ClubDismantleVote.STATUS_OPEN
+    assert Club.objects.filter(id=club.id).exists()
+
+
+@patch("wine_cellar.apps.club.tasks._bot_token", return_value="token")
+@patch("wine_cellar.apps.club.tasks._send")
 def test_share_notice_sent_once_not_to_joiner(mock_send, _mock_token, db, django_user_model):
     mock_send.return_value = 11
+    _enable_clubs()
     hillside, _riverside, riley, sam, lee = _people(django_user_model)
     club = Club.objects.create(
         name="Thursday reds", created_by=lee, cellar_visibility="full",

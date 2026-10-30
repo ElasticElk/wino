@@ -84,8 +84,8 @@ class FakeChat:
             raise self.place_fail
         return self.places
 
-    def support(self, sentence, *, staff=False, household_id=None):
-        self.support_calls.append({"sentence": sentence, "staff": staff})
+    def support(self, sentence, *, staff=False, household_id=None, features=None):
+        self.support_calls.append({"sentence": sentence, "staff": staff, "features": features})
         if self.support_fail:
             raise self.support_fail
         return self.support_reply

@@ -263,8 +263,28 @@ def test_club_list_ignores_wine_id_when_summary(client, db, django_user_model):
     assert item.wine_id is None
 
 
+def test_club_list_stores_wine_id_when_full(client, db, django_user_model):
+    hillside, riverside, riley, _sam, lee = _people(django_user_model)
+    club = _club_with_member(client, riley, lee, riverside)
+    _enable("feature_lists")
+    wine = Wine.objects.create(
+        name="Chenin Blanc", household=hillside, user=riley, wine_type="WH",
+        vintage=2022,
+    )
+    StorageItem.objects.create(storage=_fridge(hillside), wine=wine, user=riley)
+    added = _auth(client, lee).post(
+        reverse("api-club-list-items", kwargs={"pk": club.id}),
+        data={"name": "Chenin Blanc", "vintage": 2022, "wine_id": wine.id},
+        content_type="application/json",
+    )
+    assert added.status_code == 201
+    assert "wine_id" not in added.json()
+    item = WineListItem.objects.get(id=added.json()["id"])
+    assert item.wine_id == wine.id
+
+
 def test_tasteoff_scores_and_one_open(client, db, django_user_model):
-    _hillside, riverside, riley, _sam, lee = _people(django_user_model)
+    hillside, riverside, riley, _sam, lee = _people(django_user_model)
     club = _club_with_member(client, riley, lee, riverside)
     _enable("feature_tasteoffs")
     created = _auth(client, lee).post(
@@ -283,13 +303,20 @@ def test_tasteoff_scores_and_one_open(client, db, django_user_model):
     assert again.json()["error"] == "already_open"
     assert again.json()["id"] == tid
     bottles = reverse("api-club-tasteoff-bottles", kwargs={"pk": club.id, "tid": tid})
+    wine = Wine.objects.create(
+        name="Chenin Blanc", household=hillside, user=riley, wine_type="WH",
+        vintage=2022,
+    )
     b1 = _auth(client, lee).post(
-        bottles, data={"label": "Chenin Blanc 2022"}, content_type="application/json",
+        bottles,
+        data={"label": "Chenin Blanc 2022", "wine_id": wine.id},
+        content_type="application/json",
     )
     b2 = _auth(client, lee).post(
         bottles, data={"label": "Merlot 2019"}, content_type="application/json",
     )
     assert b1.status_code == 201 and b2.status_code == 201
+    assert TasteOffBottle.objects.get(id=b1.json()["id"]).wine_id == wine.id
     opened = _auth(client, lee).post(
         reverse("api-club-tasteoff-open", kwargs={"pk": club.id, "tid": tid}),
         data={},
@@ -383,6 +410,23 @@ def test_tasteoff_need_two_and_auto_close(client, db, django_user_model):
     tasteoff = TasteOff.objects.get(id=tid)
     assert tasteoff.status == TasteOff.STATUS_CLOSED
     assert ClubEvent.objects.filter(club=club, kind=ClubEvent.KIND_TASTEOFF).exists()
+
+
+def test_close_stale_tasteoffs_noop_when_flag_off(db, django_user_model):
+    hillside, _riverside, riley, _sam, _lee = _people(django_user_model)
+    club = Club.objects.create(name="Thursday reds", created_by=riley)
+    ClubMembership.objects.create(
+        club=club, user=riley, role="owner", household=hillside,
+        accepted_sharing_version=1,
+    )
+    tasteoff = TasteOff.objects.create(
+        club=club, host=riley, title="Flight", status=TasteOff.STATUS_SCORING,
+        opened_at=timezone.now() - timedelta(days=8),
+    )
+    close_stale_tasteoffs()
+    tasteoff.refresh_from_db()
+    assert tasteoff.status == TasteOff.STATUS_SCORING
+    assert not ClubEvent.objects.filter(club=club, kind=ClubEvent.KIND_TASTEOFF).exists()
 
 
 def test_non_host_cannot_add_bottle(client, db, django_user_model):

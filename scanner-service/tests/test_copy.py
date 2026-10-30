@@ -60,6 +60,9 @@ def test_phase1_list_keys_are_present():
         "list.removed",
         "list.off",
         "list.title",
+        "list.dup.body",
+        "list.dup.add_another",
+        "list.dup.thats_the_one",
     }
     assert required <= catalog_keys("en")
     assert required <= catalog_keys("af")
@@ -112,6 +115,9 @@ def test_phase2_club_keys_are_present():
     assert "{name}" not in MESSAGES["en"]["club.hh.notice"]
     assert t("en", "club.off") == "Wine clubs aren't on yet."
     assert t("af", "club.off") == "Wynklubs is nog nie aan nie."
+    assert t("en", "club.home.feed") == "Feed"
+    assert t("af", "club.home.feed") == "Aktiwiteit"
+    assert "aktiwiteit" in t("af", "club.end.ballot")
 
 
 def test_phase4_global_keys_are_present():

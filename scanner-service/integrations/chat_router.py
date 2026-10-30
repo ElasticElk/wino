@@ -30,7 +30,7 @@ from integrations.chat_models import (
 
 logger = logging.getLogger(__name__)
 
-CHAT_ACTIONS = {"cf", "cc", "cq", "ck", "cn", "co", "cx", "cr", "cw"}
+CHAT_ACTIONS = {"cf", "cc", "cq", "ck", "cn", "co", "cx", "cr", "cw", "cg", "cm", "ca"}
 
 CHAT_RESTING = (
     "💤 My chat side is having a rest for a moment. Everything else still works: "
@@ -274,14 +274,18 @@ class ChatRouter:
         api = self.handler._get_api(update)
         chat_id = str(update.effective_chat.id)
         loop = asyncio.get_running_loop()
+        wines = []
+        cellar_down = False
         try:
             wines = await loop.run_in_executor(None, api.wines_in_stock)
         except Exception as exc:
+            cellar_down = True
             logger.warning("[chat] kind=cellar_down model=cellar chat=%s detail=%s", chat_id, exc)
-            await self._say(update, CELLAR_DOWN, self._retry_button())
-            self._save(chat_id, {"retry_text": text})
-            box["handled"] = True
-            return
+            if not self._clubs_on():
+                await self._say(update, CELLAR_DOWN, self._retry_button())
+                self._save(chat_id, {"retry_text": text})
+                box["handled"] = True
+                return
         waiting = self._pending_place(chat_id)
         if waiting:
             self._drop_place(chat_id)
@@ -300,6 +304,7 @@ class ChatRouter:
             "options": ask.get("options") or [],
             "shown_wine": _shown_name(ask, wines),
             "label_card_open": bool(self._open_cards(api)),
+            "features": self._chat_features(),
         }
         try:
             await self._typing(context, chat_id)
@@ -313,7 +318,12 @@ class ChatRouter:
                 return exc
 
         async def _storages():
-            return await loop.run_in_executor(None, api.list_storages)
+            try:
+                return await loop.run_in_executor(None, api.list_storages)
+            except Exception:
+                if self._clubs_on():
+                    return []
+                raise
 
         try:
             parsed, storages = await asyncio.gather(_parsed(), _storages())
@@ -334,6 +344,17 @@ class ChatRouter:
             return
         intent = parsed.get("intent")
         logger.info("[chat] parse intent=%s chat=%s text=%r", intent, chat_id, text[:60])
+        if cellar_down and intent not in ("club", "help", "offtopic", "wine_chat", "place"):
+            await self._say(update, CELLAR_DOWN, self._retry_button())
+            self._save(chat_id, {"retry_text": text})
+            box["handled"] = True
+            return
+        if intent == "club":
+            if not self._clubs_on():
+                intent = "wine_chat" if not _short_phrase(text) else "search"
+            else:
+                box["handled"] = await self._club(update, context, api, chat_id, parsed, text)
+                return
         if intent == "offtopic":
             await self._say(update, OFF_TOPIC)
             box["handled"] = True
@@ -474,6 +495,96 @@ class ChatRouter:
     def _staff(self, chat_id) -> bool:
         return str(chat_id) in getattr(self.handler, "admin_chat_ids", [])
 
+    def _clubs_on(self) -> bool:
+        flag_on = getattr(self.handler, "flag_on", None)
+        return bool(flag_on("feature_clubs")) if callable(flag_on) else False
+
+    def _chat_features(self) -> dict:
+        flag_on = getattr(self.handler, "flag_on", None)
+
+        def on(key):
+            return bool(flag_on(key)) if callable(flag_on) else False
+
+        return {
+            "clubs": on("feature_clubs"),
+            "lists": on("feature_lists"),
+            "comments": on("feature_club_comments"),
+            "tasteoffs": on("feature_tasteoffs"),
+            "global_clubs": on("feature_global_clubs"),
+        }
+
+    def _locale(self, update, chat_id) -> str:
+        fn = getattr(self.handler, "locale_for", None)
+        if callable(fn):
+            return fn(update=update, chat_id=chat_id)
+        return "en"
+
+    async def _club(self, update, context, api, chat_id, parsed, text) -> bool:
+        from integrations.club_chat import render_club
+        from integrations.copy import t as copy_t
+
+        payload = dict(parsed.get("club") or {})
+        kind = payload.get("kind") or "none"
+        if kind in ("none", ""):
+            payload["kind"] = "members"
+        remembered = self._load(chat_id)
+        pending = remembered.get("club_ask") or {}
+        if pending.get("club_id") and not payload.get("club_id"):
+            payload["club_id"] = pending.get("club_id")
+        if pending.get("member_id") and not payload.get("member_id"):
+            payload["member_id"] = pending.get("member_id")
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(None, lambda: api.club_ask(payload))
+        except Exception as exc:
+            logger.warning("[chat] club status=down chat=%s detail=%s", chat_id, exc)
+            await self._say(update, copy_t(self._locale(update, chat_id), "chat.club.down"))
+            return True
+        if not isinstance(result, dict):
+            result = {}
+        status = result.get("status") or result.get("error") or ""
+        logger.info("[chat] club kind=%s status=%s chat=%s", payload.get("kind"), status, chat_id)
+        if result.get("error") == "not_enabled" or status in ("fallback", "not_enabled"):
+            await self._wine_chat(update, context, api, chat_id, text)
+            return True
+        locale = self._locale(update, chat_id)
+        text_out = render_club(result, locale)
+        self._save(chat_id, {
+            **remembered,
+            "club_ask": payload,
+            "club_kind": payload.get("kind"),
+        })
+        await self._say(update, text_out, self._club_markup(result))
+        return True
+
+    def _club_markup(self, result: dict):
+        from integrations.club_chat import club_pick_buttons
+
+        cb, *_rest = _tools()
+        pairs = []
+        for label, action, wine_id, page in club_pick_buttons(result):
+            kwargs = {}
+            if wine_id is not None:
+                kwargs["wine_id"] = wine_id
+            if page is not None:
+                kwargs["page"] = page
+            if action == "ca":
+                if page == 1:
+                    kwargs["original"] = "list"
+                elif wine_id:
+                    kwargs["original"] = "members"
+                else:
+                    kwargs["original"] = "clubs"
+            pairs.append((label, cb(action, **kwargs)))
+        return _markup(pairs) if pairs else None
+
+    async def _club_from_pick(self, update, context, api, chat_id, **fields) -> None:
+        ask = self._load(chat_id)
+        payload = dict(ask.get("club_ask") or {})
+        payload.update(fields)
+        parsed = {"club": payload, "intent": "club"}
+        await self._club(update, context, api, chat_id, parsed, "")
+
     async def _help(self, update, context, api, chat_id, text, parsed) -> None:
         # Known topics still have a canned line if the model is down.
         topic = parsed.get("help_topic") or "other"
@@ -503,6 +614,7 @@ class ChatRouter:
                 lambda: self.chat.support(
                     text, staff=self._staff(chat_id),
                     household_id=getattr(api, "household_id", None),
+                    features=self._chat_features(),
                 ),
             )
         except ChatFailure as exc:
@@ -990,6 +1102,40 @@ class ChatRouter:
                 update, api, chat_id, wine, write.get("intent"), write.get("payload") or {},
                 write.get("currency") or "", write.get("parsed") or {},
             )
+            return
+        if action == "cg":
+            club_id = data.get("wine_id")
+            if not club_id:
+                await self._edit(message, FINISHED, update)
+                return
+            await self._club_from_pick(
+                update, context, api, chat_id, club_id=club_id, club_name="",
+            )
+            return
+        if action == "cm":
+            member_id = data.get("wine_id")
+            club_id = data.get("page")
+            extra = {"member_id": member_id, "member_name": ""}
+            if club_id:
+                extra["club_id"] = club_id
+            await self._club_from_pick(update, context, api, chat_id, **extra)
+            return
+        if action == "ca":
+            which = data.get("original") or "members"
+            club_id = data.get("wine_id")
+            if which == "clubs":
+                await self._club_from_pick(
+                    update, context, api, chat_id, kind="my_clubs",
+                    club_id=None, club_name="", member_id=None, member_name="",
+                )
+                return
+            extra = {
+                "kind": "list" if which == "list" else "members",
+                "member_id": None, "member_name": "",
+            }
+            if club_id:
+                extra["club_id"] = club_id
+            await self._club_from_pick(update, context, api, chat_id, **extra)
 
     async def _next(self, chat_id, ask, message, update, api):
         queue = list(ask.get("queue") or [])

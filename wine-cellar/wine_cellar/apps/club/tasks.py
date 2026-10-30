@@ -265,6 +265,8 @@ def deliver_club_event(event_id):
 
 @shared_task(name="club_share_notice")
 def club_share_notice(household_id, exclude_user_id):
+    if not flag_on("feature_clubs"):
+        return
     household = Household.objects.filter(id=household_id).first()
     if household is None:
         return
@@ -299,6 +301,8 @@ def club_share_notice(household_id, exclude_user_id):
 
 @shared_task(name="club_widen_notice")
 def club_widen_notice(club_id):
+    if not flag_on("feature_clubs"):
+        return
     club = Club.objects.filter(id=club_id).first()
     if club is None:
         return
@@ -364,6 +368,8 @@ def _vote_status_text(vote, locale, club_name=None):
 
 @shared_task(name="deliver_dismantle_ballots")
 def deliver_dismantle_ballots(vote_id):
+    if not flag_on("feature_clubs"):
+        return
     vote = (
         ClubDismantleVote.objects.select_related("club", "proposed_by")
         .filter(id=vote_id)
@@ -424,6 +430,8 @@ def deliver_dismantle_ballots(vote_id):
 
 @shared_task(name="refresh_dismantle_status")
 def refresh_dismantle_status(vote_id):
+    if not flag_on("feature_clubs"):
+        return
     vote = ClubDismantleVote.objects.select_related("club", "proposed_by").filter(
         id=vote_id,
     ).first()
@@ -455,6 +463,8 @@ def refresh_dismantle_status(vote_id):
 
 @shared_task(name="notify_dismantle_resolved")
 def notify_dismantle_resolved(vote_id, status, club_name, rejector_id=None, recipients=None):
+    if not flag_on("feature_clubs"):
+        return
     if recipients:
         rows = list(recipients)
     else:
@@ -505,6 +515,8 @@ def notify_dismantle_resolved(vote_id, status, club_name, rejector_id=None, reci
 
 @shared_task(name="expire_dismantle_votes")
 def expire_dismantle_votes():
+    if not flag_on("feature_clubs"):
+        return
     now = timezone.now()
     open_votes = ClubDismantleVote.objects.filter(
         status=ClubDismantleVote.STATUS_OPEN, expires_at__lte=now,
@@ -676,11 +688,15 @@ def deliver_tasteoff_closed(tasteoff_id):
 
 @shared_task(name="notify_kicked")
 def notify_kicked(club_name, chat_ids):
+    if not flag_on("feature_clubs"):
+        return
     token = _bot_token()
     if not token or not chat_ids:
         return
     for chat_id in chat_ids:
-        tu = TelegramUser.objects.filter(chat_id=str(chat_id), is_active=True).select_related("user").first()
+        tu = TelegramUser.objects.filter(
+            chat_id=str(chat_id), is_active=True,
+        ).select_related("user").first()
         loc = locale_for_user(tu.user) if tu is not None else "en"
         _send(
             token, chat_id, t(loc, "club.global.kicked", name=club_name),
@@ -690,6 +706,8 @@ def notify_kicked(club_name, chat_ids):
 
 @shared_task(name="close_stale_tasteoffs")
 def close_stale_tasteoffs():
+    if not flag_on("feature_clubs") or not flag_on("feature_tasteoffs"):
+        return
     cutoff = timezone.now() - timedelta(days=7)
     stale = TasteOff.objects.filter(
         status=TasteOff.STATUS_SCORING, opened_at__lte=cutoff,

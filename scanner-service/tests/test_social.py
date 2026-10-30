@@ -286,3 +286,37 @@ def test_afrikaans_phase3_buttons():
     assert t("af", "club.td.btn") == "To-drink-lys"
     assert t("af", "club.to.open") == "Begin telling"
     assert t("af", "club.list.empty") == "Niks op die klublys nie."
+
+
+@pytest.mark.asyncio
+async def test_feed_shows_comment_and_to_drink_when_flags_on():
+    api = MagicMock()
+    api.club_feed.return_value = {
+        "events": [
+            {
+                "id": 88, "kind": "opened", "actor_name": "Riley",
+                "wine_name": "Merlot", "vintage": 2019, "retracted": False,
+            },
+        ],
+        "count": 1,
+    }
+    handler = _handler(api, feature_club_comments="on", feature_lists="on")
+    update = _update()
+    query = _query(club_cb("fd", 3, 0))
+    update.callback_query = query
+    await handler._club_flow().on_callback(update, MagicMock())
+    labels = _labels(query.edit_message_text.call_args.kwargs.get("reply_markup"))
+    assert t("en", "club.comment.btn") in labels
+    assert t("en", "club.td.btn") in labels
+
+
+@pytest.mark.asyncio
+async def test_club_list_add_blocked_when_lists_off():
+    api = MagicMock()
+    handler = _handler(api)
+    update = _update()
+    query = _query(club_cb("la", 3))
+    update.callback_query = query
+    await handler._club_flow().on_callback(update, MagicMock())
+    assert query.edit_message_text.call_args.args[0] == t("en", "club.td.off")
+    api.add_club_list_item.assert_not_called()

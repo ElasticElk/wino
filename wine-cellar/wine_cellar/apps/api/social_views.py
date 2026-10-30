@@ -8,12 +8,12 @@ from rest_framework import status
 from rest_framework.response import Response
 
 from wine_cellar.apps.api.club_views import (
-    ClubsEnabledMixin,
     ClubsDisabled,
+    ClubsEnabledMixin,
     _member_or_404,
 )
-from wine_cellar.apps.api.views import ScannerAPIView
 from wine_cellar.apps.api.list_views import serialize_item
+from wine_cellar.apps.api.views import ScannerAPIView
 from wine_cellar.apps.club.models import (
     ClubComment,
     ClubEvent,
@@ -271,13 +271,13 @@ def _peek_wine_if_full(membership, wine_id):
     )
     if target is None:
         return None
-        vis = tighter_visibility(
-            effective_visibility(membership.club, membership),
-            effective_visibility(target.club, target),
-        )
-        if vis != "full":
-            return None
-        return wine
+    vis = tighter_visibility(
+        effective_visibility(membership.club, membership),
+        effective_visibility(target.club, target),
+    )
+    if vis != "full":
+        return None
+    return wine
 
 
 def serialize_bottle(bottle: TasteOffBottle, *, scores=None, hide_others=True, user=None):

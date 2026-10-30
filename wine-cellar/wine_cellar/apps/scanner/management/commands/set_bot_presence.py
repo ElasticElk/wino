@@ -48,6 +48,7 @@ COMMANDS = [
 ADMIN_COMMANDS = [
     ("admin", "Staff tools"),
     ("stats", "Every cellar at a glance"),
+    ("chatstats", "How chat suggestions are landing"),
     ("households", "List every household"),
     ("members", "Members of a named household"),
     ("whois", "Find someone by name or chat ID"),
@@ -89,9 +90,14 @@ class Command(BaseCommand):
             )
             commands.insert(after + 1, ("club", "Wine clubs"))
         public = [{"command": c, "description": d} for c, d in commands]
+        staff_commands = list(ADMIN_COMMANDS)
+        if not flag_on("feature_global_clubs"):
+            staff_commands = [
+                (c, d) for c, d in staff_commands if c != "clubpost"
+            ]
         staff = [
             {"command": c, "description": d}
-            for c, d in commands + ADMIN_COMMANDS
+            for c, d in commands + staff_commands
         ]
         staff_chat_ids = list(
             TelegramUser.objects.filter(

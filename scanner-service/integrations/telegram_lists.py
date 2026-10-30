@@ -375,7 +375,7 @@ class ListFlow:
             else:
                 await _safe_edit(query, t(loc, "list.err"))
             return
-        await _safe_edit(query, t(loc, "list.removed"))
+        await self._show_page(update, context, page=0, query=query)
 
     async def _move_to_cellar(self, update, context, data):
         from integrations.telegram_bot import _cb, _safe_edit
@@ -472,18 +472,18 @@ class ListFlow:
             stock_item_id = result.get("item_id")
             markup = InlineKeyboardMarkup([
                 [InlineKeyboardButton(
-                    "Add another bottle?",
+                    t(loc, "list.dup.add_another"),
                     callback_data=_cb("lc", item_id=item_id, original="dup"),
                 )],
                 [InlineKeyboardButton(
-                    "That's the one",
+                    t(loc, "list.dup.thats_the_one"),
                     callback_data=_cb("lc", item_id=item_id, original="ack"),
                 )],
             ])
             name = result.get("wine_name") or "that wine"
             await _safe_edit(
                 query,
-                f"Already added <b>{esc(name)}</b> a moment ago.\n\nAdd another bottle?",
+                t(loc, "list.dup.body", name=f"<b>{esc(name)}</b>"),
                 parse_mode="HTML",
                 reply_markup=markup,
             )
