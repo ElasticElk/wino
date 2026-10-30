@@ -332,6 +332,147 @@ MESSAGES: dict[str, dict[str, str]] = {
         "chat.btn.stock": "What's in stock",
         "chat.btn.drink": "What should I drink",
         "chat.btn.help": "How Whiney works",
+        "chat.resting": (
+            "💤 My chat side is having a rest for a moment. Everything else still works: "
+            "/stock, /fridge, or type a wine name to search. Try me again in a minute."
+        ),
+        "chat.rec_slow": "⏳ That took longer than it should. Want me to try again?",
+        "chat.rec_quick": "🍷 My sommelier brain is offline, so here's a quick pick from your cellar:",
+        "chat.cellar_down": (
+            "🍷 I can't reach your cellar right now, so I can't check the shelves. "
+            "Give it a minute and tap Try again."
+        ),
+        "chat.write_failed": "Couldn't save that just now, and nothing was changed. Tap Try again.",
+        "chat.wine_gone": "That wine isn't in your cellar any more.",
+        "chat.write_rejected": "That value didn't look right.",
+        "chat.ask_lost": "I lost track of that suggestion. Just ask me again.",
+        "chat.followup_footer": "(I can't remember follow-ups right now, so just ask again for another.)",
+        "chat.finished": "That one's finished — just ask again.",
+        "chat.place.ask_location": (
+            "📍 Tap the button to share where you are and I'll find somewhere nearby "
+            "with a good wine list for your taste. Or just type a suburb or town."
+        ),
+        "chat.place.down": "I couldn't search for places just now. Try again in a minute.",
+        "chat.place.none": (
+            "I couldn't find anywhere there I'd vouch for. Try a nearby suburb or town."
+        ),
+        "chat.place.searching": "🔎 Searching the web for places near you…",
+        "chat.place.reading": "🍷 Reading wine lists…",
+        "chat.place.reviews": "⭐ Checking reviews…",
+        "chat.place.matching": "⚖️ Matching them to your taste…",
+        "chat.place.narrowing": "🗺️ Narrowing it down to the best few…",
+        "chat.place.still": "⏳ Still searching — good wine lists take a moment…",
+        "chat.place.got_location": "📍 Got your location.",
+        "chat.place.got_area": "📍 Got it — {area}.",
+        "chat.place.thanks": "📍 Thanks — noted where you are.",
+        "chat.place.header": "📍 <b>Good wine near you</b>",
+        "chat.place.header_area": "📍 <b>Good wine in {area}</b>",
+        "chat.place.footnote": "<i>Found with a live web search — worth checking they're open.</i>",
+        "chat.help.invite": (
+            "To add someone to this cellar, send /invite. I'll give you a link to share. "
+            "They open it, pick a name, and they're in."
+        ),
+        "chat.help.new_cellar_staff": (
+            "To start a new cellar, send /newcellar. I'll give you a link; they pick a name "
+            "and get their own cellar. To add someone to <i>this</i> one instead, send /invite."
+        ),
+        "chat.help.new_cellar": (
+            "A new cellar needs a staff invite. If /newcellar is in your / menu, send that. "
+            "Otherwise ask whoever set Whiney up. To add someone to <i>this</i> cellar, send /invite."
+        ),
+        "chat.help.switch": (
+            "Send /switch to pick another cellar. /household shows which one you're on and who is in it."
+        ),
+        "chat.help.photo": (
+            "Just send a photo of the label, or of the barcode. No command needed. "
+            "I'll read it and you can add it."
+        ),
+        "chat.help.take_out": (
+            "Scan the bottle out, or ask me what to open, tap <i>That's the one</i>, then "
+            "<i>Take it out now</i>. After a shuffle, /fridge then Catch up walks a drawer."
+        ),
+        "chat.help.commands": (
+            "Ask me what to open, what's in a fridge, or send a label photo.\n"
+            "/invite — add someone to this cellar\n"
+            "/household — who's in it\n"
+            "/switch — another cellar\n"
+            "/help — the full list"
+        ),
+        "chat.looking": "🍷 Looking through your cellar…",
+        "chat.progress.matching": "🔎 Checking what's drinking well right now…",
+        "chat.progress.matching_phrase": "🔎 Matching \"{phrase}\" against your tasting notes…",
+        "chat.progress.narrowing": "⚖️ Down to a few — picking the best one…",
+        "chat.progress.slow": "⏳ Taking a little longer than usual — nearly there.",
+        "chat.pick.none_notes": "<i>None of your notes mention {words} — this is the closest.</i>\n",
+        "chat.pick.tie": "🍷 Two fit equally well:\n{first}\n{second}\n\nEither one — or shall I suggest something else?",
+        "chat.pick.ask": "{evidence}{bottle}\n{reason}\n\nDoes that look right, or shall I suggest something else?",
+        "chat.enjoy": "🍷 Enjoy the <b>{name}</b>{loc}.",
+        "chat.no_problem": "No problem.",
+        "chat.pick.exhausted": "That's everything that fits — ask me another way and I'll look again.",
+        "chat.write.no_price": "I didn't catch the price.",
+        "chat.write.no_change": "I didn't catch what to change.",
+        "chat.write.which": "Which bottle?",
+        "chat.write.which_mean": "Which bottle do you mean?",
+        "chat.write.set_price": "💷 Set <b>{name}</b> to {shown}.{note}",
+        "chat.write.currency_note": " (stored as {currency})",
+        "chat.write.updated": "✏️ Updated <b>{name}</b>: {bits}.",
+        "chat.write.updated_card": "✏️ Updated <b>{name}</b>: {bits}. Add will use this.",
+        "chat.write.not_found": "I couldn't find '{name}' in your cellar.",
+        "chat.checkout.fail": "Couldn't take that out just now, and nothing changed. Tap it again in a moment.",
+        "chat.checkout.gone": "That bottle's already out of stock.",
+        "chat.checkout.taken": "📤 <b>Taken out:</b> {name}",
+        "chat.checkout.from": "📍 from {storage}",
+        "chat.checkout.stock": "📊 In stock: {n}",
+        "chat.link": (
+            "🔗 I can't open links yet.\n\n"
+            "If that's a wine list, take a <b>screenshot</b> or photo of it "
+            "and send me that — I'll read it and tell you what to order."
+        ),
+        "chat.hint": (
+            "💡 Type a wine name to search, send a <b>photo</b> of a bottle to add one, "
+            "or try /help."
+        ),
+        "chat.err.generic": "Something went wrong just now. Try again in a minute.",
+        "chat.err.search": "I couldn't search the cellar just now. Try again in a minute.",
+        "chat.search.none": (
+            "🔍 Nothing matching <b>{query}</b> in your cellar.\n\n"
+            "📸 If you've just bought it, send me a photo of the label."
+        ),
+        "chat.search.header_one": "🔍 <b>1 match for \"{query}\"</b>\n",
+        "chat.search.header_many": "🔍 <b>{n} matches for \"{query}\"</b>\n",
+        "chat.search.more": "\n<i>... and {n} more — try a narrower search.</i>",
+        "chat.search.none_left": "none left",
+        "chat.drink.confirm": "Remove 1× <b>{name}</b>{extra} and mark it as drunk?",
+        "chat.drink.stock_bit": " ({stock} in stock)",
+        "chat.drink.which": "Which one did you drink?",
+        "chat.drink.none": "Nothing matching <b>{query}</b>{where} in stock.",
+        "chat.drink.in_storage": " in <b>{storage}</b>",
+        "chat.drink.closest": "\n\nClosest in stock:",
+        "chat.drink.browse_hint": (
+            "\n\nBrowse the fridge, or send a label photo if it wasn't in the cellar."
+        ),
+        "chat.drink.which_fridge": "Which fridge did you take it from?",
+        "chat.drink.waiting": "Nothing waiting to mark as drunk — send a photo or name the wine.",
+        "chat.add.waiting": "Nothing waiting to add, send me a photo of the label.",
+        "chat.list.added_named": "📝 {name} is on your To-drink list.",
+        "chat.list.already_named": "📝 {name} was already on your To-drink list.",
+        "chat.fact.which_storage": "Which one? {names}",
+        "chat.fact.missing_storage": "I can't find a storage called '{name}'. You have: {names}.",
+        "chat.fact.empty_drawer": "D{n} is empty.",
+        "chat.fact.empty_drawer_in": "D{n} in the {storage} is empty.",
+        "chat.fact.storage_empty": "{storage} is empty.",
+        "chat.fact.country_none": "Nothing from {name} in the cellar.",
+        "chat.fact.country_hit": "From {name}",
+        "chat.fact.grape_none": "You don't have a {grape}.",
+        "chat.fact.grape_hit": "{grape} in your cellar:",
+        "chat.fact.grape_alias": "No bottle labelled {asked}, but these are the same grape ({shown}):",
+        "chat.fact.blend": "(blend with {grape})",
+        "chat.fact.none_matching": "Nothing matching {query} in the cellar.",
+        "chat.quick.note": "The tasting note matches what you asked for.",
+        "chat.quick.attribute": "It's marked with what you asked for.",
+        "chat.quick.grape": "The grape matches what you asked for.",
+        "chat.quick.solid": "A solid bottle from what's open in the cellar.",
+        "chat.drank": "🍷 <b>Drank:</b> {name}\n📊 In stock: {stock}",
     },
     "af": {
         "invite.join.share": (
@@ -657,6 +798,147 @@ MESSAGES: dict[str, dict[str, str]] = {
         "chat.btn.stock": "What's in stock",
         "chat.btn.drink": "What should I drink",
         "chat.btn.help": "How Whiney works",
+        "chat.resting": (
+            "💤 My kantlyn rus 'n oomblik. Alles anders werk nog: "
+            "/stock, /fridge, of tik 'n wynnaam om te soek. Probeer my oor 'n minuut weer."
+        ),
+        "chat.rec_slow": "⏳ Dit het langer gevat as wat dit moet. Moet ek weer probeer?",
+        "chat.rec_quick": "🍷 My sommelier-brein is af, so hier's 'n vinnige keuse uit jou kelder:",
+        "chat.cellar_down": (
+            "🍷 Ek kan jou kelder nou nie bereik nie, so ek kan nie die rakke nagaan nie. "
+            "Wag 'n minuut en tik Try again."
+        ),
+        "chat.write_failed": "Kon dit nie nou stoor nie, en niks is verander nie. Tik Try again.",
+        "chat.wine_gone": "Daai wyn is nie meer in jou kelder nie.",
+        "chat.write_rejected": "Daai waarde het nie reg gelyk nie.",
+        "chat.ask_lost": "Ek het daai voorstel verloor. Vra my net weer.",
+        "chat.followup_footer": "(Ek onthou nie opvolge nou nie, so vra net weer vir 'n ander een.)",
+        "chat.finished": "Daai een is klaar — vra net weer.",
+        "chat.place.ask_location": (
+            "📍 Tik die knoppie om te deel waar jy is, dan soek ek iewers naby "
+            "met 'n goeie wynlys vir jou smaak. Of tik net 'n voorstad of dorp."
+        ),
+        "chat.place.down": "Kon nie nou plekke soek nie. Probeer oor 'n minuut weer.",
+        "chat.place.none": (
+            "Ek kon nêrens daar vind wat ek sou aanbeveel nie. Probeer 'n nabygeleë voorstad of dorp."
+        ),
+        "chat.place.searching": "🔎 Soek op die web vir plekke naby jou…",
+        "chat.place.reading": "🍷 Lees wynlyste…",
+        "chat.place.reviews": "⭐ Kyk na resensies…",
+        "chat.place.matching": "⚖️ Pas hulle by jou smaak…",
+        "chat.place.narrowing": "🗺️ Smal dit af tot die beste paar…",
+        "chat.place.still": "⏳ Soek nog — goeie wynlyste vat 'n oomblik…",
+        "chat.place.got_location": "📍 Het jou ligging.",
+        "chat.place.got_area": "📍 Het dit — {area}.",
+        "chat.place.thanks": "📍 Dankie — ek het waar jy is.",
+        "chat.place.header": "📍 <b>Goeie wyn naby jou</b>",
+        "chat.place.header_area": "📍 <b>Goeie wyn in {area}</b>",
+        "chat.place.footnote": "<i>Gevind met 'n lewendige websoektog — kyk of hulle oop is.</i>",
+        "chat.help.invite": (
+            "Om iemand by hierdie kelder te voeg, stuur /invite. Ek gee jou 'n skakel om te deel. "
+            "Hulle maak dit oop, kies 'n naam, en hulle is in."
+        ),
+        "chat.help.new_cellar_staff": (
+            "Om 'n nuwe kelder te begin, stuur /newcellar. Ek gee jou 'n skakel; hulle kies 'n naam "
+            "en kry hul eie kelder. Om iemand by <i>hierdie</i> een te voeg, stuur /invite."
+        ),
+        "chat.help.new_cellar": (
+            "'n Nuwe kelder het 'n personeel-uitnodiging nodig. As /newcellar in jou / kieslys is, stuur dit. "
+            "Anders vra wie Whiney opgestel het. Om iemand by <i>hierdie</i> kelder te voeg, stuur /invite."
+        ),
+        "chat.help.switch": (
+            "Stuur /switch om 'n ander kelder te kies. /household wys watter een jy op is en wie daarin is."
+        ),
+        "chat.help.photo": (
+            "Stuur net 'n foto van die etiket, of van die strepieskode. Geen opdrag nodig nie. "
+            "Ek lees dit en jy kan dit byvoeg."
+        ),
+        "chat.help.take_out": (
+            "Skandeer die bottel uit, of vra my wat om oop te maak, tik <i>That's the one</i>, dan "
+            "<i>Take it out now</i>. Ná 'n skuif, /fridge dan Catch up stap 'n laai."
+        ),
+        "chat.help.commands": (
+            "Vra my wat om oop te maak, wat in 'n yskas is, of stuur 'n etiketfoto.\n"
+            "/invite — voeg iemand by hierdie kelder\n"
+            "/household — wie is daarin\n"
+            "/switch — 'n ander kelder\n"
+            "/help — die volle lys"
+        ),
+        "chat.looking": "🍷 Ek kyk deur jou kelder…",
+        "chat.progress.matching": "🔎 Kyk wat nou lekker drink…",
+        "chat.progress.matching_phrase": "🔎 Pas \"{phrase}\" by jou proe-notas…",
+        "chat.progress.narrowing": "⚖️ Af tot 'n paar — kies die beste een…",
+        "chat.progress.slow": "⏳ Vat 'n bietjie langer as gewoonlik — amper daar.",
+        "chat.pick.none_notes": "<i>Geen van jou notas noem {words} nie — dit is die naaste.</i>\n",
+        "chat.pick.tie": "🍷 Twee pas ewe goed:\n{first}\n{second}\n\nEnigeen — of moet ek iets anders voorstel?",
+        "chat.pick.ask": "{evidence}{bottle}\n{reason}\n\nLyk dit reg, of moet ek iets anders voorstel?",
+        "chat.enjoy": "🍷 Geniet die <b>{name}</b>{loc}.",
+        "chat.no_problem": "Geen probleem.",
+        "chat.pick.exhausted": "Dis alles wat pas — vra my op 'n ander manier en ek kyk weer.",
+        "chat.write.no_price": "Ek het nie die prys gehoor nie.",
+        "chat.write.no_change": "Ek het nie gehoor wat om te verander nie.",
+        "chat.write.which": "Watter bottel?",
+        "chat.write.which_mean": "Watter bottel bedoel jy?",
+        "chat.write.set_price": "💷 Het <b>{name}</b> op {shown} gesit.{note}",
+        "chat.write.currency_note": " (gestoor as {currency})",
+        "chat.write.updated": "✏️ Het <b>{name}</b> bygewerk: {bits}.",
+        "chat.write.updated_card": "✏️ Het <b>{name}</b> bygewerk: {bits}. Add sal dit gebruik.",
+        "chat.write.not_found": "Ek kon '{name}' nie in jou kelder kry nie.",
+        "chat.checkout.fail": "Kon dit nie nou uithaal nie, en niks het verander nie. Tik dit oor 'n oomblik weer.",
+        "chat.checkout.gone": "Daai bottel is al uit voorraad.",
+        "chat.checkout.taken": "📤 <b>Uitgehaal:</b> {name}",
+        "chat.checkout.from": "📍 uit {storage}",
+        "chat.checkout.stock": "📊 In voorraad: {n}",
+        "chat.link": (
+            "🔗 Ek kan nog nie skakels oopmaak nie.\n\n"
+            "As dit 'n wynlys is, neem 'n <b>skermkiekie</b> of foto daarvan "
+            "en stuur dit — ek lees dit en sê wat om te bestel."
+        ),
+        "chat.hint": (
+            "💡 Tik 'n wynnaam om te soek, stuur 'n <b>foto</b> van 'n bottel om een by te voeg, "
+            "of probeer /help."
+        ),
+        "chat.err.generic": "Iets het nou skeefgeloop. Probeer oor 'n minuut weer.",
+        "chat.err.search": "Ek kon die kelder nou nie deursoek nie. Probeer oor 'n minuut weer.",
+        "chat.search.none": (
+            "🔍 Niks wat by <b>{query}</b> in jou kelder pas nie.\n\n"
+            "📸 As jy dit net gekoop het, stuur my 'n foto van die etiket."
+        ),
+        "chat.search.header_one": "🔍 <b>1 treffer vir \"{query}\"</b>\n",
+        "chat.search.header_many": "🔍 <b>{n} treffers vir \"{query}\"</b>\n",
+        "chat.search.more": "\n<i>... en nog {n} — probeer 'n nouer soektog.</i>",
+        "chat.search.none_left": "geen oor",
+        "chat.drink.confirm": "Haal 1× <b>{name}</b>{extra} uit en merk as gedrink?",
+        "chat.drink.stock_bit": " ({stock} in voorraad)",
+        "chat.drink.which": "Watter een het jy gedrink?",
+        "chat.drink.none": "Niks wat by <b>{query}</b>{where} in voorraad pas nie.",
+        "chat.drink.in_storage": " in <b>{storage}</b>",
+        "chat.drink.closest": "\n\nNaaste in voorraad:",
+        "chat.drink.browse_hint": (
+            "\n\nBlaai die yskas, of stuur 'n etiketfoto as dit nie in die kelder was nie."
+        ),
+        "chat.drink.which_fridge": "Uit watter yskas het jy dit gehaal?",
+        "chat.drink.waiting": "Niks wag om as gedrink te merk nie — stuur 'n foto of noem die wyn.",
+        "chat.add.waiting": "Niks wag om by te voeg nie, stuur my 'n foto van die etiket.",
+        "chat.list.added_named": "📝 {name} is op jou To-drink-lys.",
+        "chat.list.already_named": "📝 {name} was al op jou To-drink-lys.",
+        "chat.fact.which_storage": "Watter een? {names}",
+        "chat.fact.missing_storage": "Ek kry nie 'n stoorplek genaamd '{name}' nie. Jy het: {names}.",
+        "chat.fact.empty_drawer": "D{n} is leeg.",
+        "chat.fact.empty_drawer_in": "D{n} in die {storage} is leeg.",
+        "chat.fact.storage_empty": "{storage} is leeg.",
+        "chat.fact.country_none": "Niks van {name} in die kelder nie.",
+        "chat.fact.country_hit": "Van {name}",
+        "chat.fact.grape_none": "Jy het nie 'n {grape} nie.",
+        "chat.fact.grape_hit": "{grape} in jou kelder:",
+        "chat.fact.grape_alias": "Geen bottel gemerk {asked} nie, maar dit is dieselfde druiwe ({shown}):",
+        "chat.fact.blend": "(mengsel met {grape})",
+        "chat.fact.none_matching": "Niks wat by {query} in die kelder pas nie.",
+        "chat.quick.note": "Die proe-nota pas by wat jy gevra het.",
+        "chat.quick.attribute": "Dit is gemerk met wat jy gevra het.",
+        "chat.quick.grape": "Die druiwe pas by wat jy gevra het.",
+        "chat.quick.solid": "'n Soliede bottel uit wat oop is in die kelder.",
+        "chat.drank": "🍷 <b>Gedrink:</b> {name}\n📊 In voorraad: {stock}",
     },
 }
 
@@ -679,6 +961,27 @@ def normalize_locale(value: str | None) -> str:
 
 def locale_from_telegram(language_code) -> str:
     return normalize_locale(language_code if isinstance(language_code, str) else None)
+
+
+_AF_MARKS = (
+    " ek ", " het ", " wat ", " watter ", " hoe ", " iets ", " vanaand",
+    " yskas", " kelder", " gedrink", " wyn ", " myne ", " nie ",
+    " asb ", " asseblief", " waar ", " wie ", " hoeveel", " enige ",
+)
+
+
+def sniff_locale(text: str, fallback: str = "en") -> str:
+    """Upgrade to Afrikaans when the typed line clearly is. Never override AF down to EN."""
+    fallback = normalize_locale(fallback)
+    if fallback == "af":
+        return "af"
+    if not isinstance(text, str):
+        return fallback
+    padded = f" {text.casefold()} "
+    hits = sum(1 for mark in _AF_MARKS if mark in padded)
+    if hits >= 2:
+        return "af"
+    return fallback
 
 
 def t(locale: str, key: str, **kwargs) -> str:

@@ -103,10 +103,10 @@ class FakeChat:
         return self.parse_result
 
     def recommend(self, sentence, taste, block, profile, history, *, allow_question,
-                  household_id=None, answer=None, valid_ids=None):
+                  household_id=None, answer=None, valid_ids=None, locale="en"):
         self.recommend_calls.append({
             "sentence": sentence, "allow_question": allow_question, "answer": answer,
-            "household_id": household_id, "valid_ids": valid_ids,
+            "household_id": household_id, "valid_ids": valid_ids, "locale": locale,
         })
         if self.gate is not None:
             self.gate.wait(2)

@@ -1,13 +1,15 @@
-"""Classify → execute → phrase helpers for typed Telegram messages.
+"""Classify → execute helpers for typed Telegram messages.
 
-The LLM may only classify (and, for a few paths, phrase facts it was given).
-User data always comes from the cellar API. Flag checks live here so a
-feature that is off never falls through to open-ended chat.
+The LLM may only classify. User data always comes from the cellar API.
+Flag checks live here so a feature that is off never falls through to
+open-ended chat. Replies are paced through a wrapper, not by mutating
+frozen Telegram objects.
 """
 
 from __future__ import annotations
 
 import logging
+from contextvars import ContextVar, Token
 from typing import Callable
 
 logger = logging.getLogger(__name__)
@@ -61,6 +63,7 @@ SLOT_KEYS = (
 
 LIST_OPS = ("show", "add", "remove", "none")
 UNKNOWN_KINDS = ("offtopic", "unclear", "none")
+REPLY_LANGUAGES = ("en", "af", "other")
 
 # Below this, we ask rather than execute. Structured high-signal intents
 # still run when the slots they need are filled.
@@ -68,6 +71,8 @@ LOW_CONFIDENCE = 0.55
 DEFAULT_MIN_REPLY_MS = 1000
 
 OUTCOMES = ("answered", "clarified", "unknown", "flag_off")
+
+_turn: ContextVar[dict | None] = ContextVar("whiney_text_turn", default=None)
 
 
 def blank_slots() -> dict:
@@ -151,6 +156,13 @@ def _as_slots(parsed: dict) -> dict:
     return slots
 
 
+def _as_language(value) -> str:
+    name = str(value or "").strip().lower()
+    if name in ("en", "af"):
+        return name
+    return ""
+
+
 def canonical_parse(parsed: dict | None) -> dict:
     """Normalise a classifier payload (new schema or the previous aliases)."""
     data = dict(parsed) if isinstance(parsed, dict) else {}
@@ -172,6 +184,7 @@ def canonical_parse(parsed: dict | None) -> dict:
     data["slots"] = _as_slots(data)
     data["unknown_kind"] = unknown_kind
     data["list_op"] = list_op
+    data["language"] = _as_language(data.get("language"))
     data.setdefault("wine_ref", data["slots"].get("wine") or "")
     return data
 
@@ -228,6 +241,37 @@ def needs_clarification(parsed: dict) -> bool:
     return True
 
 
+def begin_turn(pacer: "ReplyPacer | None", meta: dict | None) -> Token:
+    return _turn.set({"pacer": pacer, "meta": meta if isinstance(meta, dict) else {}})
+
+
+def end_turn(token: Token) -> None:
+    _turn.reset(token)
+
+
+def turn_meta() -> dict | None:
+    state = _turn.get()
+    if not isinstance(state, dict):
+        return None
+    meta = state.get("meta")
+    return meta if isinstance(meta, dict) else None
+
+
+def turn_pacer() -> "ReplyPacer | None":
+    state = _turn.get()
+    if not isinstance(state, dict):
+        return None
+    return state.get("pacer")
+
+
+def note_turn(**kwargs) -> dict | None:
+    meta = turn_meta()
+    if meta is None:
+        return None
+    meta.update(kwargs)
+    return meta
+
+
 class ReplyPacer:
     """Hold the first text reply until min_ms after receipt. No extra wait after that."""
 
@@ -249,20 +293,94 @@ class ReplyPacer:
         return max(0.0, remain)
 
 
-def attach_pacer(message, pacer: ReplyPacer | None) -> None:
-    """Wrap reply_text so the first send waits. Skip when there is no delay
-    so test mocks stay mocks.
+class PacedMessage:
+    """Delegate to a Telegram Message. Wrap reply_* so the first send waits.
+
+    python-telegram-bot Messages are frozen; assigning reply_text raises.
     """
-    if pacer is None or pacer.min_s <= 0 or message is None:
-        return
-    orig = getattr(message, "reply_text", None)
-    if orig is None or getattr(orig, "_whiney_paced", False):
-        return
 
-    async def paced(*args, **kwargs):
-        await pacer.wait()
-        return await orig(*args, **kwargs)
+    def __init__(self, message, pacer: ReplyPacer):
+        object.__setattr__(self, "_inner", message)
+        object.__setattr__(self, "_pacer", pacer)
+        object.__setattr__(self, "_wrapped", {})
 
-    paced._whiney_paced = True
-    paced._whiney_orig = orig
-    message.reply_text = paced
+    def __getattr__(self, name):
+        cached = self._wrapped.get(name)
+        if cached is not None:
+            return cached
+        attr = getattr(self._inner, name)
+        if name.startswith("reply_") and callable(attr):
+            async def paced(*args, **kwargs):
+                await self._pacer.wait()
+                return await attr(*args, **kwargs)
+
+            self._wrapped[name] = paced
+            return paced
+        return attr
+
+    def __setattr__(self, name, value):
+        if name in ("_inner", "_pacer", "_wrapped"):
+            object.__setattr__(self, name, value)
+            return
+        setattr(self._inner, name, value)
+
+
+class PacedUpdate:
+    """Delegate to a Telegram Update with a paced .message / .effective_message."""
+
+    def __init__(self, update, pacer: ReplyPacer):
+        object.__setattr__(self, "_inner", update)
+        object.__setattr__(self, "_pacer", pacer)
+        message = getattr(update, "message", None)
+        paced = PacedMessage(message, pacer) if message is not None else None
+        object.__setattr__(self, "_message", paced)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    @property
+    def message(self):
+        return self._message
+
+    @property
+    def effective_message(self):
+        if self._message is not None:
+            return self._message
+        return getattr(self._inner, "effective_message", None)
+
+    @property
+    def effective_chat(self):
+        return getattr(self._inner, "effective_chat", None)
+
+    @property
+    def effective_user(self):
+        return getattr(self._inner, "effective_user", None)
+
+
+def _is_frozen(obj) -> bool:
+    """True for python-telegram-bot frozen objects. False for mocks."""
+    if obj is None:
+        return False
+    try:
+        obj._whiney_pace_probe = True
+    except Exception:
+        return True
+    try:
+        delattr(obj, "_whiney_pace_probe")
+    except Exception:
+        pass
+    return False
+
+
+def pace_update(update, pacer: ReplyPacer | None):
+    """Wrap a frozen Telegram Update. Leave mocks and mutable fakes alone."""
+    if pacer is None or pacer.min_s <= 0 or update is None:
+        return update
+    if isinstance(update, PacedUpdate):
+        return update
+    message = getattr(update, "message", None)
+    if message is None:
+        return update
+    if not _is_frozen(message) and not _is_frozen(update):
+        return update
+    return PacedUpdate(update, pacer)

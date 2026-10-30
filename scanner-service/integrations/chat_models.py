@@ -20,6 +20,7 @@ import requests
 from integrations.chat_intent import (
     INTENT_ALIASES,
     LIST_OPS,
+    REPLY_LANGUAGES,
     SCHEMA_INTENTS,
     SLOT_KEYS,
     UNKNOWN_KINDS,
@@ -54,7 +55,7 @@ CLUB_KINDS = {
     "badge_progress", "list", "comments",
 }
 HELP_TOPICS = {
-    "invite", "new_cellar", "switch", "photo", "take_out", "commands", "other", "wine",
+    "invite", "new_cellar", "switch", "photo", "take_out", "commands", "other",
 }
 WINE_CHAT_TIMEOUT = 10
 # Live web search. grok-4.3 found cited places in about 5s where the
@@ -70,24 +71,25 @@ PARSE_PROMPT = """You classify one message sent to Whiney, a wine-cellar Telegra
 The message may be in any language (English and Afrikaans first, then any other). Classify by meaning, never by which language it is in.
 intent (pick one):
 - cellar_query: a question about bottles they already own ("what's in D3 of the small fridge", "list my wines", "anything from South Africa", "any shiraz?", "Watter wyne het ek van Frankryk?"). Only their own cellar. Set fact.kind to drawer, storage, country, grape, list_all, or none.
-- club_query: a question about a wine club they belong to — other members' cellars, who is in a club, what clubs they are in, what the club opened, votes, badges, taste-offs, club comments, or a shared club list. Not bottles in their own fridge (that is cellar_query) and not a pick from their own cellar (that is recommend). Always classify club questions as club_query even if you are unsure the feature exists; never turn them into cellar_query, wine_knowledge, or smalltalk_help.
+- club_query: a question about a wine club they belong to — other members' cellars ("how many Merlots does Sam have?", "who has a 2015 Barolo?", "oldest bottle in the club"), what the club opened ("what did Riley drink this week?"), votes, badges, taste-offs, club comments, a shared club list, who is in a club, or what clubs they are in. Not bottles in their own fridge (that is cellar_query) and not a pick from their own cellar (that is recommend). Always classify club questions as club_query even if you are unsure the feature exists; never turn them into cellar_query, wine_knowledge, or smalltalk_help.
 - drink_remove: they already drank, finished, or want a named bottle taken out of stock now ("I drank one of my barolos from the big fridge", "remove a bottle of Chenin", "ek het een van my barolos uit die yskas gedrink"). Not a question about what to open (recommend). Not how to take a bottle out (smalltalk_help). wine_ref is the wine words ("this" if they pointed at a card); fact.storage_text / slots.location is the fridge they named.
 - add_wine: they want to add a bottle to the cellar ("add this", "put it in the fridge", "voeg by die kelder"). Not a to-drink list (list_action).
 - search: a wine name, producer or appellation on its own, looking it up in their cellar.
-- recommend: they want a bottle chosen from their own cellar to open ("what should I drink", "something leathery", "deep red with fennel").
+- recommend: they want a bottle chosen from their own cellar to open ("what should I drink", "something leathery", "deep red with fennel", "iets rooi en diep").
 - list_action: their personal To-drink list ("what's on my to-drink list", "add this to my list", "wat is op my lys?"). list_op is show, add, or remove. Another person's list is club_query (kind list).
-- smalltalk_help: how to use Whiney itself ("how do I add someone", "can I start a new cellar", "how do I invite", "how do I switch", "how do I add a wine", "how do I take a bottle out", "what can you do"). Set help_topic to invite, new_cellar, switch, photo, take_out, commands, or other.
+- smalltalk_help: how to use Whiney itself ("how do I add someone", "can I start a new cellar", "how do I invite", "how do I switch", "how do I add a wine", "how do I take a bottle out", "the fridge is wrong", "I moved things around", "what can you do"). Set help_topic to invite, new_cellar, switch, photo, take_out, commands, or other. Use take_out when they want to fix fridge stock after a shuffle.
 - wine_knowledge: a wine, drink or food-pairing question that is not about their cellar, their clubs, or their lists: what to order at a restaurant they are already at, a grape, region, vintage or producer in general, serving, storing, decanting ("I'm at a steakhouse, what should I order?", "is 2019 a good Barolo year?", "Watter wyn pas by bobotie?"). Never use this for questions about what they own or who they drink with.
-- place: they want a restaurant, wine bar, wine farm or shop found for wine, near them or in a named area. Put a named town/suburb in area and slots.location; leave area empty for "near me".
+- place: they want a restaurant, wine bar, wine farm or shop found for wine, near them or in a named area ("a restaurant near me with good wine for my taste", "any good wine bars near here?", "where can I buy a good Chenin in Stellenbosch?", "Ken jy 'n goeie restaurant naby my met 'n goeie wynlys?"). Put a named town, suburb or area in area and slots.location; leave area empty for "near me".
 - price: they give what they paid ("£18 on the Chenin", "it was 12.50").
 - correct: they say a wine's details are wrong ("wrong wine, it's Aux Moines", "vintage is 2019").
 - answer: only when context.open_question is set and the message answers it. Set answer_index if it matches one of context.options (0-based), else null.
-- unknown: anything else, including off-topic ("how high do planes fly"). Set unknown_kind to offtopic or unclear. Never guess.
+- unknown: anything else. Set unknown_kind to offtopic when it has nothing to do with wine, drink, food, wine places, their cellar or how Whiney works ("how high do planes fly", "write me a poem about cars"); unclear when you cannot tell. Never guess.
 
 club.kind when intent is club_query: members, my_clubs, cellar, who_has, oldest, feed, top_rated, who_drinks, avg_rating, badges, badge_progress, tasteoff, list, comments.
-member_name / slots.person is the person they named. club_name / slots.club is the club they named.
+member_name / slots.person is the person they named, else empty. club_name / slots.club is the club they named, else empty. wine_text is the wine words they used. grape is a grape they named. vintage is a year they said, else null. period is week, month, lately, or empty. when is next, last, a weekday, or empty.
 
 slots: copy names they used (wine, producer, appellation, vintage, colour, grape, person, club, location, quantity). Empty string / null if they did not say it. location is a fridge/rack for cellar_query and drink_remove, or a town for place.
+language: en if the message is English, af if it is Afrikaans (including mixed Afrikaans+English with Afrikaans grammar), otherwise other.
 confidence: 0 to 1. Use below 0.55 when you are guessing or the sentence is ambiguous.
 
 Rules:
@@ -98,17 +100,13 @@ Rules:
 - Copy taste words as written.
 - Never guess a wine, person, or club they did not name."""
 
-PHRASE_PROMPT = """You are Whiney. Turn the facts below into a short Telegram reply in the same language as the user message.
-Use only these facts. If a needed fact is missing, say you do not know. Never invent bottles, people, clubs, scores, stock, or anything about the user's data.
-Plain text, no markdown, at most 90 words."""
-
 RECOMMEND_PROMPT = """You are Whiney, a sommelier choosing from this household's own cellar. Choose only from the wines listed, by their #id.
 - Read every line. Weigh, in this order: what they asked for (colour, grape, notes, occasion, food); the tasting note and attributes as evidence; drink-by (sooner is better when it fits); their own rating and thumbs up/down (avoid thumbs-down bottles unless asked); critic and Vivino scores only to break near-ties; and not repeating a wine from the recently-drunk list.
-- reason: one sentence of at most 25 words. It quotes the note or attribute words that matched when there are any. Never claim a note the wine's line does not contain. evidence says where the match came from, or "none".
+- reason: one sentence of at most 25 words, in the same language as They asked. It quotes the note or attribute words that matched when there are any. Never claim a note the wine's line does not contain. evidence says where the match came from, or "none".
 - If they named a note no wine has (e.g. leather), still pick the closest, set evidence "none", and put the word in no_evidence_for.
 - runner_up: only when a second bottle is genuinely as good. Otherwise id 0.
 - alternatives: up to 4 more good fits, best first.
-- question: only if the message gives nothing that would change your choice AND the cellar has clearly different directions (e.g. reds and whites). One short question, with 2-4 options drawn from this cellar. Otherwise leave it empty and pick."""
+- question: only if the message gives nothing that would change your choice AND the cellar has clearly different directions (e.g. reds and whites). One short question in the same language as They asked, with 2-4 options drawn from this cellar. Option labels stay in English. Otherwise leave it empty and pick."""
 
 
 PLACE_PROMPT = """You are Whiney, a friendly sommelier. Search the web and suggest up to 3 real restaurants, wine bars, wine farms or shops that fit the request, {where}.
@@ -285,6 +283,7 @@ def parse_schema() -> dict:
         "club": club,
         "list_op": _enum(set(LIST_OPS)),
         "unknown_kind": _enum(set(UNKNOWN_KINDS)),
+        "language": _enum(set(REPLY_LANGUAGES)),
     })
 
 
@@ -577,7 +576,7 @@ class ChatModels:
     def recommend(self, sentence: str, taste: dict, cellar_block: str,
                   profile: str, history: list[dict], *, allow_question: bool,
                   household_id: int | None = None, answer: str | None = None,
-                  valid_ids: set[int] | None = None) -> dict:
+                  valid_ids: set[int] | None = None, locale: str = "en") -> dict:
         history_names = ", ".join(
             item.get("wine_name") or item.get("name") or ""
             for item in history
@@ -591,6 +590,8 @@ class ChatModels:
         )
         if answer:
             tail += f"\nThey answered: \"{answer}\""
+        if locale in ("en", "af"):
+            tail += f"\nReply language: {locale}"
         data = self._call(
             RECOMMEND_MODEL,
             [
@@ -654,29 +655,6 @@ class ChatModels:
         if not reply:
             raise ChatFailure("bad_output", "empty reply")
         return reply[:1200]
-
-    def phrase(self, user_text: str, facts: dict, *, locale: str = "en",
-               household_id: int | None = None) -> str:
-        """Phrase API facts in the user's language. Never a source of facts."""
-        data = self._call(
-            PARSE_MODEL,
-            [
-                {"role": "system", "content": PHRASE_PROMPT},
-                {"role": "user", "content": json.dumps(
-                    {"language": locale, "message": user_text, "facts": facts},
-                    default=str,
-                )},
-            ],
-            "whiney_phrase",
-            _obj({"reply": _string()}),
-            WINE_CHAT_TIMEOUT,
-            household_id=household_id,
-        )
-        reply = (data.get("reply") or "").strip()
-        if not reply:
-            raise ChatFailure("bad_output", "empty reply")
-        return reply[:1200]
-
 
     def find_places(self, request: str, profile: str, *, area: str = "",
                     lat: float | None = None, lon: float | None = None,
@@ -866,6 +844,8 @@ def _validate_parse(data: dict) -> dict:
     data["list_op"] = list_op if list_op in LIST_OPS else "none"
     unknown_kind = data.get("unknown_kind") or "none"
     data["unknown_kind"] = unknown_kind if unknown_kind in UNKNOWN_KINDS else "none"
+    lang = str(data.get("language") or "").strip().lower()
+    data["language"] = lang if lang in ("en", "af") else ""
     return data
 
 

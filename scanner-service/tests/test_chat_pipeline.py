@@ -20,7 +20,7 @@ from integrations.chat_intent import (
     needs_clarification,
     slot_summary,
 )
-from integrations.chat_models import PHRASE_PROMPT, PARSE_PROMPT, parse_prompt, parse_schema
+from integrations.chat_models import PARSE_PROMPT, parse_prompt, parse_schema
 from integrations.copy import t
 from test_chat_router import FakeChat, _api, _context, _handler, _labels, _tap, _text, _wine
 
@@ -152,12 +152,12 @@ CASES = [
                       slots=_slots(wine="Barolo", vintage=2015)),
          expect_intent="club_query", expect_outcome="answered", club_ask=True,
          club_result={"status": "ok", "kind": "who_has", "club": {"id": 1, "name": "Thursday reds"},
-                      "query": "2015 Barolo", "members": []}),
+                      "query": "2015 Barolo", "matches": []}),
     dict(id="en_oldest", text="what's the oldest bottle in the club?", locale="en", flags={"feature_clubs": "on"},
          parse=_parse("club_query", club=_club(kind="oldest")),
          expect_intent="club_query", expect_outcome="answered", club_ask=True,
          club_result={"status": "ok", "kind": "oldest", "club": {"id": 1, "name": "Thursday reds"},
-                      "year": 2001, "wines": []}),
+                      "vintage": 2001, "wines": []}),
     dict(id="en_feed", text="what did Riley drink this week?", locale="en", flags={"feature_clubs": "on"},
          parse=_parse("club_query", club=_club(kind="feed", member_name="Riley", period="week"),
                       slots=_slots(person="Riley")),
@@ -168,7 +168,7 @@ CASES = [
          parse=_parse("club_query", club=_club(kind="who_drinks")),
          expect_intent="club_query", expect_outcome="answered", club_ask=True,
          club_result={"status": "ok", "kind": "who_drinks", "club": {"id": 1, "name": "Thursday reds"},
-                      "members": []}),
+                      "ranking": []}),
     dict(id="en_private_list", text="what's on Riley's to-drink list?", locale="en",
          flags={"feature_clubs": "on", "feature_lists": "on"},
          parse=_parse("club_query", club=_club(kind="list", member_name="Riley"),
@@ -387,15 +387,130 @@ CASES = [
     dict(id="en_badges", text="what badges does Sam have?", locale="en", flags={"feature_clubs": "on"},
          parse=_parse("club_query", club=_club(kind="badges", member_name="Sam"), slots=_slots(person="Sam")),
          expect_intent="club_query", expect_outcome="answered", club_ask=True,
-         club_result={"status": "ok", "kind": "badges", "member": "Sam", "badges": []}),
+         club_result={"status": "ok", "kind": "badges", "member": "Sam", "achievements": []}),
     dict(id="en_avg_rating", text="average rating Sam gives", locale="en", flags={"feature_clubs": "on"},
          parse=_parse("club_query", club=_club(kind="avg_rating", member_name="Sam"), slots=_slots(person="Sam")),
          expect_intent="club_query", expect_outcome="answered", club_ask=True,
-         club_result={"status": "ok", "kind": "avg_rating", "member": "Sam", "up": 2, "meh": 0, "down": 0}),
+         club_result={"status": "ok", "kind": "avg_rating", "member": "Sam",
+                      "vote_count": 2, "votes": {"up": 2, "meh": 0, "down": 0}}),
+    # --- extra UX eval: typos, slang, mixed, vague, follow-ups, flags ---
+    dict(id="en_typo_shiraz", text="any shirazz in the fridge??", locale="en",
+         parse=_parse("cellar_query", fact={"kind": "grape", "storage_text": "", "drawer": None, "country_code": "", "grape": "shiraz"},
+                      slots=_slots(grape="shiraz")),
+         expect_intent="cellar_query", expect_outcome="answered", must=["Kanonkop"]),
+    dict(id="en_slang_open", text="what can I crack tonight", locale="en",
+         parse=_parse("recommend", taste={"colour": "any", "words": [], "occasion": "tonight", "food": "", "budget_max": None}),
+         expect_intent="recommend", expect_outcome="answered"),
+    dict(id="af_slang", text="wat kan ek vanaand oopmaak", locale="af",
+         parse=_parse("recommend", language="af", taste={"colour": "any", "words": [], "occasion": "vanaand", "food": "", "budget_max": None}),
+         expect_intent="recommend", expect_outcome="answered"),
+    dict(id="en_mixed_af_en", text="Het ek any Pinotage left in die yskas", locale="af",
+         parse=_parse("cellar_query", language="af", fact={"kind": "grape", "storage_text": "yskas", "drawer": None, "country_code": "", "grape": "Pinotage"},
+                      slots=_slots(grape="Pinotage", location="yskas")),
+         expect_intent="cellar_query", expect_outcome="answered"),
+    dict(id="en_vague_followup", text="and the white?", locale="en",
+         parse=_parse("recommend", taste={"colour": "white", "words": [], "occasion": "", "food": "", "budget_max": None},
+                      slots=_slots(colour="white")),
+         expect_intent="recommend", expect_outcome="answered"),
+    dict(id="en_no_match_grape", text="any malbec?", locale="en",
+         parse=_parse("cellar_query", fact={"kind": "grape", "storage_text": "", "drawer": None, "country_code": "", "grape": "malbec"},
+                      slots=_slots(grape="malbec")),
+         expect_intent="cellar_query", expect_outcome="answered",
+         must=["don't have"], must_not=["Kanonkop Shiraz"]),
+    dict(id="af_no_match_grape", text="het ek malbec?", locale="af",
+         parse=_parse("cellar_query", language="af", fact={"kind": "grape", "storage_text": "", "drawer": None, "country_code": "", "grape": "malbec"},
+                      slots=_slots(grape="malbec")),
+         expect_intent="cellar_query", expect_outcome="answered", must=["nie 'n"]),
+    dict(id="en_multi_storage", text="what's in the fridge?", locale="en",
+         parse=_parse("cellar_query", fact={"kind": "storage", "storage_text": "fridge", "drawer": None, "country_code": "", "grape": ""},
+                      slots=_slots(location="fridge")),
+         expect_intent="cellar_query", expect_outcome="answered"),
+    dict(id="en_list_add_named", text="add Sadie Columella to my list", locale="en",
+         flags={"feature_lists": "on"},
+         parse=_parse("list_action", list_op="add", slots=_slots(wine="Sadie Columella", producer="Sadie")),
+         expect_intent="list_action", expect_outcome="answered",
+         must=["Sadie Columella"], must_not=["Which bottle"]),
+    dict(id="af_list_add_named", text="sit Kanonkop op my lys", locale="af",
+         flags={"feature_lists": "on"},
+         parse=_parse("list_action", language="af", list_op="add", slots=_slots(wine="Kanonkop")),
+         expect_intent="list_action", expect_outcome="answered", must=["Kanonkop"]),
+    dict(id="en_list_remove", text="take that off my list", locale="en",
+         flags={"feature_lists": "on"},
+         parse=_parse("list_action", list_op="remove"),
+         expect_intent="list_action", expect_outcome="answered"),
+    dict(id="en_club_who_has_hit", text="who has Barolo?", locale="en", flags={"feature_clubs": "on"},
+         parse=_parse("club_query", club=_club(kind="who_has", wine_text="Barolo"), slots=_slots(wine="Barolo")),
+         expect_intent="club_query", expect_outcome="answered", club_ask=True,
+         club_result={"status": "ok", "kind": "who_has", "query": "Barolo",
+                      "club": {"id": 1, "name": "Thursday reds"},
+                      "matches": [{"display_name": "Sam", "count": 1,
+                                   "wines": [{"name": "Barolo Cannubi", "vintage": 2015, "stock_count": 1}]}]},
+         must=["Sam", "Barolo"], must_not=["Nobody"]),
+    dict(id="en_club_oldest_hit", text="oldest in the club?", locale="en", flags={"feature_clubs": "on"},
+         parse=_parse("club_query", club=_club(kind="oldest")),
+         expect_intent="club_query", expect_outcome="answered", club_ask=True,
+         club_result={"status": "ok", "kind": "oldest", "club": {"id": 1, "name": "Thursday reds"},
+                      "vintage": 2001,
+                      "wines": [{"name": "Old Vine", "vintage": 2001, "owner": "Riley"}]},
+         must=["2001", "Old Vine"]),
+    dict(id="en_club_drinks_rank", text="who drinks the most?", locale="en", flags={"feature_clubs": "on"},
+         parse=_parse("club_query", club=_club(kind="who_drinks")),
+         expect_intent="club_query", expect_outcome="answered", club_ask=True,
+         club_result={"status": "ok", "kind": "who_drinks", "club": {"id": 1, "name": "Thursday reds"},
+                      "ranking": [{"display_name": "Riley", "count": 4}, {"display_name": "Sam", "count": 1}]},
+         must=["Riley", "4"]),
+    dict(id="en_drink_typo", text="i drnk the kanonkop", locale="en",
+         parse=_parse("drink_remove", wine_ref="kanonkop", slots=_slots(wine="kanonkop")),
+         expect_intent="drink_remove", expect_outcome="answered"),
+    dict(id="af_drink_this", text="ek het hierdie gedrink", locale="af",
+         parse=_parse("drink_remove", language="af", wine_ref="this", slots=_slots(wine="this")),
+         expect_intent="drink_remove", expect_outcome="answered"),
+    dict(id="en_add_this", text="add this", locale="en",
+         parse=_parse("add_wine", slots=_slots(wine="this")),
+         expect_intent="add_wine", expect_outcome="answered", must=["photo"]),
+    dict(id="en_price_af_amount", text="dit was 120", locale="af",
+         parse=_parse("price", language="af", price={"amount": 120, "currency": ""}, wine_ref="this"),
+         expect_intent="price", expect_outcome="answered"),
+    dict(id="en_correct_producer", text="it's Sadie Family actually", locale="en",
+         parse=_parse("correct", correction={"name": "", "producer": "Sadie Family", "vintage": None, "grape": "", "country_code": ""}),
+         expect_intent="correct", expect_outcome="answered"),
+    dict(id="en_place_typo", text="wine bar near stellnbosch", locale="en",
+         parse=_parse("place", area="Stellenbosch", slots=_slots(location="Stellenbosch")),
+         expect_intent="place", expect_outcome="answered"),
+    dict(id="af_help_photo", text="hoe voeg ek 'n wyn by", locale="af",
+         parse=_parse("smalltalk_help", language="af", help_topic="photo"),
+         expect_intent="smalltalk_help", expect_outcome="answered"),
+    dict(id="en_offtopic_weather", text="what's the weather in Cape Town", locale="en",
+         parse=_parse("unknown", unknown_kind="offtopic"),
+         expect_intent="unknown", expect_outcome="unknown",
+         must=["wine"], must_not=["Kanonkop"]),
+    dict(id="en_low_conf_drink_named", text="maybe take the barolo out?", locale="en",
+         parse=_parse("drink_remove", confidence=0.4, wine_ref="barolo", slots=_slots(wine="barolo")),
+         expect_intent="drink_remove", expect_outcome="answered"),
+    dict(id="en_empty_recommend", text="what should I drink", locale="en",
+         parse=_parse("recommend"), wines=[],
+         expect_intent="recommend", expect_outcome="answered"),
+    dict(id="en_html_search", text="Foo <script> bar", locale="en",
+         parse=_parse("search", slots=_slots(wine="Foo")),
+         expect_intent="search", expect_outcome="answered", handled=False),
+    dict(id="en_followup_sam", text="and Sam?", locale="en", flags={"feature_clubs": "on"},
+         parse=_parse("club_query", club=_club(kind="cellar", member_name="Sam"), slots=_slots(person="Sam")),
+         expect_intent="club_query", expect_outcome="answered", club_ask=True,
+         club_result={"status": "ok", "kind": "cellar", "visibility": "full",
+                      "club": {"id": 1, "name": "Thursday reds"}, "member": "Sam",
+                      "count": 0, "wines": []},
+         must=["Sam"]),
+    dict(id="af_flag_lists_off", text="voeg Sadie by my lys", locale="af", flags={},
+         parse=_parse("list_action", language="af", list_op="add", slots=_slots(wine="Sadie")),
+         expect_intent="list_action", expect_outcome="flag_off",
+         must=["eie kelder"], must_not=["Sadie"]),
+    dict(id="en_wine_chat_decant_af", text="moet ek 'n Barolo dekanteer", locale="af",
+         parse=_parse("wine_knowledge", language="af"),
+         expect_intent="wine_knowledge", expect_outcome="answered", wine_chat=True),
 ]
 
 
-assert len(CASES) >= 60, len(CASES)
+assert len(CASES) >= 80, len(CASES)
 
 
 def _run_handler(api, chat, flags=None, locale="en"):
@@ -408,6 +523,7 @@ def _run_handler(api, chat, flags=None, locale="en"):
     api.get_list.return_value = {
         "id": 9, "items": [], "count": 0, "offset": 0, "limit": 5, "name": "To drink",
     }
+    api.add_list_item.return_value = {"id": 1, "already": False}
     return handler
 
 
@@ -484,8 +600,10 @@ def test_classifier_prompt_contract():
     for slot in SLOT_KEYS:
         assert slot in slot_props
     assert schema["properties"]["confidence"]["type"] == "number"
-    assert "PHRASE" not in PARSE_PROMPT or "facts" in PHRASE_PROMPT.lower()
-    assert "Never invent bottles, people, clubs" in PHRASE_PROMPT
+    assert schema["properties"]["language"]["enum"]
+    assert "Do not invent bottles, people, clubs" in PARSE_PROMPT
+    assert "Never guess a wine, person, or club" in PARSE_PROMPT
+    assert "language" in PARSE_PROMPT
 
 
 def test_canonical_parse_aliases_and_slots():

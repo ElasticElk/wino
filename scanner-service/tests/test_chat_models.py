@@ -65,6 +65,7 @@ def _parse_body():
         },
         "list_op": "none",
         "unknown_kind": "none",
+        "language": "en",
     }
 
 
@@ -200,25 +201,8 @@ def test_support_sends_the_manual_and_replies_in_the_payload():
     assert "moet my vrou" in seen["messages"][1]["content"]
 
 
-def test_phrase_only_sends_facts_not_a_free_answer():
-    seen = {}
-
-    def post(url, headers, json, timeout):
-        seen["messages"] = json["messages"]
-        return _response({"reply": "In Thursday reds: Riley (owner), Sam."})
-
-    reply = _models(post).phrase(
-        "who's in my club?",
-        {"kind": "members", "club": "Thursday reds", "members": ["Riley", "Sam"]},
-        locale="en",
-    )
-    assert "Riley" in reply
-    system = seen["messages"][0]["content"]
-    assert "Use only these facts" in system
-    assert "Never invent" in system
-    user = seen["messages"][1]["content"]
-    assert "Thursday reds" in user
-    assert "who's in my club?" in user
+def test_chat_models_has_no_phrase_step():
+    assert not hasattr(ChatModels, "phrase")
 
 
 def test_parse_returns_dict_on_valid_json():

@@ -6,6 +6,7 @@ from integrations.copy import (
     locale_from_telegram,
     missing_af_keys,
     normalize_locale,
+    sniff_locale,
     t,
 )
 
@@ -20,6 +21,12 @@ def test_missing_locale_or_key_falls_back_to_english():
     assert t("xx", "invite.mint.fail") == t("en", "invite.mint.fail")
     assert t("en", "does.not.exist") == "does.not.exist"
     assert t("af", "invite.share.btn") == "Deel uitnodiging"
+
+
+def test_sniff_locale_upgrades_afrikaans_and_never_downgrades():
+    assert sniff_locale("what's in the fridge?", "en") == "en"
+    assert sniff_locale("wat is in die yskas?", "en") == "af"
+    assert sniff_locale("what should I drink tonight?", "af") == "af"
 
 
 def test_locale_mapping():

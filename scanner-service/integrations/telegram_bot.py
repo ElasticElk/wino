@@ -11,6 +11,7 @@ import unicodedata
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable, NamedTuple
 from urllib.parse import urlparse
 
@@ -266,11 +267,12 @@ def _confirm_drink_markup(wine_id: int) -> InlineKeyboardMarkup:
     ])
 
 
-def _confirm_drink_text(wine: dict) -> str:
+def _confirm_drink_text(wine: dict, locale: str = "en") -> str:
+    from integrations.copy import t as copy_t
     name = html.escape(str(wine.get("name") or "that wine"), quote=False)
     stock = wine.get("stock_count")
-    extra = f" ({stock} in stock)" if stock is not None else ""
-    return f"Remove 1× <b>{name}</b>{extra} and mark it as drunk?"
+    extra = copy_t(locale, "chat.drink.stock_bit", stock=stock) if stock is not None else ""
+    return copy_t(locale, "chat.drink.confirm", name=name, extra=extra)
 
 WINE_TYPES = {
     "RE": "Red", "WH": "White", "RO": "Rose", "SP": "Sparkling",
@@ -2984,6 +2986,13 @@ class TelegramBotHandler:
         if chat_id:
             self._chat_id_to_language[str(chat_id)] = language or ""
 
+    def reply_locale(self, update=None, text="", chat_id=None) -> str:
+        from integrations.copy import sniff_locale
+        if not text and update is not None:
+            message = getattr(update, "message", None)
+            text = getattr(message, "text", None) or ""
+        return sniff_locale(text or "", self.locale_for(update=update, chat_id=chat_id))
+
     def locale_for(self, update=None, chat_id=None, language_code=None) -> str:
         from integrations.copy import locale_from_telegram, normalize_locale
 
@@ -2997,7 +3006,7 @@ class TelegramBotHandler:
                 language_code = (
                     getattr(user, "language_code", None) if user is not None else None
                 )
-        stored = (self._chat_id_to_language or {}).get(cid)
+        stored = (getattr(self, "_chat_id_to_language", None) or {}).get(cid)
         if stored:
             return normalize_locale(stored)
         return locale_from_telegram(language_code)
@@ -3455,13 +3464,16 @@ class TelegramBotHandler:
         )
 
     async def _unknown_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Classify → execute → phrase for every free-typed message.
+        """Classify → execute for every free-typed message.
 
         Cheap deterministic paths (invite codes, links, obvious drink/remove)
         still run first and skip the LLM. Everything else goes through ChatRouter.
+        Replies are paced by wrapping the Update, never by mutating frozen
+        Telegram Message objects.
         """
         import time as _time
-        from integrations.chat_intent import ReplyPacer, attach_pacer
+        from integrations.chat_intent import ReplyPacer, begin_turn, end_turn, pace_update
+        from integrations.copy import t as copy_t
 
         text = (update.message.text or "").strip()
         handled_by = "none"
@@ -3475,19 +3487,29 @@ class TelegramBotHandler:
         sleep = getattr(getattr(self, "_router", None), "_sleep", None)
         if sleep is None:
             async def _sleep(delay):
-                import asyncio
                 await asyncio.sleep(delay)
             sleep = _sleep
         pacer = ReplyPacer(now, sleep, self.min_reply_ms())
         self._text_pacer = pacer
-        attach_pacer(update.message, pacer)
-        try:
+        token = None
+        typing_task = None
+
+        async def _kick_typing():
             try:
                 bot = getattr(context, "bot", None)
                 if bot is not None and chat_id:
                     await bot.send_chat_action(chat_id=int(chat_id), action="typing")
             except Exception:
                 pass
+
+        try:
+            token = begin_turn(pacer, self._text_meta)
+            update = pace_update(update, pacer)
+            locale = self.reply_locale(update, text, chat_id=chat_id)
+            try:
+                typing_task = asyncio.get_running_loop().create_task(_kick_typing())
+            except Exception:
+                typing_task = None
 
             if await self._invite_flow().on_text(update, context):
                 handled_by = "invite"
@@ -3505,9 +3527,7 @@ class TelegramBotHandler:
                 handled_by = "link"
                 await pacer.wait()
                 await update.message.reply_text(
-                    "\U0001F517 I can't open links yet.\n\n"
-                    "If that's a wine list, take a <b>screenshot</b> or photo of it "
-                    "and send me that — I'll read it and tell you what to order.",
+                    copy_t(locale, "chat.link"),
                     parse_mode="HTML",
                 )
                 self._text_meta["outcome"] = "answered"
@@ -3557,12 +3577,13 @@ class TelegramBotHandler:
             handled_by = "hint"
             await pacer.wait()
             await update.message.reply_text(
-                "\U0001F4A1 Type a wine name to search, send a <b>photo</b> of a bottle to add one, "
-                "or try /help.",
+                copy_t(locale, "chat.hint"),
                 parse_mode="HTML",
             )
             self._text_meta["outcome"] = "clarified"
         finally:
+            if typing_task is not None and not typing_task.done():
+                typing_task.cancel()
             meta = self._text_meta or {}
             latency_ms = int(round((_time.monotonic() - started) * 1000))
             logger.info(
@@ -3578,6 +3599,8 @@ class TelegramBotHandler:
                 latency_ms,
                 text[:60],
             )
+            if token is not None:
+                end_turn(token)
             self._text_pacer = None
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3709,36 +3732,41 @@ class TelegramBotHandler:
         await self._do_search(update, query)
 
     async def _do_search(self, update: Update, query: str):
+        from integrations.copy import t as copy_t
+        locale = self.reply_locale(update, query)
         if parse_typed_stock(query):
             if await self._maybe_typed_stock(update, None, query):
                 return
         api = self._get_api(update)
         try:
             wines = api.search_wines(query)
-        except Exception as e:
-            await update.message.reply_text(f"Error searching: {e}")
+        except Exception:
+            await update.message.reply_text(copy_t(locale, "chat.err.search"), parse_mode="HTML")
             return
 
+        shown = html.escape(query, quote=False)
         if not wines:
             await update.message.reply_text(
-                f"\U0001F50D Nothing matching <b>{query}</b> in your cellar.\n\n"
-                f"\U0001F4F8 If you've just bought it, send me a photo of the label.",
+                copy_t(locale, "chat.search.none", query=shown),
                 parse_mode="HTML",
             )
             return
 
-        lines = [f"\U0001F50D <b>{len(wines)} match{'es' if len(wines) != 1 else ''} for \"{query}\"</b>\n"]
+        if len(wines) == 1:
+            lines = [copy_t(locale, "chat.search.header_one", query=shown)]
+        else:
+            lines = [copy_t(locale, "chat.search.header_many", n=len(wines), query=shown)]
         keyboard = []
         for w in wines[:8]:
             emoji = WINE_TYPE_EMOJI.get(w.get("wine_type", ""), "\U0001F377")
             stock = w.get("stock_count", 0)
-            stock_str = f"{stock}x" if stock else "none left"
-            lines.append(f"{emoji} <b>{w['name']}</b> — {stock_str}")
+            stock_str = f"{stock}x" if stock else copy_t(locale, "chat.search.none_left")
+            lines.append(f"{emoji} <b>{html.escape(str(w.get('name') or ''), quote=False)}</b> — {stock_str}")
             keyboard.append([InlineKeyboardButton(
-                f"\U0001F4CB {w['name'][:40]}", callback_data=_cb("det", wine_id=w["id"]),
+                f"\U0001F4CB {str(w.get('name') or '')[:40]}", callback_data=_cb("det", wine_id=w["id"]),
             )])
         if len(wines) > 8:
-            lines.append(f"\n<i>... and {len(wines) - 8} more — try a narrower search.</i>")
+            lines.append(copy_t(locale, "chat.search.more", n=len(wines) - 8))
 
         await update.message.reply_text(
             "\n".join(lines), parse_mode="HTML",
@@ -5425,9 +5453,10 @@ class TelegramBotHandler:
                 detail = {}
             if detail:
                 wine = detail
+            chat_id = str(getattr(query.message, "chat_id", "") or "")
             await _safe_edit(
                 query,
-                _confirm_drink_text(wine),
+                _confirm_drink_text(wine, self.reply_locale(chat_id=chat_id)),
                 parse_mode="HTML",
                 reply_markup=_confirm_drink_markup(wine_id),
             )
@@ -7746,8 +7775,9 @@ class TelegramBotHandler:
             api, max_age=TYPED_ADD_TTL, include_complete=True,
         )
         if not cards:
+            from integrations.copy import t as copy_t
             await update.message.reply_text(
-                "Nothing waiting to add, send me a photo of the label."
+                copy_t(self.reply_locale(update), "chat.add.waiting")
             )
             return True
         barcode, _ = cards[0]
@@ -7772,8 +7802,9 @@ class TelegramBotHandler:
                 api, max_age=TYPED_ADD_TTL, include_complete=True,
             )
             if not cards:
+                from integrations.copy import t as copy_t
                 await update.message.reply_text(
-                    "Nothing waiting to mark as drunk — send a photo or name the wine."
+                    copy_t(self.reply_locale(update), "chat.drink.waiting")
                 )
                 return True
             barcode, data = cards[0]
@@ -7786,8 +7817,14 @@ class TelegramBotHandler:
             if hits:
                 await self._start_drink_from_hits(query, api, context, hits)
                 return True
-            fake = update
-            fake.callback_query = query
+            # Real telegram.Update is frozen — never assign callback_query on it.
+            fake = SimpleNamespace(
+                message=getattr(update, "message", None),
+                effective_chat=getattr(update, "effective_chat", None),
+                effective_user=getattr(update, "effective_user", None),
+                callback_query=query,
+                edited_message=None,
+            )
             query.data = _cb("dk", barcode=barcode)
             await self._dispatch_callback(fake, context)
             return True
@@ -7810,10 +7847,12 @@ class TelegramBotHandler:
         if query is None:
             query = _as_edit_query(update)
         storage = self._typed_storage_name(api, location)
+        locale = self.reply_locale(update, query_name)
         try:
             wines = api.wines_in_stock(storage_name=storage) if storage else api.wines_in_stock()
-        except Exception as e:
-            await update.message.reply_text(f"Error: {e}")
+        except Exception:
+            from integrations.copy import t as copy_t
+            await update.message.reply_text(copy_t(locale, "chat.err.generic"))
             return True
         if query_name.strip():
             hits = match_in_stock_wines(wines, query_name)
@@ -7821,26 +7860,31 @@ class TelegramBotHandler:
             hits = list(wines or [])
         if not hits:
             await self._typed_drink_no_match(
-                query, api, query_name, storage, wines,
+                query, api, query_name, storage, wines, locale=locale,
             )
             return True
         if len(hits) == 1:
             await _safe_edit(
                 query,
-                _confirm_drink_text(hits[0]),
+                _confirm_drink_text(hits[0], locale),
                 parse_mode="HTML",
                 reply_markup=_confirm_drink_markup(hits[0]["id"]),
             )
             return True
-        await self._offer_drink_picks(query, hits, confirm=True)
+        await self._offer_drink_picks(query, hits, confirm=True, locale=locale)
         return True
 
     async def _typed_drink_no_match(
         self, query, api, query_name: str, storage: str, wines: list[dict],
+        locale: str = "en",
     ) -> None:
+        from integrations.copy import t as copy_t
         shown = html.escape(query_name or "that", quote=False)
-        where = f" in <b>{html.escape(storage, quote=False)}</b>" if storage else ""
-        text = f"Nothing matching <b>{shown}</b>{where} in stock."
+        where = (
+            copy_t(locale, "chat.drink.in_storage", storage=html.escape(storage, quote=False))
+            if storage else ""
+        )
+        text = copy_t(locale, "chat.drink.none", query=shown, where=where)
         similar = similar_in_stock_wines(wines, query_name) if query_name else []
         if not similar and storage:
             try:
@@ -7849,15 +7893,13 @@ class TelegramBotHandler:
                 similar = []
         keyboard = []
         if similar:
-            text += "\n\nClosest in stock:"
+            text += copy_t(locale, "chat.drink.closest")
             for wine in similar[:5]:
                 keyboard.append([InlineKeyboardButton(
                     _drink_choice_label(wine),
                     callback_data=_cb("dc", wine_id=wine["id"]),
                 )])
-        text += (
-            "\n\nBrowse the fridge, or send a label photo if it wasn't in the cellar."
-        )
+        text += copy_t(locale, "chat.drink.browse_hint")
         browse = storage or "__all__"
         browse_label = f"Browse {storage}" if storage else "Browse stock"
         keyboard.append([InlineKeyboardButton(
@@ -7871,7 +7913,10 @@ class TelegramBotHandler:
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
-    async def _offer_drink_picks(self, query, wines: list[dict], *, confirm: bool = False):
+    async def _offer_drink_picks(
+        self, query, wines: list[dict], *, confirm: bool = False, locale: str = "en",
+    ):
+        from integrations.copy import t as copy_t
         keyboard = []
         action = "dc" if confirm else "dx"
         for wine in wines[:8]:
@@ -7882,7 +7927,7 @@ class TelegramBotHandler:
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data=_cb("x"))])
         await _safe_edit(
             query,
-            "Which one did you drink?",
+            copy_t(locale, "chat.drink.which"),
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
@@ -7921,9 +7966,11 @@ class TelegramBotHandler:
                     callback_data=_cb("ds", wine_id=wine_id, page=ids.get(name) or 0),
                 )] for name in places]
                 keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data=_cb("x"))])
+                from integrations.copy import t as copy_t
+                chat_id = str(getattr(query.message, "chat_id", "") or "")
                 await _safe_edit(
                     query,
-                    "Which fridge did you take it from?",
+                    copy_t(self.reply_locale(chat_id=chat_id), "chat.drink.which_fridge"),
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(keyboard),
                 )
@@ -7932,16 +7979,20 @@ class TelegramBotHandler:
                 storage_name = places[0]
         try:
             result = api.remove_stock(wine_id, storage_name=storage_name)
-        except Exception as e:
-            await _safe_edit(query, f"Error: {e}")
+        except Exception:
+            from integrations.copy import t as copy_t
+            chat_id = str(getattr(query.message, "chat_id", "") or "")
+            await _safe_edit(query, copy_t(self.reply_locale(chat_id=chat_id), "chat.err.generic"))
             return
         if not isinstance(result, dict) or result.get("error"):
             err = (result or {}).get("error") if isinstance(result, dict) else None
             if err and "no stock" in str(err).lower():
                 try:
                     result = api.add_stock(wine_id, drank=True)
-                except Exception as e:
-                    await _safe_edit(query, f"Error: {e}")
+                except Exception:
+                    from integrations.copy import t as copy_t
+                    chat_id = str(getattr(query.message, "chat_id", "") or "")
+                    await _safe_edit(query, copy_t(self.reply_locale(chat_id=chat_id), "chat.err.generic"))
                     return
                 if isinstance(result, dict) and not result.get("error"):
                     await self._show_drank_result(query, context, result, wine_id)
