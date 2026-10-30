@@ -27,6 +27,9 @@ def test_sniff_locale_upgrades_afrikaans_and_never_downgrades():
     assert sniff_locale("what's in the fridge?", "en") == "en"
     assert sniff_locale("wat is in die yskas?", "en") == "af"
     assert sniff_locale("what should I drink tonight?", "af") == "af"
+    assert sniff_locale("haal Sadie van my lys af", "en") == "af"
+    assert sniff_locale("voeg die Kanonkop by die kelder", "en") == "af"
+    assert sniff_locale("add Sadie to my list", "en") == "en"
 
 
 def test_locale_mapping():

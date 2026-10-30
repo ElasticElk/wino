@@ -1490,7 +1490,7 @@ class ChatRouter:
             await self._edit(message, self._c(locale, "chat.checkout.gone"), update)
             return
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        from integrations.telegram_bot import VOTE_PROMPT, vote_keyboard_row
+        from integrations.telegram_bot import vote_keyboard_row
         cb, *_ = _tools()
         chat_id = str(getattr(getattr(update, "effective_chat", None), "id", "") or "")
         locale = self._reply_locale(update, chat_id)
@@ -1503,7 +1503,7 @@ class ChatRouter:
         lines.append(self._c(locale, "chat.checkout.stock", n=result.get("stock_count", 0)))
         keyboard = [[InlineKeyboardButton("↩️ Undo", callback_data=undo)]]
         if item_id:
-            lines += ["", VOTE_PROMPT]
+            lines += ["", self._c(locale, "chat.vote_prompt")]
             keyboard.append(vote_keyboard_row(item_id))
         await self._edit(message, "\n".join(lines), update, InlineKeyboardMarkup(keyboard))
 

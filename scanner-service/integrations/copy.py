@@ -495,6 +495,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "chat.quick.grape": "The grape matches what you asked for.",
         "chat.quick.solid": "A solid bottle from what's open in the cellar.",
         "chat.drank": "🍷 <b>Drank:</b> {name}\n📊 In stock: {stock}",
+        "chat.vote_prompt": "How was it? (optional)",
+        "chat.vote.thanks.up": "👍 Got it.",
+        "chat.vote.thanks.down": "👎 Got it.",
+        "chat.vote.thanks.meh": "Got it.",
     },
     "af": {
         "invite.join.share": (
@@ -983,6 +987,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "chat.quick.grape": "Die druiwe pas by wat jy gevra het.",
         "chat.quick.solid": "'n Soliede bottel uit wat oop is in die kelder.",
         "chat.drank": "🍷 <b>Gedrink:</b> {name}\n📊 In voorraad: {stock}",
+        "chat.vote_prompt": "Hoe was dit? (opsioneel)",
+        "chat.vote.thanks.up": "👍 Het dit.",
+        "chat.vote.thanks.down": "👎 Het dit.",
+        "chat.vote.thanks.meh": "Het dit.",
     },
 }
 
@@ -1011,6 +1019,7 @@ _AF_MARKS = (
     " ek ", " het ", " wat ", " watter ", " hoe ", " iets ", " vanaand",
     " yskas", " kelder", " gedrink", " wyn ", " myne ", " nie ",
     " asb ", " asseblief", " waar ", " wie ", " hoeveel", " enige ",
+    " haal ", " moet ", " voeg ", " lys ", " leeg ",
 )
 
 

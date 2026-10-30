@@ -400,17 +400,32 @@ def vote_keyboard_row(item_id: int, chosen: str | None = None) -> list:
     return buttons
 
 
+def _vote_prompt(locale: str = "en") -> str:
+    from integrations.copy import t as copy_t
+    return copy_t(locale, "chat.vote_prompt")
+
+
+def _vote_thanks(chosen: str, locale: str = "en") -> str:
+    from integrations.copy import t as copy_t
+    key = f"chat.vote.thanks.{chosen}"
+    text = copy_t(locale, key)
+    return text if text != key else VOTE_THANKS.get(chosen, "Got it.")
+
+
 def apply_vote_thanks(text: str, chosen: str) -> str:
     """Swap the vote prompt for a one-line thanks. Keeps the rest of the card."""
-    thanks = VOTE_THANKS.get(chosen, "Got it.")
     if not text:
-        return thanks
-    if VOTE_PROMPT in text:
-        return text.replace(VOTE_PROMPT, thanks)
-    for prior in VOTE_THANKS.values():
-        if prior in text:
-            return text.replace(prior, thanks)
-    return text.rstrip() + "\n\n" + thanks
+        return _vote_thanks(chosen)
+    for loc in ("af", "en"):
+        prompt = _vote_prompt(loc)
+        if prompt in text:
+            return text.replace(prompt, _vote_thanks(chosen, loc))
+    for loc in ("af", "en"):
+        for prior_choice in ("up", "down", "meh"):
+            prior = _vote_thanks(prior_choice, loc)
+            if prior in text:
+                return text.replace(prior, _vote_thanks(chosen, loc))
+    return text.rstrip() + "\n\n" + _vote_thanks(chosen)
 
 
 def apply_vote_choice(markup, chosen: str) -> InlineKeyboardMarkup:
@@ -434,12 +449,14 @@ def apply_vote_choice(markup, chosen: str) -> InlineKeyboardMarkup:
 
 def build_drank_view(
     wine_name: str, stock_count: int, item_id: int, chosen: str | None = None,
-    wine_id: int | None = None,
+    wine_id: int | None = None, locale: str = "en",
 ) -> tuple[str, InlineKeyboardMarkup]:
+    from integrations.copy import t as copy_t
+    safe = html.escape(str(wine_name or "that wine"), quote=False)
     text = (
-        f"\U0001F377 <b>Drank:</b> {wine_name}\n"
-        f"\U0001F4CA In stock: {stock_count}\n\n"
-        f"{VOTE_PROMPT}"
+        copy_t(locale, "chat.drank", name=safe, stock=stock_count)
+        + "\n\n"
+        + _vote_prompt(locale)
     )
     rows = []
     if item_id and wine_id:
@@ -4771,16 +4788,20 @@ class TelegramBotHandler:
         name = card.get("wine_name") or "that wine"
         item_id = card.get("item_id")
         stock = card.get("stock_count") or 0
+        locale = self._empty_locale(query)
         if item_id:
             text, markup = build_drank_view(
-                name, stock, item_id, wine_id=card.get("wine_id"),
+                name, stock, item_id, wine_id=card.get("wine_id"), locale=locale,
             )
             await _safe_edit(query, text, parse_mode="HTML", reply_markup=markup)
             return
+        from integrations.copy import t as copy_t
         await _safe_edit(
             query,
-            f"\U0001F377 <b>Drank:</b> {name}\n"
-            f"\U0001F4CA In stock: {stock}",
+            copy_t(
+                locale, "chat.drank",
+                name=html.escape(str(name), quote=False), stock=stock,
+            ),
             parse_mode="HTML",
         )
 
@@ -5611,15 +5632,20 @@ class TelegramBotHandler:
                     wine_id=wine_id,
                 )
                 if not item_id:
+                    from integrations.copy import t as copy_t
                     await _safe_edit(query,
-                        f"\U0001F377 <b>Drank:</b> {name}\n"
-                        f"\U0001F4CA In stock: {result.get('stock_count', 0)}",
+                        copy_t(
+                            self._empty_locale(query), "chat.drank",
+                            name=html.escape(str(name), quote=False),
+                            stock=result.get("stock_count", 0),
+                        ),
                         parse_mode="HTML",
                     )
                     await self._celebrate(context, query.message.chat_id, result)
                     return
                 text, markup = build_drank_view(
                     name, result.get("stock_count", 0), item_id, wine_id=wine_id,
+                    locale=self._empty_locale(query),
                 )
                 await _safe_edit(query,
                     text, parse_mode="HTML", reply_markup=markup,
@@ -5681,10 +5707,14 @@ class TelegramBotHandler:
                     logged_another=True, wine_id=wine_id,
                 )
                 if not item_id:
+                    from integrations.copy import t as copy_t
                     await _safe_edit(query,
-                        f"\U0001F377 <b>Drank:</b> {name}\n"
-                        f"\U0001F4CA In stock: {result.get('stock_count', 0)}"
-                        if drank else f"📥 <b>Added:</b> {name}",
+                        copy_t(
+                            self._empty_locale(query), "chat.drank",
+                            name=html.escape(str(name), quote=False),
+                            stock=result.get("stock_count", 0),
+                        )
+                        if drank else f"📥 <b>Added:</b> {html.escape(str(name), quote=False)}",
                         parse_mode="HTML",
                     )
                     await self._celebrate(context, query.message.chat_id, result)
@@ -5692,6 +5722,7 @@ class TelegramBotHandler:
                 if drank:
                     text, markup = build_drank_view(
                         name, result.get("stock_count", 0), item_id, wine_id=wine_id,
+                        locale=self._empty_locale(query),
                     )
                     await _safe_edit(query,
                         text, parse_mode="HTML", reply_markup=markup,
@@ -5725,17 +5756,21 @@ class TelegramBotHandler:
                     stock = detail.get("stock_count") or 0
                 except Exception:
                     pass
+            locale = self._empty_locale(query)
             if item_id:
                 text, markup = build_drank_view(
-                    name, stock, item_id, wine_id=wine_id,
+                    name, stock, item_id, wine_id=wine_id, locale=locale,
                 )
                 await _safe_edit(query,
                     text, parse_mode="HTML", reply_markup=markup,
                 )
             else:
+                from integrations.copy import t as copy_t
                 await _safe_edit(query,
-                    f"\U0001F377 <b>Drank:</b> {name}\n"
-                    f"\U0001F4CA In stock: {stock}",
+                    copy_t(
+                        locale, "chat.drank",
+                        name=html.escape(str(name), quote=False), stock=stock,
+                    ),
                     parse_mode="HTML",
                 )
             return
@@ -8044,16 +8079,18 @@ class TelegramBotHandler:
             stock_count=stock, drunk=True, in_progress=False, guard=False,
             wine_id=wine_id,
         )
+        locale = self._empty_locale(query)
         if item_id:
-            text, markup = build_drank_view(name, stock, item_id, wine_id=wine_id)
+            text, markup = build_drank_view(
+                name, stock, item_id, wine_id=wine_id, locale=locale,
+            )
             await _safe_edit(query, text, parse_mode="HTML", reply_markup=markup)
         else:
             from integrations.copy import t as copy_t
-            chat_id = str(getattr(query.message, "chat_id", "") or "")
             await _safe_edit(
                 query,
                 copy_t(
-                    self.reply_locale(chat_id=chat_id),
+                    locale,
                     "chat.drank",
                     name=html.escape(str(name), quote=False),
                     stock=stock,
