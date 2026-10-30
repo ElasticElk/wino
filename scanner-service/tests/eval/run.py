@@ -61,7 +61,7 @@ def main() -> int:
         intents += ok_intent
         intent_n += 1
         print(f"{case['id']}: intent {parsed['intent']} ({'ok' if ok_intent else 'MISS'})")
-        if case["intent"] == "fact" and ok_intent:
+        if case["intent"] == "cellar_query" and ok_intent:
             fact_n += 1
             got = parsed["fact"]
             match = _same(got, case["fact"])

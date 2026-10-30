@@ -2820,6 +2820,9 @@ class TelegramBotHandler:
         self._chat_id_to_country: dict[str, str] = {}
         self._chat_id_to_language: dict[str, str] = {}
         self.flags: dict[str, bool] = {}
+        self._min_reply_ms = 0
+        self._text_pacer = None
+        self._text_meta: dict = {}
         self._enriching_wine_ids: set[int] = set()
         self._label_seq = 0
         self._winelists: dict[str, dict] = {}
@@ -2954,12 +2957,25 @@ class TelegramBotHandler:
 
     def set_flags(self, config: dict | None):
         flags = {}
-        for key, value in (config or {}).items():
+        config = config or {}
+        for key, value in config.items():
             if str(key).startswith("feature_"):
                 flags[str(key)] = str(value or "").strip().lower() in {
                     "on", "true", "1", "yes",
                 }
         self.flags = flags
+        if "chat_min_reply_ms" in config:
+            try:
+                self._min_reply_ms = max(0, int(str(config.get("chat_min_reply_ms") or "1000").strip()))
+            except (TypeError, ValueError):
+                self._min_reply_ms = 1000
+        elif any(k in config for k in ("bot_token", "grok_api_key", "web_url", "default_storage")):
+            # Production bootstrap always has one of these; tests that only
+            # toggle feature_* flags keep a 0 delay.
+            self._min_reply_ms = 1000
+
+    def min_reply_ms(self) -> int:
+        return int(getattr(self, "_min_reply_ms", 0) or 0)
 
     def flag_on(self, key: str) -> bool:
         return bool((getattr(self, "flags", None) or {}).get(key))
@@ -3439,32 +3455,62 @@ class TelegramBotHandler:
         )
 
     async def _unknown_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Plain text from a provisioned user is treated as a search.
+        """Classify → execute → phrase for every free-typed message.
 
-        Typing a wine name is the most natural thing to do in a chat window, and
-        it used to spend the turn explaining that only commands work.
+        Cheap deterministic paths (invite codes, links, obvious drink/remove)
+        still run first and skip the LLM. Everything else goes through ChatRouter.
         """
+        import time as _time
+        from integrations.chat_intent import ReplyPacer, attach_pacer
+
         text = (update.message.text or "").strip()
         handled_by = "none"
+        chat_id = str(getattr(update.effective_chat, "id", "") or "")
+        started = _time.monotonic()
+        self._text_meta = {
+            "intent": "", "confidence": "", "slots": "-", "outcome": "",
+            "classify_ms": 0, "execute_ms": 0,
+        }
+        now = getattr(getattr(self, "_router", None), "_now", None) or _time.monotonic
+        sleep = getattr(getattr(self, "_router", None), "_sleep", None)
+        if sleep is None:
+            async def _sleep(delay):
+                import asyncio
+                await asyncio.sleep(delay)
+            sleep = _sleep
+        pacer = ReplyPacer(now, sleep, self.min_reply_ms())
+        self._text_pacer = pacer
+        attach_pacer(update.message, pacer)
         try:
+            try:
+                bot = getattr(context, "bot", None)
+                if bot is not None and chat_id:
+                    await bot.send_chat_action(chat_id=int(chat_id), action="typing")
+            except Exception:
+                pass
+
             if await self._invite_flow().on_text(update, context):
                 handled_by = "invite"
+                self._text_meta["outcome"] = self._text_meta.get("outcome") or "answered"
                 return
 
             if await self._club_flow().on_text(update, context):
                 handled_by = "club"
+                self._text_meta["outcome"] = self._text_meta.get("outcome") or "answered"
                 return
 
             # A pasted link is not a wine name. Searching the cellar for a URL
             # returns nothing and tells the sender nothing about why.
             if re.search(r"https?://|www\.", text, re.IGNORECASE):
                 handled_by = "link"
+                await pacer.wait()
                 await update.message.reply_text(
                     "\U0001F517 I can't open links yet.\n\n"
                     "If that's a wine list, take a <b>screenshot</b> or photo of it "
                     "and send me that — I'll read it and tell you what to order.",
                     parse_mode="HTML",
                 )
+                self._text_meta["outcome"] = "answered"
                 return
 
             # Drink/remove-one-of-my-X must beat country/region browse and the
@@ -3472,22 +3518,29 @@ class TelegramBotHandler:
             # a card for "I drank one of my barolos" / "Remove one of my barolos".
             if await self._maybe_typed_stock(update, context, text):
                 handled_by = "typed_stock"
+                self._text_meta["intent"] = self._text_meta.get("intent") or "drink_remove"
+                self._text_meta["outcome"] = "answered"
                 return
 
             if await self._maybe_correct_winelist_text(update, text):
                 handled_by = "winelist_correction"
+                self._text_meta["outcome"] = "answered"
                 return
 
             if await self._maybe_typed_add(update, context, text):
                 handled_by = "typed_add"
+                self._text_meta["intent"] = self._text_meta.get("intent") or "add_wine"
+                self._text_meta["outcome"] = "answered"
                 return
 
             if await self._maybe_take_producer(update, text, context):
                 handled_by = "producer"
+                self._text_meta["outcome"] = "answered"
                 return
 
             if await self._maybe_identify_misread_text(update, text):
                 handled_by = "misread"
+                self._text_meta["outcome"] = "answered"
                 return
 
             if len(text) >= 3:
@@ -3496,16 +3549,36 @@ class TelegramBotHandler:
                     handled_by = "chat"
                     return
                 handled_by = "search"
+                self._text_meta["intent"] = self._text_meta.get("intent") or "search"
+                self._text_meta["outcome"] = "answered"
+                await pacer.wait()
                 await self._do_search(update, text)
                 return
             handled_by = "hint"
+            await pacer.wait()
             await update.message.reply_text(
                 "\U0001F4A1 Type a wine name to search, send a <b>photo</b> of a bottle to add one, "
                 "or try /help.",
                 parse_mode="HTML",
             )
+            self._text_meta["outcome"] = "clarified"
         finally:
-            logger.info("[text] handler=%s text=%r", handled_by, text[:240])
+            meta = self._text_meta or {}
+            latency_ms = int(round((_time.monotonic() - started) * 1000))
+            logger.info(
+                "[text] intent=%s confidence=%s slots=%s outcome=%s handler=%s "
+                "classify_ms=%s execute_ms=%s ms=%s text=%r",
+                meta.get("intent") or "-",
+                meta.get("confidence") if meta.get("confidence") not in (None, "") else "-",
+                meta.get("slots") or "-",
+                meta.get("outcome") or "-",
+                handled_by,
+                meta.get("classify_ms") or 0,
+                meta.get("execute_ms") or 0,
+                latency_ms,
+                text[:60],
+            )
+            self._text_pacer = None
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         api = self._get_api(update)
@@ -5089,7 +5162,7 @@ class TelegramBotHandler:
             except Exception as e:
                 logger.info(f"[callback] answer() failed (likely a stale button): {e}")
 
-        if action in ("cf", "cc", "cq", "ck", "cn", "co", "cx", "cr", "cw", "cg", "cm", "ca"):
+        if action in ("cf", "cc", "cq", "ck", "cn", "co", "cx", "cr", "cw", "cg", "cm", "ca", "ct", "cp", "cl"):
             router = getattr(self, "_router", None)
             if router is None:
                 await query.message.reply_text("That's finished — just type again.")

@@ -396,14 +396,19 @@ async def test_location_without_a_pending_place_keeps_the_old_behaviour():
 
 
 @pytest.mark.asyncio
-async def test_unsure_full_sentence_goes_to_wine_chat():
+async def test_unsure_full_sentence_asks_instead_of_inventing():
     api = _api([_wine()])
     chat = FakeChat()
     chat.parse_result = {"intent": "unsure"}
     handler = _handler(api, chat)
     update, _sent = _text("is it ok to chill a pinot noir?")
     assert await handler._router.handle_text(update, _context(), update.message.text) is True
-    assert len(chat.wine_chat_calls) == 1
+    assert chat.wine_chat_calls == []
+    body = update.message.reply_text.await_args.args[0]
+    assert "not sure" in body.lower() or "didn't quite catch" in body.lower()
+    labels = _labels(update.message.reply_text.await_args.kwargs.get("reply_markup"))
+    assert "What's in stock" in labels
+    assert "What should I drink" in labels
 
 
 @pytest.mark.asyncio

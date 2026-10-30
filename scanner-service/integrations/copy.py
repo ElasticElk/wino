@@ -315,6 +315,23 @@ MESSAGES: dict[str, dict[str, str]] = {
         "chat.club.list": "{club} list:\n{list}",
         "chat.club.comments_none": "Nobody's said anything about {query} in the club.",
         "chat.club.comments": "On {query}:\n{list}",
+        "chat.offtopic": (
+            "I'm only any good at wine, I'm afraid. Ask me what to open tonight, "
+            "what goes with dinner, what to order when you're out, or what's in your fridge. "
+            "Or ask how to add someone, start a cellar, or send /help."
+        ),
+        "chat.flag_off": "I can't help with that yet, but I can tell you about your own cellar.",
+        "chat.clarify": "I didn't quite catch that. What would you like me to look up?",
+        "chat.unknown": (
+            "I'm not sure what you need. I can search your cellar, suggest a bottle, "
+            "or talk you through how Whiney works."
+        ),
+        "chat.add_photo": "Send a photo of the label and I'll add it.",
+        "chat.dont_know": "I don't know — I can only go on what's in your cellar.",
+        "chat.list_add_need_wine": "Which bottle should go on the list? Send a label photo, or name it.",
+        "chat.btn.stock": "What's in stock",
+        "chat.btn.drink": "What should I drink",
+        "chat.btn.help": "How Whiney works",
     },
     "af": {
         "invite.join.share": (
@@ -623,6 +640,23 @@ MESSAGES: dict[str, dict[str, str]] = {
         "chat.club.list": "{club}-lys:\n{list}",
         "chat.club.comments_none": "Niemand het iets oor {query} in die klub gesê nie.",
         "chat.club.comments": "Oor {query}:\n{list}",
+        "chat.offtopic": (
+            "Ek is jammer, ek is net goed met wyn. Vra my wat om vanaand oop te maak, "
+            "wat by aandete pas, wat om te bestel as jy uit is, of wat in jou yskas is. "
+            "Of vra hoe om iemand by te voeg, 'n kelder te begin, of stuur /help."
+        ),
+        "chat.flag_off": "Ek kan nog nie daarmee help nie, maar ek kan jou van jou eie kelder vertel.",
+        "chat.clarify": "Ek is nie heeltemal seker nie. Wat moet ek opsoek?",
+        "chat.unknown": (
+            "Ek is nie seker wat jy nodig het nie. Ek kan jou kelder deursoek, "
+            "'n bottel voorstel, of verduidelik hoe Whiney werk."
+        ),
+        "chat.add_photo": "Stuur 'n foto van die etiket en ek sal dit byvoeg.",
+        "chat.dont_know": "Ek weet nie — ek kan net gaan op wat in jou kelder is.",
+        "chat.list_add_need_wine": "Watter bottel moet op die lys? Stuur 'n etiketfoto, of noem dit.",
+        "chat.btn.stock": "What's in stock",
+        "chat.btn.drink": "What should I drink",
+        "chat.btn.help": "How Whiney works",
     },
 }
 

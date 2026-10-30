@@ -21,6 +21,12 @@ from telegram.error import BadRequest
 from integrations.card_store import StoreError
 from integrations.cellar_facts import answer as answer_fact
 from integrations.cellar_facts import quick_pick
+from integrations.chat_intent import (
+    canonical_parse,
+    gated_flag,
+    needs_clarification,
+    slot_summary,
+)
 from integrations.chat_models import (
     PARSE_MODEL,
     RECOMMEND_MODEL,
@@ -30,7 +36,10 @@ from integrations.chat_models import (
 
 logger = logging.getLogger(__name__)
 
-CHAT_ACTIONS = {"cf", "cc", "cq", "ck", "cn", "co", "cx", "cr", "cw", "cg", "cm", "ca"}
+CHAT_ACTIONS = {
+    "cf", "cc", "cq", "ck", "cn", "co", "cx", "cr", "cw", "cg", "cm", "ca",
+    "ct", "cp", "cl",
+}
 
 CHAT_RESTING = (
     "💤 My chat side is having a rest for a moment. Everything else still works: "
@@ -257,12 +266,34 @@ class ChatRouter:
         except Exception:
             return getattr(self.handler, "api", None)
 
+    def _note(self, **kwargs) -> None:
+        meta = getattr(self.handler, "_text_meta", None)
+        if not isinstance(meta, dict):
+            meta = {}
+            self.handler._text_meta = meta
+        meta.update(kwargs)
+
+    def _min_reply_ms(self) -> int:
+        fn = getattr(self.handler, "min_reply_ms", None)
+        if callable(fn):
+            try:
+                return max(0, int(fn()))
+            except (TypeError, ValueError):
+                return 0
+        return int(getattr(self.handler, "_min_reply_ms", 0) or 0)
+
+    async def _wait_pace(self) -> None:
+        pacer = getattr(self.handler, "_text_pacer", None)
+        if pacer is not None:
+            await pacer.wait()
+
     async def handle_text(self, update, context, text: str) -> bool:
         box: dict = {}
         try:
             await self._handle_text(update, context, text, box)
         except Exception:
             logger.exception("[chat] kind=unexpected chat=%s", getattr(update.effective_chat, "id", ""))
+            self._note(outcome="unknown")
             message = box.get("placeholder")
             if message is not None:
                 await self._edit(message, CHAT_RESTING, update)
@@ -311,6 +342,8 @@ class ChatRouter:
         except Exception:
             pass
 
+        started_classify = self._now()
+
         async def _parsed():
             try:
                 return await loop.run_in_executor(None, lambda: self.chat.parse(text, ctx))
@@ -333,8 +366,11 @@ class ChatRouter:
             self._save(chat_id, {"retry_text": text})
             box["handled"] = True
             return
+        classify_ms = _ms(self._now() - started_classify) if started_classify else 0
         if isinstance(parsed, ChatFailure):
             await self._alert_staff(context, parsed, PARSE_MODEL)
+            self._note(intent="unknown", confidence="", slots="-", outcome="unknown",
+                       classify_ms=classify_ms)
             if _short_phrase(text):
                 box["handled"] = False
                 return
@@ -342,87 +378,64 @@ class ChatRouter:
             await self._say(update, CHAT_RESTING)
             box["handled"] = True
             return
-        intent = parsed.get("intent")
-        logger.info("[chat] parse intent=%s chat=%s text=%r", intent, chat_id, text[:60])
-        if cellar_down and intent not in ("club", "help", "offtopic", "wine_chat", "place"):
+        parsed = canonical_parse(parsed)
+        intent = parsed["intent"]
+        confidence = parsed["confidence"]
+        slots = parsed["slots"]
+        self._note(
+            intent=intent, confidence=f"{confidence:.2f}", slots=slot_summary(slots),
+            classify_ms=classify_ms,
+        )
+        logger.info(
+            "[chat] parse intent=%s confidence=%.2f slots=%s chat=%s text=%r",
+            intent, confidence, slot_summary(slots), chat_id, text[:60],
+        )
+        execute_at = self._now()
+        features = self._chat_features()
+        blocked = gated_flag(parsed, features)
+        if blocked:
+            await self._flag_off(update, chat_id)
+            self._note(outcome="flag_off", execute_ms=_ms(self._now() - execute_at))
+            box["handled"] = True
+            return
+        cellar_ok_intents = {
+            "club_query", "smalltalk_help", "unknown", "wine_knowledge", "place",
+            "list_action", "add_wine",
+        }
+        if cellar_down and intent not in cellar_ok_intents:
             await self._say(update, CELLAR_DOWN, self._retry_button())
             self._save(chat_id, {"retry_text": text})
+            self._note(outcome="unknown", execute_ms=_ms(self._now() - execute_at))
             box["handled"] = True
             return
-        if intent == "club":
-            if not self._clubs_on():
-                intent = "wine_chat" if not _short_phrase(text) else "search"
-            else:
-                box["handled"] = await self._club(update, context, api, chat_id, parsed, text)
-                return
-        if intent == "offtopic":
-            await self._say(update, OFF_TOPIC)
-            box["handled"] = True
-            return
-        if intent == "help":
-            await self._help(update, context, api, chat_id, text, parsed)
-            box["handled"] = True
-            return
-        if intent == "unsure" and not _short_phrase(text):
-            intent = "wine_chat"
-        if intent in ("search", "unsure", None):
+        if intent == "search":
             box["handled"] = False
+            self._note(outcome="answered")
             return
-        if intent == "drink":
-            wine_ref = (parsed.get("wine_ref") or "").strip()
-            fact = parsed.get("fact") if isinstance(parsed.get("fact"), dict) else {}
-            location = (fact.get("storage_text") or "").strip()
-            if not wine_ref or wine_ref.casefold() in {
-                "this", "it", "that", "dit", "hierdie",
-            }:
-                box["handled"] = await self.handler._maybe_typed_stock(
-                    update, context, "Drank this",
-                )
-            else:
-                box["handled"] = await self.handler._typed_drink_named(
-                    update, context, api, None, wine_ref, location,
-                )
+        if intent == "unknown" and parsed.get("unknown_kind") != "offtopic" and _short_phrase(text):
+            box["handled"] = False
+            self._note(outcome="answered")
             return
-        if intent == "wine_chat":
-            await self._wine_chat(update, context, api, chat_id, text)
+        if intent == "unknown" and parsed.get("unknown_kind") == "offtopic":
+            from integrations.copy import t as copy_t
+            locale = self._locale(update, chat_id)
+            await self._say(update, f"🍷 {copy_t(locale, 'chat.offtopic')}", self._pipeline_markup())
+            self._note(outcome="unknown", execute_ms=_ms(self._now() - execute_at))
             box["handled"] = True
             return
-        if intent == "place":
-            await self._place(update, context, api, chat_id, text, (parsed.get("area") or "").strip())
+        if needs_clarification(parsed):
+            await self._clarify(update, chat_id, parsed)
+            self._note(outcome="clarified", execute_ms=_ms(self._now() - execute_at))
             box["handled"] = True
             return
-        if intent == "fact":
-            box["handled"] = await self._fact(
-                update, context, api, chat_id, parsed, wines, storages,
-            )
-            return
-        if intent in ("recommend", "answer"):
-            if not wines:
-                await self._empty(update, api)
-                box["handled"] = True
-                return
-            placeholder = await self._placeholder(update, wines)
-            box["placeholder"] = placeholder
-            if intent == "answer" and ask.get("stage") == "question":
-                answer = _answer_text(parsed, text, ask)
-                sentence = ask.get("sentence") or text
-                taste = ask.get("taste") or parsed.get("taste") or {}
-                await self._recommend(
-                    chat_id, api, sentence, taste, placeholder, False, update, context,
-                    wines, answer=answer, ask=ask,
-                )
-            else:
-                await self._recommend(
-                    chat_id, api, text, parsed.get("taste") or {}, placeholder, True,
-                    update, context, wines,
-                )
-            box["handled"] = True
-            return
-        if intent in ("price", "correct"):
-            await self._write(update, context, api, chat_id, parsed, wines, ask)
-            box["handled"] = True
-            return
-        box["handled"] = False
+        handled = await self._execute(
+            update, context, api, chat_id, text, parsed, wines, storages, ask, box,
+        )
+        self._note(
+            outcome=self._outcome_of(box, handled),
+            execute_ms=_ms(self._now() - execute_at),
+        )
+        box["handled"] = handled
 
     def _pending_place(self, chat_id) -> dict | None:
         try:
@@ -519,6 +532,118 @@ class ChatRouter:
             return fn(update=update, chat_id=chat_id)
         return "en"
 
+    def _outcome_of(self, box: dict, handled: bool) -> str:
+        if box.get("outcome"):
+            return box["outcome"]
+        if handled:
+            return "answered"
+        return "answered"
+
+    def _pipeline_markup(self):
+        from integrations.copy import t as copy_t
+        cb, *_rest = _tools()
+        return _markup([
+            (copy_t("en", "chat.btn.stock"), cb("ct")),
+            (copy_t("en", "chat.btn.drink"), cb("cp")),
+            (copy_t("en", "chat.btn.help"), cb("cl")),
+        ])
+
+    async def _flag_off(self, update, chat_id) -> None:
+        from integrations.copy import t as copy_t
+        locale = self._locale(update, chat_id)
+        await self._say(update, f"🍷 {copy_t(locale, 'chat.flag_off')}", self._pipeline_markup())
+
+    async def _clarify(self, update, chat_id, parsed) -> None:
+        from integrations.copy import t as copy_t
+        locale = self._locale(update, chat_id)
+        kind = parsed.get("unknown_kind") or "unclear"
+        key = "chat.unknown" if kind == "unclear" or parsed.get("intent") == "unknown" else "chat.clarify"
+        await self._say(update, f"🤔 {copy_t(locale, key)}", self._pipeline_markup())
+
+    async def _execute(self, update, context, api, chat_id, text, parsed, wines, storages, ask, box) -> bool:
+        intent = parsed.get("intent")
+        if intent == "club_query":
+            return await self._club(update, context, api, chat_id, parsed, text)
+        if intent == "smalltalk_help":
+            await self._help(update, context, api, chat_id, text, parsed)
+            return True
+        if intent == "drink_remove":
+            wine_ref = (parsed.get("wine_ref") or parsed.get("slots", {}).get("wine") or "").strip()
+            fact = parsed.get("fact") if isinstance(parsed.get("fact"), dict) else {}
+            location = (fact.get("storage_text") or parsed.get("slots", {}).get("location") or "").strip()
+            if not wine_ref or wine_ref.casefold() in {
+                "this", "it", "that", "dit", "hierdie",
+            }:
+                return await self.handler._maybe_typed_stock(update, context, "Drank this")
+            return await self.handler._typed_drink_named(
+                update, context, api, None, wine_ref, location,
+            )
+        if intent == "wine_knowledge":
+            await self._wine_chat(update, context, api, chat_id, text)
+            return True
+        if intent == "place":
+            area = (parsed.get("area") or parsed.get("slots", {}).get("location") or "").strip()
+            await self._place(update, context, api, chat_id, text, area)
+            return True
+        if intent == "cellar_query":
+            return await self._fact(update, context, api, chat_id, parsed, wines, storages)
+        if intent in ("recommend", "answer"):
+            if not wines:
+                await self._empty(update, api)
+                return True
+            placeholder = await self._placeholder(update, wines)
+            box["placeholder"] = placeholder
+            if intent == "answer" and ask.get("stage") == "question":
+                answer = _answer_text(parsed, text, ask)
+                sentence = ask.get("sentence") or text
+                taste = ask.get("taste") or parsed.get("taste") or {}
+                await self._recommend(
+                    chat_id, api, sentence, taste, placeholder, False, update, context,
+                    wines, answer=answer, ask=ask,
+                )
+            else:
+                await self._recommend(
+                    chat_id, api, text, parsed.get("taste") or {}, placeholder, True,
+                    update, context, wines,
+                )
+            return True
+        if intent in ("price", "correct"):
+            await self._write(update, context, api, chat_id, parsed, wines, ask)
+            return True
+        if intent == "add_wine":
+            return await self._add_wine(update, context, api, parsed)
+        if intent == "list_action":
+            return await self._list_action(update, context, api, chat_id, parsed)
+        return False
+
+    async def _add_wine(self, update, context, api, parsed) -> bool:
+        from integrations.copy import t as copy_t
+        from integrations.telegram_bot import TYPED_ADD_TTL
+        wine = ((parsed.get("slots") or {}).get("wine") or "").strip()
+        if not wine or wine.casefold() in {"this", "it", "that", "dit", "hierdie"}:
+            try:
+                cards = self.handler._open_label_cards(
+                    api, max_age=TYPED_ADD_TTL, include_complete=True,
+                )
+            except Exception:
+                cards = []
+            if cards and await self.handler._maybe_typed_add(update, context, "add"):
+                return True
+        locale = self._locale(update, str(update.effective_chat.id))
+        await self._say(update, f"📷 {copy_t(locale, 'chat.add_photo')}")
+        return True
+
+    async def _list_action(self, update, context, api, chat_id, parsed) -> bool:
+        from integrations.copy import t as copy_t
+        op = parsed.get("list_op") or "show"
+        wine = (parsed.get("slots") or {}).get("wine") or ""
+        locale = self._locale(update, chat_id)
+        if op == "add" and not wine:
+            await self._say(update, f"📝 {copy_t(locale, 'chat.list_add_need_wine')}")
+            return True
+        await self.handler._list_flow().cmd_list(update, context)
+        return True
+
     async def _club(self, update, context, api, chat_id, parsed, text) -> bool:
         from integrations.club_chat import render_club
         from integrations.copy import t as copy_t
@@ -545,7 +670,7 @@ class ChatRouter:
         status = result.get("status") or result.get("error") or ""
         logger.info("[chat] club kind=%s status=%s chat=%s", payload.get("kind"), status, chat_id)
         if result.get("error") == "not_enabled" or status in ("fallback", "not_enabled"):
-            await self._wine_chat(update, context, api, chat_id, text)
+            await self._flag_off(update, chat_id)
             return True
         locale = self._locale(update, chat_id)
         text_out = render_club(result, locale)
@@ -582,8 +707,8 @@ class ChatRouter:
         ask = self._load(chat_id)
         payload = dict(ask.get("club_ask") or {})
         payload.update(fields)
-        parsed = {"club": payload, "intent": "club"}
-        await self._club(update, context, api, chat_id, parsed, "")
+        parsed = {"club": payload, "intent": "club_query"}
+        await self._club(update, context, api, chat_id, canonical_parse(parsed), "")
 
     async def _help(self, update, context, api, chat_id, text, parsed) -> None:
         # Known topics still have a canned line if the model is down.
@@ -671,7 +796,15 @@ class ChatRouter:
                 known.append(name)
         reply = answer_fact(fact, wines)
         if reply is None:
-            return False
+            reply = _slot_fact(parsed, wines)
+        if reply is None:
+            from integrations.copy import t as copy_t
+            await self._say(
+                update,
+                f"🍷 {copy_t(self._locale(update, chat_id), 'chat.dont_know')}",
+                self._pipeline_markup(),
+            )
+            return True
         if reply.kind == "list_all":
             await self.handler._cmd_stock(update, context)
             return True
@@ -1136,6 +1269,26 @@ class ChatRouter:
             if club_id:
                 extra["club_id"] = club_id
             await self._club_from_pick(update, context, api, chat_id, **extra)
+            return
+        if action == "ct":
+            await self.handler._cmd_stock(update, context)
+            return
+        if action == "cp":
+            wines = await self._wines_or_down(api, update, chat_id)
+            if wines is None:
+                return
+            if not wines:
+                await self._empty(update, api)
+                return
+            placeholder = await message.reply_text(_looking(wines), parse_mode="HTML")
+            await self._recommend(
+                chat_id, api, "what should I drink",
+                {"colour": "any", "words": []}, placeholder, True, update, context, wines,
+            )
+            return
+        if action == "cl":
+            await self._say(update, f"🍷 {HELP_COMMANDS}")
+            return
 
     async def _next(self, chat_id, ask, message, update, api):
         queue = list(ask.get("queue") or [])
@@ -1347,9 +1500,11 @@ class ChatRouter:
         await update.message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
     async def _placeholder(self, update, wines):
+        await self._wait_pace()
         return await update.message.reply_text(_looking(wines), parse_mode="HTML")
 
     async def _say(self, update, text, markup=None):
+        await self._wait_pace()
         kwargs = {"parse_mode": "HTML"}
         if markup is not None:
             kwargs["reply_markup"] = markup
@@ -1398,6 +1553,48 @@ def _short_phrase(text: str) -> bool:
     if stripped.endswith("?"):
         return False
     return len(stripped.split()) <= 2
+
+
+def _slot_fact(parsed: dict, wines: list[dict]):
+    """Match a named wine/producer/appellation against stock when fact.kind
+    did not already answer. Empty is a fact, not a guess.
+    """
+    from integrations.cellar_facts import FactReply
+    from integrations.telegram_bot import match_in_stock_wines
+
+    slots = parsed.get("slots") or {}
+    stock = [w for w in wines if (w.get("stock_count") or 0) > 0]
+    for key in ("appellation", "wine", "producer"):
+        query = str(slots.get(key) or "").strip()
+        if not query:
+            continue
+        hits = match_in_stock_wines(stock, query)
+        if hits:
+            lines = []
+            ids = []
+            for wine in hits:
+                ids.append(wine.get("id"))
+                name = _esc(wine.get("name") or "a bottle")
+                lines.append(f"• <b>{name}</b>")
+            return FactReply(
+                text=f"{_esc(query)}\n" + "\n".join(lines),
+                kind="name",
+                wine_ids=[i for i in ids if i is not None],
+            )
+        return FactReply(
+            text=f"Nothing matching {_esc(query)} in the cellar.",
+            kind="empty",
+        )
+    grape = str(slots.get("grape") or "").strip()
+    if grape:
+        return answer_fact(
+            {
+                "kind": "grape", "grape": grape, "storage_text": "",
+                "drawer": None, "country_code": "",
+            },
+            wines,
+        )
+    return None
 
 
 def _shown_name(ask: dict, wines: list[dict]) -> str | None:

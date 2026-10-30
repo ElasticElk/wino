@@ -12,19 +12,19 @@
   must_not: [5, 13, 16]
 - id: shiraz_fact
   text: "is there any shiraz in my fridge?"
-  intent: fact
+  intent: cellar_query
   fact: {kind: grape, grape: shiraz}
 - id: drawer
   text: "what is in D3 of my big fridge?"
-  intent: fact
+  intent: cellar_query
   fact: {kind: drawer, drawer: 3, storage_text: big fridge}
 - id: south_africa
   text: "what wines do I have from South Africa?"
-  intent: fact
+  intent: cellar_query
   fact: {kind: country, country_code: ZA}
 - id: list
   text: "list all my wines"
-  intent: fact
+  intent: cellar_query
   fact: {kind: list_all}
 - id: price
   text: "I paid 18.50 for this"
@@ -41,31 +41,31 @@
   must_not: [1, 2, 12]
 - id: restaurant
   text: "I'm at a steakhouse tonight, what kind of wine should I order?"
-  intent: wine_chat
+  intent: wine_knowledge
 - id: vintage_question
   text: "is 2019 a good year for Barolo?"
-  intent: wine_chat
+  intent: wine_knowledge
 - id: decant
   text: "should I decant a 2015 Rioja before dinner?"
-  intent: wine_chat
+  intent: wine_knowledge
 - id: shop
   text: "I'm in Waitrose, what's a good bottle under 15 for a curry?"
-  intent: wine_chat
+  intent: wine_knowledge
 - id: plane
   text: "how high does a plane fly?"
-  intent: offtopic
+  intent: unknown
 - id: football
   text: "who won the football last night?"
-  intent: offtopic
+  intent: unknown
 - id: add_person
   text: "how do I add someone new to my house?"
-  intent: help
+  intent: smalltalk_help
 - id: new_house
   text: "can I create a new house?"
-  intent: help
+  intent: smalltalk_help
 - id: how_does_this_work
   text: "how does Whiney work?"
-  intent: help
+  intent: smalltalk_help
 - id: chenin
   text: "a crisp chenin for fish"
   intent: recommend

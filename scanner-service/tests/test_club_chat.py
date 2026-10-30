@@ -36,18 +36,21 @@ def _club_handler(api, chat, **flags):
 
 
 @pytest.mark.asyncio
-async def test_club_intent_falls_through_when_flag_off():
+async def test_club_intent_is_honest_when_flag_off():
     api = _api([_wine()])
     chat = FakeChat()
     chat.parse_result = _club_parse(kind="members")
-    chat.wine_chat_reply = "A club is a group of people."
+    chat.wine_chat_reply = "You only drink wine."
     handler = _handler(api, chat)
     update, sent = _text("who's in my club?")
     assert await handler._router.handle_text(update, _context(), "who's in my club?") is True
     api.club_ask.assert_not_called()
-    assert chat.wine_chat_calls
+    assert chat.wine_chat_calls == []
     text = update.message.reply_text.await_args.args[0]
-    assert "club" not in text.lower() or "A club is a group" in text
+    assert "can't help with that yet" in text.lower()
+    assert "own cellar" in text.lower()
+    assert "You only drink wine" not in text
+    assert "club" not in text.lower()
 
 
 @pytest.mark.asyncio
@@ -94,7 +97,10 @@ async def test_tasteoff_flag_off_never_mentions_the_feature():
     text = update.message.reply_text.await_args.args[0]
     assert "aren't on" not in text
     assert "nog nie aan" not in text
-    assert chat.wine_chat_calls
+    assert "taste-off" not in text.lower()
+    assert "can't help with that yet" in text.lower()
+    assert chat.wine_chat_calls == []
+    api.club_ask.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -175,16 +181,14 @@ async def test_club_logging_does_not_add_extra_message_text():
     api.club_ask.assert_called_once()
 
 
-def test_parse_prompt_mentions_clubs_only_when_flag_on():
+def test_parse_prompt_always_classifies_club_questions():
     off = parse_prompt({})
-    assert "club:" not in off
-    assert "taste-off" not in off
+    assert "club_query" in off
+    assert "tasteoff" in off
     on = parse_prompt({"clubs": True, "tasteoffs": True, "lists": True, "comments": True})
-    assert "club:" in on
-    assert "tasteoff" in on
-    assert "list" in on
-    no_to = parse_prompt({"clubs": True})
-    assert "tasteoff" not in no_to
+    assert "club_query" in on
+    assert "list_action" in on
+    assert off == on
 
 
 def test_render_never_dead_ends_without_buttons():
