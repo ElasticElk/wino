@@ -235,11 +235,21 @@ async def test_list_page_move_and_remove():
     api.move_list_item_to_cellar.assert_called()
     assert "Chenin Blanc 2022 is in the cellar" in query.edit_message_text.call_args.args[0]
 
+    api.get_list.return_value = {
+        "id": 1,
+        "name": "To drink",
+        "count": 0,
+        "offset": 0,
+        "limit": 5,
+        "items": [],
+    }
     query = _query(_cb("lx", item_id=44))
     update.callback_query = query
     await handler._list_flow().on_callback(update, MagicMock())
     api.delete_list_item.assert_called()
-    assert query.edit_message_text.call_args.args[0] == t("en", "list.removed")
+    removed = query.edit_message_text.call_args.args[0]
+    assert t("en", "list.title") in removed
+    assert t("en", "list.empty") in removed
 
 
 def test_afrikaans_list_keys_exist():

@@ -7,7 +7,7 @@ import pytest
 from integrations.copy import catalog_keys, t
 from integrations.telegram_bot import CALLBACK_DATA_MAX, TelegramBotHandler
 from integrations.telegram_clubs import club_cb, parse_club_cb
-from integrations.telegram_commands import ADMIN_COMMANDS, menu_commands
+from integrations.telegram_commands import ADMIN_COMMANDS, menu_commands, staff_command_payload
 
 
 def _handler(api, *, clubs=True, global_clubs=True, staff=False):
@@ -83,6 +83,13 @@ def test_clubpost_is_staff_menu_only():
     assert "clubpost" not in {c for c, _ in menu_commands({
         "feature_clubs": True, "feature_global_clubs": True,
     })}
+    assert "clubpost" not in {
+        c["command"] for c in staff_command_payload({"feature_clubs": True})
+    }
+    assert "clubpost" in {
+        c["command"]
+        for c in staff_command_payload({"feature_global_clubs": True})
+    }
 
 
 def test_phase4_keys_en_and_af():
@@ -314,6 +321,18 @@ async def test_help_lists_discover_when_flag_on():
     await handler._cmd_help(update, MagicMock())
     text = update.message.reply_text.call_args.args[0]
     assert "/club discover" in text
+
+
+@pytest.mark.asyncio
+async def test_global_join_blocked_when_flag_off():
+    api = MagicMock()
+    handler = _handler(api, global_clubs=False)
+    query = _query(club_cb("jj", 9))
+    update = _update()
+    update.callback_query = query
+    await handler._club_flow().on_callback(update, MagicMock())
+    assert query.edit_message_text.call_args.args[0] == t("en", "club.global.off")
+    api.join_club.assert_not_called()
 
 
 @pytest.mark.asyncio

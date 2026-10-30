@@ -81,7 +81,7 @@ MESSAGES = {
         "club.share.none": "Net die drink-lys",
         "club.end.ballot": (
             "{name} wil {club} beëindig.\n\n"
-            "As almal ja sê, verdwyn die klub en sy lys. "
+            "As almal ja sê, verdwyn die klub en sy aktiwiteit. "
             "As iemand nee sê, of nie betyds antwoord nie, verander niks."
         ),
         "club.end.yes": "Ja, beëindig dit",

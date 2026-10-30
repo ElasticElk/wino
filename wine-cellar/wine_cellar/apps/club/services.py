@@ -21,7 +21,14 @@ from wine_cellar.apps.scanner.models import TelegramUser
 
 
 def display_name(user) -> str:
-    tu = TelegramUser.objects.filter(user=user).first()
+    if user is None:
+        return ""
+    cache = getattr(user, "_prefetched_objects_cache", None)
+    if cache is not None and "telegram_users" in cache:
+        tus = cache["telegram_users"]
+        tu = tus[0] if tus else None
+    else:
+        tu = TelegramUser.objects.filter(user=user).first()
     if tu and tu.display_name:
         return tu.display_name
     return user.get_full_name() or user.username
@@ -36,12 +43,13 @@ def membership_of(user, club_id) -> ClubMembership | None:
 
 
 def set_last_used(user, membership: ClubMembership) -> None:
-    ClubMembership.objects.filter(user=user, is_last_used=True).exclude(
-        pk=membership.pk,
-    ).update(is_last_used=False)
-    if not membership.is_last_used:
+    with transaction.atomic():
+        list(ClubMembership.objects.select_for_update().filter(user=user))
+        ClubMembership.objects.filter(user=user, is_last_used=True).exclude(
+            pk=membership.pk,
+        ).update(is_last_used=False)
+        ClubMembership.objects.filter(pk=membership.pk).update(is_last_used=True)
         membership.is_last_used = True
-        membership.save(update_fields=["is_last_used"])
 
 
 def validate_club_name(name: str) -> str | None:
@@ -105,13 +113,16 @@ def serialize_event(event: ClubEvent, *, public=True) -> dict:
 
 def serialize_club_list_item(membership: ClubMembership) -> dict:
     club = membership.club
+    member_count = getattr(membership, "_n_members", None)
+    if member_count is None:
+        member_count = club.memberships.count()
     return {
         "id": club.id,
         "name": club.name,
         "role": membership.role,
         "cellar_visibility": club.cellar_visibility,
         "badges_visible": club.badges_visible,
-        "member_count": club.memberships.count(),
+        "member_count": member_count,
         "is_last_used": membership.is_last_used,
         "kind": club.kind,
         "frozen": club.frozen,
@@ -125,6 +136,7 @@ def serialize_club_home(membership: ClubMembership, *, events=None) -> dict:
         events = list(
             ClubEvent.objects.filter(club=club, retracted_at__isnull=True)
             .select_related("actor")
+            .prefetch_related("actor__telegram_users")
             .order_by("-created")[:8]
         )
     household = None
@@ -327,6 +339,10 @@ def record_join_event_delivery(club: Club, actor):
 
 def maybe_queue_share_notice(household, exclude_user_id):
     if household is None:
+        return
+    from wine_cellar.apps.scanner.flags import flag_on
+
+    if not flag_on("feature_clubs"):
         return
     from wine_cellar.apps.club.tasks import club_share_notice
 

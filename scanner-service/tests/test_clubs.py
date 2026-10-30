@@ -12,7 +12,7 @@ from integrations.telegram_clubs import (
     clubs_enabled,
     parse_club_cb,
 )
-from integrations.telegram_commands import menu_commands
+from integrations.telegram_commands import admin_commands, menu_commands, staff_command_payload
 
 
 def _handler(api, *, clubs=True):
@@ -218,6 +218,58 @@ async def test_mute_toggles():
     kwargs = api.patch_club_membership.call_args
     assert kwargs[0][0] == 3
     assert kwargs[1]["feed_muted"] is True
+
+
+def test_slash_menus_stay_english():
+    blob = " ".join(
+        d for _, d in menu_commands({"feature_lists": True, "feature_clubs": True})
+    )
+    blob += " " + " ".join(
+        d for _, d in admin_commands({"feature_global_clubs": True})
+    )
+    assert "Wine clubs" in blob
+    assert "Things to drink or buy" in blob
+    assert "Wynklubs" not in blob
+    assert "Ontdek" not in blob
+    assert "clubpost" not in {
+        c["command"] for c in staff_command_payload({"feature_clubs": True})
+    }
+    assert "clubpost" in {
+        c["command"]
+        for c in staff_command_payload({"feature_global_clubs": True})
+    }
+
+
+@pytest.mark.asyncio
+async def test_join_blocked_when_clubs_off():
+    api = MagicMock()
+    handler = _handler(api, clubs=False)
+    query = _query(club_cb("j", "AbCdEfGh"))
+    update = _update()
+    update.callback_query = query
+    await handler._club_flow().on_callback(update, MagicMock())
+    assert query.edit_message_text.call_args.args[0] == t("en", "club.off")
+
+
+@pytest.mark.asyncio
+async def test_help_and_status_omit_clubs_when_off():
+    api = MagicMock()
+    api.wines_in_stock.return_value = [
+        {"name": "Merlot", "stock_count": 1, "wine_type": "RE", "producer": ""},
+    ]
+    api.list_storages.return_value = []
+    handler = _handler(api, clubs=False)
+    handler._router = None
+    update = _update(text="/help")
+    await handler._cmd_help(update, MagicMock())
+    assert "/club" not in update.message.reply_text.call_args.args[0]
+    status = _update(text="/status")
+    await handler._cmd_status(status, MagicMock())
+    body = status.message.reply_text.call_args.args[0]
+    assert t("en", "club.status.ready") not in body
+    assert t("en", "club.status.resting") not in body
+    assert t("en", "list.status.ready") not in body
+    assert t("en", "list.status.resting") not in body
 
 
 @pytest.mark.asyncio

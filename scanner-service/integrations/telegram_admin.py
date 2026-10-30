@@ -12,7 +12,7 @@ import logging
 from telegram import BotCommand, BotCommandScopeChat, BotCommandScopeDefault, Update
 from telegram.ext import CommandHandler, ContextTypes, filters
 
-from integrations.telegram_commands import ADMIN_COMMANDS, menu_commands
+from integrations.telegram_commands import admin_commands, menu_commands
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +96,7 @@ async def push_command_menus(bot, admin_chat_ids: list[str], flags: dict | None 
     """Default menu for everyone; public + admin for staff chats only."""
     public_cmds = menu_commands(flags)
     public = [BotCommand(c, d) for c, d in public_cmds]
-    staff = [BotCommand(c, d) for c, d in public_cmds + ADMIN_COMMANDS]
+    staff = [BotCommand(c, d) for c, d in public_cmds + admin_commands(flags)]
     try:
         await bot.set_my_commands(public, scope=BotCommandScopeDefault())
         logger.info("[admin] default command menu pushed")
@@ -119,7 +119,8 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE, handler)
         "These only appear in your / menu. Guests never see them.",
         "",
     ]
-    for command, description in ADMIN_COMMANDS:
+    flags = getattr(handler, "flags", None) or {}
+    for command, description in admin_commands(flags):
         if command == "admin":
             continue
         lines.append(f"/{command} \u2014 {description}")

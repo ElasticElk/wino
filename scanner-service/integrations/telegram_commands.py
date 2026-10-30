@@ -61,6 +61,14 @@ def menu_commands(flags: dict | None = None) -> list[tuple[str, str]]:
     return commands
 
 
+def admin_commands(flags: dict | None = None) -> list[tuple[str, str]]:
+    """Staff / menu extras. /clubpost only when global clubs are on."""
+    commands = list(ADMIN_COMMANDS)
+    if not (flags or {}).get("feature_global_clubs"):
+        commands = [(c, d) for c, d in commands if c != "clubpost"]
+    return commands
+
+
 def public_command_payload(flags: dict | None = None) -> list[dict]:
     return [{"command": c, "description": d} for c, d in menu_commands(flags)]
 
@@ -68,5 +76,5 @@ def public_command_payload(flags: dict | None = None) -> list[dict]:
 def staff_command_payload(flags: dict | None = None) -> list[dict]:
     return [
         {"command": c, "description": d}
-        for c, d in menu_commands(flags) + ADMIN_COMMANDS
+        for c, d in menu_commands(flags) + admin_commands(flags)
     ]

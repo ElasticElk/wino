@@ -5,15 +5,16 @@ from __future__ import annotations
 import logging
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.decorators import login_not_required
 from django.db import IntegrityError, transaction
+from django.db.models import Count
 from django.utils import timezone
+from django.utils.decorators import method_decorator
 from rest_framework import status
 from rest_framework.authentication import TokenAuthentication
 from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from django.contrib.auth.decorators import login_not_required
-from django.utils.decorators import method_decorator
 
 from wine_cellar.apps.api.views import ScannerAPIView
 from wine_cellar.apps.club.models import (
@@ -115,6 +116,7 @@ class ClubCollectionView(ClubsEnabledMixin, ScannerAPIView):
         memberships = (
             ClubMembership.objects.filter(user=request.user)
             .select_related("club")
+            .annotate(_n_members=Count("club__memberships"))
             .order_by("-is_last_used", "club__name")
         )
         return Response(
@@ -239,8 +241,9 @@ class ClubDetailView(ClubsEnabledMixin, ScannerAPIView):
             return Response(serialize_club_home(membership))
         change, club = apply_policy(club, vis, badges)
         if change == "widen":
-            from wine_cellar.apps.club.tasks import club_widen_notice
             from django.db import transaction as db_tx
+
+            from wine_cellar.apps.club.tasks import club_widen_notice
 
             db_tx.on_commit(lambda cid=club.id: club_widen_notice.delay(cid))
         membership.refresh_from_db()
@@ -349,10 +352,12 @@ class ClubFeedView(ClubsEnabledMixin, ScannerAPIView):
             offset = max(0, int(request.query_params.get("offset") or 0))
         except (TypeError, ValueError):
             offset = 0
-        qs = ClubEvent.objects.filter(club=membership.club).select_related("actor")
-        from django.db.models import Count
-
-        qs = qs.annotate(comment_count=Count("comments"))
+        qs = (
+            ClubEvent.objects.filter(club=membership.club)
+            .select_related("actor")
+            .prefetch_related("actor__telegram_users")
+            .annotate(comment_count=Count("comments"))
+        )
         event_id = request.query_params.get("event_id")
         if event_id not in (None, ""):
             try:
@@ -379,6 +384,7 @@ class ClubMembersView(ClubsEnabledMixin, ScannerAPIView):
         rows = list(
             ClubMembership.objects.filter(club=membership.club)
             .select_related("user", "household", "club")
+            .prefetch_related("user__telegram_users")
             .order_by("created")
         )
         from wine_cellar.apps.club.services import display_name

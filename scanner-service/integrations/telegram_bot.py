@@ -3574,12 +3574,8 @@ class TelegramBotHandler:
             loc = self.locale_for(update)
             if self.flag_on("feature_lists"):
                 text += "\n" + copy_t(loc, "list.status.ready")
-            else:
-                text += "\n" + copy_t(loc, "list.status.resting")
             if self.flag_on("feature_clubs"):
                 text += "\n" + copy_t(loc, "club.status.ready")
-            else:
-                text += "\n" + copy_t(loc, "club.status.resting")
             await update.message.reply_text(text, parse_mode="HTML")
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
@@ -9264,7 +9260,9 @@ class TelegramBotHandler:
                 logger.warning(f"[invite] getMe failed; invite links need a restart: {e}")
             # PTB 22: initialize() does not run post_init — only run_polling does.
             from integrations.telegram_admin import push_command_menus
-            await push_command_menus(self._app.bot, self.admin_chat_ids)
+            await push_command_menus(
+                self._app.bot, self.admin_chat_ids, flags=self.flags,
+            )
 
         loop.run_until_complete(_start())
         loop.run_forever()

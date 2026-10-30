@@ -53,6 +53,11 @@ MESSAGES: dict[str, dict[str, str]] = {
         "list.newer": "Newer 5",
         "list.where": "Where are you storing this?",
         "list.drawer": "Which drawer?",
+        "list.dup.body": (
+            "Already added {name} a moment ago.\n\nAdd another bottle?"
+        ),
+        "list.dup.add_another": "Add another bottle?",
+        "list.dup.thats_the_one": "That's the one",
         "club.off": "Wine clubs aren't on yet.",
         "club.err": "Couldn't reach the club just now.",
         "club.not_member": "You're not in that club.",
@@ -304,6 +309,11 @@ MESSAGES: dict[str, dict[str, str]] = {
         "list.newer": "Nuwer 5",
         "list.where": "Waar sit jy dit?",
         "list.drawer": "Watter laai?",
+        "list.dup.body": (
+            "Reeds {name} 'n oomblik gelede bygevoeg.\n\nNog 'n bottel byvoeg?"
+        ),
+        "list.dup.add_another": "Nog 'n bottel?",
+        "list.dup.thats_the_one": "Dis die een",
         "club.off": "Wynklubs is nog nie aan nie.",
         "club.err": "Kon nie die klub nou bereik nie.",
         "club.not_member": "Jy is nie in daai klub nie.",
@@ -385,7 +395,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.switch.keep": "Hou {household}",
         "club.home.invite": "Nooi",
         "club.home.members": "Lede",
-        "club.home.feed": "Lys",
+        "club.home.feed": "Aktiwiteit",
         "club.home.mute": "Stil",
         "club.home.unmute": "Praat",
         "club.home.settings": "Instellings",
@@ -407,7 +417,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.end.cancel": "Kanselleer",
         "club.end.ballot": (
             "{name} wil {club} beëindig.\n\n"
-            "As almal ja sê, verdwyn die klub en sy lys. "
+            "As almal ja sê, verdwyn die klub en sy aktiwiteit. "
             "As iemand nee sê, of nie betyds antwoord nie, verander niks."
         ),
         "club.end.yes": "Ja, beëindig dit",

@@ -111,6 +111,25 @@ def _visibility_label(loc, vis: str) -> str:
     return t(loc, f"club.share.{vis if vis in ('none', 'summary', 'full') else 'full'}")
 
 
+def _event_action_row(event: dict, loc: str, flags=None) -> list:
+    if (event.get("kind") or "opened") != "opened" or event.get("retracted"):
+        return []
+    event_id = event.get("id")
+    if not event_id:
+        return []
+    flags = flags or {}
+    row = []
+    if flags.get("feature_club_comments"):
+        row.append(InlineKeyboardButton(
+            t(loc, "club.comment.btn"), callback_data=club_cb("cm", event_id),
+        ))
+    if flags.get("feature_lists"):
+        row.append(InlineKeyboardButton(
+            t(loc, "club.td.btn"), callback_data=club_cb("td", event_id),
+        ))
+    return row
+
+
 def _wine_line(event: dict, loc: str) -> str:
     kind = event.get("kind")
     name = event.get("actor_name") or "Someone"
@@ -365,6 +384,28 @@ class ClubFlow:
         step = state.get("step")
         loc = self.locale(update)
         text = (update.message.text or "").strip()
+        if not clubs_enabled(self.handler):
+            await update.message.reply_text(t(loc, "club.off"))
+            self.clear(chat_id)
+            return True
+        if step == "comment" and not self.handler.flag_on("feature_club_comments"):
+            self.clear(chat_id)
+            await update.message.reply_text(t(loc, "club.comment.off"))
+            return True
+        if step in ("tasteoff_title", "tasteoff_label") and not self.handler.flag_on(
+            "feature_tasteoffs",
+        ):
+            self.clear(chat_id)
+            await update.message.reply_text(t(loc, "club.to.off"))
+            return True
+        if step == "club_list_add" and not self.handler.flag_on("feature_lists"):
+            self.clear(chat_id)
+            await update.message.reply_text(t(loc, "club.td.off"))
+            return True
+        if step == "club_post" and not global_clubs_enabled(self.handler):
+            self.clear(chat_id)
+            await update.message.reply_text(t(loc, "club.global.off"))
+            return True
         if step == "name":
             err = validate_typed_name(text)
             if err:
@@ -744,6 +785,7 @@ class ClubFlow:
             payload = api.club_feed(club_id, limit=5, offset=max(0, page) * 5)
         except Exception:
             payload = {"error": "err"}
+        keyboard = []
         if payload.get("error"):
             text = t(loc, "club.err")
         else:
@@ -751,13 +793,19 @@ class ClubFlow:
             lines = [f"\U0001F377 <b>{esc(t(loc, 'club.home.feed'))}</b>", ""]
             if not events:
                 lines.append(t(loc, "club.feed.empty"))
+            flags = {
+                "feature_lists": self.handler.flag_on("feature_lists"),
+                "feature_club_comments": self.handler.flag_on("feature_club_comments"),
+            }
             for event in events:
                 line = _wine_line(event, loc)
                 if event.get("retracted"):
                     line = f"<i>{line}</i>"
                 lines.append(line)
+                row = _event_action_row(event, loc, flags)
+                if row:
+                    keyboard.append(row)
             text = "\n".join(lines)
-        keyboard = []
         nav = []
         if page > 0:
             nav.append(InlineKeyboardButton(
@@ -1039,9 +1087,17 @@ class ClubFlow:
         except Exception as e:
             logger.info("[club] answer() failed: %s", e)
         loc = self.locale(update)
-        if not clubs_enabled(self.handler) and action not in ("j", "nn", "ph"):
+        if not clubs_enabled(self.handler) and action != "nn":
             from integrations.telegram_bot import _safe_edit
             await _safe_edit(query, t(loc, "club.off"))
+            return True
+        if action in ("dc", "dj", "jj", "gp") and not global_clubs_enabled(self.handler):
+            from integrations.telegram_bot import _safe_edit
+            await _safe_edit(query, t(loc, "club.global.off"))
+            return True
+        if action == "gp" and not _is_staff(self.handler, update):
+            from integrations.telegram_bot import _safe_edit
+            await _safe_edit(query, t(loc, "club.global.staff_only"))
             return True
         vis_map = {"0": "none", "1": "summary", "2": "full"}
         if action == "f":
@@ -1205,6 +1261,8 @@ class ClubFlow:
         elif action == "gp":
             await self._start_club_post(update, int(rest[0]) if rest else 0, query=query)
         else:
+            from integrations.telegram_bot import _safe_edit
+            await _safe_edit(query, t(loc, "club.err"))
             return True
         return True
 
@@ -1250,6 +1308,18 @@ class ClubFlow:
 
     async def _start_club_post(self, update, club_id, query=None):
         loc = self.locale(update)
+        if not _is_staff(self.handler, update) or not global_clubs_enabled(self.handler):
+            text = t(
+                loc,
+                "club.global.staff_only" if not _is_staff(self.handler, update)
+                else "club.global.off",
+            )
+            if query is not None:
+                from integrations.telegram_bot import _safe_edit
+                await _safe_edit(query, text)
+            else:
+                await update.message.reply_text(text)
+            return
         api = self._api(update)
         chat_id = str(update.effective_chat.id)
         name = "club"
@@ -1358,6 +1428,9 @@ class ClubFlow:
     async def _discover_consent(self, update, club_id, query):
         loc = self.locale(update)
         from integrations.telegram_bot import _safe_edit
+        if not global_clubs_enabled(self.handler):
+            await _safe_edit(query, t(loc, "club.global.off"))
+            return
         api = self._api(update)
         try:
             data = api.discover_clubs()
@@ -1391,6 +1464,9 @@ class ClubFlow:
     async def _do_global_join(self, update, club_id, query):
         loc = self.locale(update)
         from integrations.telegram_bot import _safe_edit
+        if not global_clubs_enabled(self.handler):
+            await _safe_edit(query, t(loc, "club.global.off"))
+            return
         api = self._api(update)
         try:
             result = api.join_club(club_id)
@@ -1683,14 +1759,21 @@ class ClubFlow:
 
     async def _start_club_list_add(self, update, club_id, query):
         loc = self.locale(update)
+        from integrations.telegram_bot import _safe_edit
+        if not self.handler.flag_on("feature_lists"):
+            await _safe_edit(query, t(loc, "club.td.off"))
+            return
         chat_id = str(update.effective_chat.id)
         self.remember(chat_id, step="club_list_add", club_id=club_id)
-        from integrations.telegram_bot import _safe_edit
         await _safe_edit(query, t(loc, "club.list.add_prompt"))
 
     async def _club_list_add_typed(self, update, text: str) -> bool:
         loc = self.locale(update)
         chat_id = str(update.effective_chat.id)
+        if not self.handler.flag_on("feature_lists"):
+            self.clear(chat_id)
+            await update.message.reply_text(t(loc, "club.td.off"))
+            return True
         state = self.state_for(chat_id) or {}
         name = (text or "").strip()
         if len(name) < 2:
@@ -1712,9 +1795,12 @@ class ClubFlow:
 
     async def _delete_club_list_item(self, update, club_id, item_id, query):
         loc = self.locale(update)
+        from integrations.telegram_bot import _safe_edit
+        if not self.handler.flag_on("feature_lists"):
+            await _safe_edit(query, t(loc, "club.td.off"))
+            return
         api = self._api(update)
         result = api.delete_club_list_item(club_id, item_id)
-        from integrations.telegram_bot import _safe_edit
         if result.get("status_code") == 403:
             await _safe_edit(query, t(loc, "club.forbidden"))
             return
