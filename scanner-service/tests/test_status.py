@@ -54,6 +54,28 @@ async def test_status_empty_cellar_invites_a_photo():
 
 
 @pytest.mark.asyncio
+async def test_status_empty_cellar_follows_stored_language():
+    api = MagicMock()
+    api.wines_in_stock.return_value = []
+    api.list_storages.return_value = [
+        {"name": "Cellar", "drawers": 0, "capacity": 0, "bottles": 0},
+    ]
+    handler = _handler(api)
+    handler.set_language("4242", "af")
+    update = MagicMock()
+    update.effective_chat.id = 4242
+    update.effective_user.language_code = "en"
+    update.message.text = "/status"
+    update.message.chat_id = 4242
+    update.message.reply_text = AsyncMock()
+    await handler._cmd_status(update, MagicMock())
+    text = update.message.reply_text.call_args.args[0]
+    assert "leeg" in text.lower()
+    assert "foto" in text.lower()
+    assert "scan" not in text.lower()
+
+
+@pytest.mark.asyncio
 async def test_status_does_not_mention_shelves_for_a_zero_drawer_kitchen():
     api = MagicMock()
     api.wines_in_stock.return_value = []

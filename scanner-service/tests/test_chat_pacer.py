@@ -13,7 +13,6 @@ from integrations.chat_intent import (
     PacedMessage,
     PacedUpdate,
     ReplyPacer,
-    _is_frozen,
     pace_update,
 )
 
@@ -38,14 +37,14 @@ def test_real_telegram_message_rejects_reply_text_assignment():
     message = _ptb_message()
     with pytest.raises(AttributeError, match="can't be set"):
         message.reply_text = None
-    assert _is_frozen(message)
+    assert isinstance(message, Message)
 
 
 def test_real_telegram_update_rejects_callback_query_assignment():
     update = _ptb_update()
     with pytest.raises(AttributeError, match="can't be set"):
         update.callback_query = object()
-    assert _is_frozen(update)
+    assert isinstance(update, Update)
 
 
 def test_pace_update_wraps_real_update_without_mutating():
@@ -62,6 +61,8 @@ def test_pace_update_wraps_real_update_without_mutating():
     assert paced.effective_chat.id == 4242
     assert paced.effective_user.id == 1
     assert update.message.text == "what should I drink"
+    assert not hasattr(update, "_whiney_pace_probe")
+    assert not hasattr(update.message, "_whiney_pace_probe")
     with pytest.raises(AttributeError, match="can't be set"):
         update.message.reply_text = AsyncMock()
 
@@ -76,6 +77,19 @@ def test_pace_update_leaves_mocks_alone():
     zero = ReplyPacer(lambda: 0.0, AsyncMock(), 0)
     real = _ptb_update()
     assert pace_update(real, zero) is real
+
+
+def test_pace_update_leaves_setattr_raising_fakes_alone():
+    """A freeze-probe would wrap this. isinstance must not."""
+
+    class FrozenFake:
+        def __setattr__(self, name, value):
+            raise AttributeError("can't be set")
+
+    inner = FrozenFake()
+    fake = SimpleNamespace(message=inner)
+    pacer = ReplyPacer(lambda: 0.0, AsyncMock(), 1000)
+    assert pace_update(fake, pacer) is fake
 
 
 @pytest.mark.asyncio
@@ -127,3 +141,24 @@ async def test_unknown_text_paces_link_replies_on_mocks():
     body = original.await_args.args[0]
     assert "screenshot" in body.lower() or "skermkiekie" in body.lower()
     assert update.message.reply_text is original
+
+
+@pytest.mark.asyncio
+async def test_unknown_text_on_real_update_does_not_assign_reply_text():
+    from test_chat_router import FakeChat, _api, _context, _handler, _wine
+
+    handler = _handler(_api([_wine()]), FakeChat())
+    handler._min_reply_ms = 1000
+
+    async def sleep(_delay):
+        return None
+
+    handler._router._sleep = sleep
+    handler._router._now = lambda: 0.0
+    update = _ptb_update("https://example.test/list")
+    with pytest.raises(Exception) as caught:
+        await handler._unknown_text(update, MagicMock())
+    assert "can't be set" not in str(caught.value)
+    with pytest.raises(AttributeError, match="can't be set"):
+        update.message.reply_text = AsyncMock()
+    assert update.message.text == "https://example.test/list"

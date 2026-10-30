@@ -1213,6 +1213,7 @@ def empty_cellar(
     *,
     unconfigured: bool = False,
     storage_name: str = "",
+    locale: str = "en",
 ) -> tuple[str, InlineKeyboardMarkup]:
     """The one empty-state card, used everywhere a cellar or fridge is empty.
 
@@ -1221,19 +1222,12 @@ def empty_cellar(
     pointing at hardware most of them don't have. Every one now says the same
     thing: send a photo.
     """
-    text = (
-        f"\U0001F377 <b>{context_line or 'Your cellar is empty'}</b>\n\n"
-        "\U0001F4F8 <b>Send me a photo of a bottle</b> and I'll add it.\n\n"
-        "Point your camera at the front label — I'll read the producer, grape, "
-        "region and vintage, write tasting notes, and look up ratings and price."
-    )
+    from integrations.copy import t as copy_t
+    title = context_line or copy_t(locale, "chat.empty.title")
+    text = f"\U0001F377 <b>{title}</b>\n\n{copy_t(locale, 'chat.empty.body')}"
     if unconfigured:
         where = storage_name or "This cellar"
-        text += (
-            f"\n\n<i>{where} has no shelves yet. When you've got a fridge or "
-            "rack, add it from the website and say how many drawers it has — "
-            "or just send bottles and I'll keep them here until you do.</i>"
-        )
+        text += copy_t(locale, "chat.empty.unconfigured", where=where)
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("\u2139\uFE0F How it works", callback_data=_cb("howto")),
     ]])
@@ -2993,6 +2987,15 @@ class TelegramBotHandler:
             text = getattr(message, "text", None) or ""
         return sniff_locale(text or "", self.locale_for(update=update, chat_id=chat_id))
 
+    def _empty_locale(self, update_or_query) -> str:
+        """Locale for empty-cellar cards on commands and callback edits."""
+        if hasattr(update_or_query, "edit_message_text"):
+            chat_id = str(
+                getattr(getattr(update_or_query, "message", None), "chat_id", "") or ""
+            )
+            return self.reply_locale(chat_id=chat_id)
+        return self.reply_locale(update_or_query)
+
     def locale_for(self, update=None, chat_id=None, language_code=None) -> str:
         from integrations.copy import locale_from_telegram, normalize_locale
 
@@ -3588,7 +3591,7 @@ class TelegramBotHandler:
             latency_ms = int(round((_time.monotonic() - started) * 1000))
             logger.info(
                 "[text] intent=%s confidence=%s slots=%s outcome=%s handler=%s "
-                "classify_ms=%s execute_ms=%s ms=%s text=%r",
+                "classify_ms=%s execute_ms=%s ms=%s",
                 meta.get("intent") or "-",
                 meta.get("confidence") if meta.get("confidence") not in (None, "") else "-",
                 meta.get("slots") or "-",
@@ -3597,7 +3600,6 @@ class TelegramBotHandler:
                 meta.get("classify_ms") or 0,
                 meta.get("execute_ms") or 0,
                 latency_ms,
-                text[:60],
             )
             if token is not None:
                 end_turn(token)
@@ -3621,6 +3623,7 @@ class TelegramBotHandler:
                 unconfigured, storage_name = _unconfigured_storage(api)
                 text, kb = empty_cellar(
                     unconfigured=unconfigured, storage_name=storage_name,
+                    locale=self._empty_locale(update),
                 )
                 await update.message.reply_text(
                     text, reply_markup=kb, parse_mode="HTML",
@@ -3696,6 +3699,7 @@ class TelegramBotHandler:
                 unconfigured, storage_name = _unconfigured_storage(api)
                 text, kb = empty_cellar(
                     unconfigured=unconfigured, storage_name=storage_name,
+                    locale=self._empty_locale(update),
                 )
                 await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
                 return
@@ -3850,8 +3854,11 @@ class TelegramBotHandler:
         try:
             storages = api.list_storages()
             if not storages:
+                locale = self._empty_locale(update)
+                from integrations.copy import t as copy_t
                 text, kb = empty_cellar(
-                    "No storage locations yet", unconfigured=True,
+                    copy_t(locale, "chat.empty.no_storage"), unconfigured=True,
+                    locale=locale,
                 )
                 await update.message.reply_text(
                     text, reply_markup=kb, parse_mode="HTML",
@@ -4245,7 +4252,9 @@ class TelegramBotHandler:
             return
 
         if not storages:
-            text, kb = empty_cellar(unconfigured=True)
+            text, kb = empty_cellar(
+                unconfigured=True, locale=self._empty_locale(update),
+            )
             await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
             return
 
@@ -4289,10 +4298,17 @@ class TelegramBotHandler:
 
         if not wines:
             unconfigured, hint_name = _unconfigured_storage(api)
+            locale = self._empty_locale(update_or_query)
+            from integrations.copy import t as copy_t
+            title = (
+                copy_t(locale, "chat.empty.storage", where=storage_name)
+                if storage_name else ""
+            )
             text, kb = empty_cellar(
-                f"{storage_name} is empty" if storage_name else "Your cellar is empty",
+                title,
                 unconfigured=unconfigured,
                 storage_name=storage_name or hint_name,
+                locale=locale,
             )
             if hasattr(update_or_query, "edit_message_text"):
                 await _safe_edit(update_or_query, text, reply_markup=kb, parse_mode="HTML")
@@ -4405,9 +4421,10 @@ class TelegramBotHandler:
                 )
                 return
             del self._browse_sessions[session_key]
+            empty_text, empty_kb = empty_cellar(locale=self._empty_locale(query))
             await _safe_edit(
                 query,
-                empty_cellar()[0], reply_markup=empty_cellar()[1], parse_mode="HTML",
+                empty_text, reply_markup=empty_kb, parse_mode="HTML",
             )
             return
         # If currently showing a flat list, stay on the same page (clamped)
@@ -6589,8 +6606,9 @@ class TelegramBotHandler:
                     await _safe_edit(query,f"Error loading fridge: {e}")
                     return
                 if not wines:
+                    empty_text, empty_kb = empty_cellar(locale=self._empty_locale(query))
                     await _safe_edit(query,
-                        empty_cellar()[0], reply_markup=empty_cellar()[1], parse_mode="HTML",
+                        empty_text, reply_markup=empty_kb, parse_mode="HTML",
                     )
                     return
                 text, keyboard = self._build_fridge_page(wines, page=page)
@@ -7094,8 +7112,9 @@ class TelegramBotHandler:
                 else:
                     wines = api.wines_in_stock()
                     if not wines:
+                        empty_text, empty_kb = empty_cellar(locale=self._empty_locale(query))
                         await _safe_edit(query,
-                            empty_cellar()[0], reply_markup=empty_cellar()[1], parse_mode="HTML",
+                            empty_text, reply_markup=empty_kb, parse_mode="HTML",
                         )
                         return
                     total_pages = max(1, (len(wines) + self.FRIDGE_PAGE_SIZE - 1) // self.FRIDGE_PAGE_SIZE)
@@ -7815,7 +7834,9 @@ class TelegramBotHandler:
             except Exception:
                 hits = []
             if hits:
-                await self._start_drink_from_hits(query, api, context, hits)
+                await self._start_drink_from_hits(
+                    query, api, context, hits, locale=self.reply_locale(update),
+                )
                 return True
             # Real telegram.Update is frozen — never assign callback_query on it.
             fake = SimpleNamespace(
@@ -7843,11 +7864,14 @@ class TelegramBotHandler:
 
     async def _typed_drink_named(
         self, update, context, api, query, query_name: str, location: str = "",
+        locale: str | None = None,
     ) -> bool:
         if query is None:
             query = _as_edit_query(update)
         storage = self._typed_storage_name(api, location)
-        locale = self.reply_locale(update, query_name)
+        if not locale:
+            message_text = getattr(getattr(update, "message", None), "text", "") or ""
+            locale = self.reply_locale(update, message_text)
         try:
             wines = api.wines_in_stock(storage_name=storage) if storage else api.wines_in_stock()
         except Exception:
@@ -7932,11 +7956,13 @@ class TelegramBotHandler:
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
-    async def _start_drink_from_hits(self, query, api, context, hits: list[dict]):
+    async def _start_drink_from_hits(
+        self, query, api, context, hits: list[dict], locale: str = "en",
+    ):
         if len(hits) == 1:
             await self._drink_existing(query, api, context, hits[0]["id"])
             return
-        await self._offer_drink_picks(query, hits)
+        await self._offer_drink_picks(query, hits, locale=locale)
 
     async def _drink_existing(
         self, query, api, context, wine_id: int, *, storage_name: str | None = None,
@@ -7997,7 +8023,15 @@ class TelegramBotHandler:
                 if isinstance(result, dict) and not result.get("error"):
                     await self._show_drank_result(query, context, result, wine_id)
                     return
-            await _safe_edit(query, f"⚠️ {err or 'Could not take that bottle out.'}")
+            from integrations.copy import t as copy_t
+            chat_id = str(getattr(query.message, "chat_id", "") or "")
+            locale = self.reply_locale(chat_id=chat_id)
+            key = (
+                "chat.checkout.gone"
+                if err and "no stock" in str(err).lower()
+                else "chat.err.generic"
+            )
+            await _safe_edit(query, copy_t(locale, key))
             return
         await self._show_drank_result(query, context, result, wine_id)
 
@@ -8014,10 +8048,16 @@ class TelegramBotHandler:
             text, markup = build_drank_view(name, stock, item_id, wine_id=wine_id)
             await _safe_edit(query, text, parse_mode="HTML", reply_markup=markup)
         else:
+            from integrations.copy import t as copy_t
+            chat_id = str(getattr(query.message, "chat_id", "") or "")
             await _safe_edit(
                 query,
-                f"\U0001F377 <b>Drank:</b> {name}\n"
-                f"\U0001F4CA In stock: {stock}",
+                copy_t(
+                    self.reply_locale(chat_id=chat_id),
+                    "chat.drank",
+                    name=html.escape(str(name), quote=False),
+                    stock=stock,
+                ),
                 parse_mode="HTML",
             )
         try:

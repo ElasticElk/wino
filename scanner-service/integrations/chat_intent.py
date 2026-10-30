@@ -357,23 +357,13 @@ class PacedUpdate:
         return getattr(self._inner, "effective_user", None)
 
 
-def _is_frozen(obj) -> bool:
-    """True for python-telegram-bot frozen objects. False for mocks."""
-    if obj is None:
-        return False
-    try:
-        obj._whiney_pace_probe = True
-    except Exception:
-        return True
-    try:
-        delattr(obj, "_whiney_pace_probe")
-    except Exception:
-        pass
-    return False
-
-
 def pace_update(update, pacer: ReplyPacer | None):
-    """Wrap a frozen Telegram Update. Leave mocks and mutable fakes alone."""
+    """Wrap a real Telegram Update. Leave mocks and mutable fakes alone.
+
+    python-telegram-bot 22 freezes Update/Message, so assigning reply_text
+    or probing with a dummy attribute raises. Wrapping is the whole pacing
+    implementation — nothing is mutated.
+    """
     if pacer is None or pacer.min_s <= 0 or update is None:
         return update
     if isinstance(update, PacedUpdate):
@@ -381,6 +371,10 @@ def pace_update(update, pacer: ReplyPacer | None):
     message = getattr(update, "message", None)
     if message is None:
         return update
-    if not _is_frozen(message) and not _is_frozen(update):
+    try:
+        from telegram import Message, Update
+    except Exception:
         return update
-    return PacedUpdate(update, pacer)
+    if isinstance(update, Update) or isinstance(message, Message):
+        return PacedUpdate(update, pacer)
+    return update

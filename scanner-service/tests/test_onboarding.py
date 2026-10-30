@@ -201,6 +201,14 @@ def test_empty_state_mentions_shelves_when_unconfigured():
     assert "photo" in text.lower()
 
 
+def test_empty_state_follows_locale():
+    text, keyboard = empty_cellar(locale="af")
+    assert "leeg" in text.lower()
+    assert "foto" in text.lower()
+    assert "scan" not in text.lower()
+    assert keyboard.inline_keyboard
+
+
 @pytest.mark.asyncio
 async def test_a_pasted_link_is_not_searched_for(handler):
     """Someone shared a wine-list URL and the bot searched the cellar for it."""

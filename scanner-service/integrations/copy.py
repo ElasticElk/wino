@@ -327,6 +327,28 @@ MESSAGES: dict[str, dict[str, str]] = {
             "or talk you through how Whiney works."
         ),
         "chat.add_photo": "Send a photo of the label and I'll add it.",
+        "chat.add_photo_named": "Send a photo of the {name} label and I'll add it.",
+        "chat.empty.title": "Your cellar is empty",
+        "chat.empty.body": (
+            "📷 <b>Send me a photo of a bottle</b> and I'll add it.\n\n"
+            "Point your camera at the front label — I'll read the producer, grape, "
+            "region and vintage, write tasting notes, and look up ratings and price."
+        ),
+        "chat.empty.unconfigured": (
+            "\n\n<i>{where} has no shelves yet. When you've got a fridge or "
+            "rack, add it from the website and say how many drawers it has — "
+            "or just send bottles and I'll keep them here until you do.</i>"
+        ),
+        "chat.empty.storage": "{where} is empty",
+        "chat.empty.no_storage": "No storage locations yet",
+        "chat.list.removed_named": "📝 Took {name} off your To-drink list.",
+        "chat.list.not_on_list": (
+            "{name} isn't on your To-drink list. Send /list to browse it, or name another bottle."
+        ),
+        "chat.list.which": (
+            "A few bottles match that. Which one should come off the list?"
+        ),
+        "chat.fact.named_hit": "{query} in the cellar:",
         "chat.dont_know": "I don't know — I can only go on what's in your cellar.",
         "chat.list_add_need_wine": "Which bottle should go on the list? Send a label photo, or name it.",
         "chat.btn.stock": "What's in stock",
@@ -793,6 +815,28 @@ MESSAGES: dict[str, dict[str, str]] = {
             "'n bottel voorstel, of verduidelik hoe Whiney werk."
         ),
         "chat.add_photo": "Stuur 'n foto van die etiket en ek sal dit byvoeg.",
+        "chat.add_photo_named": "Stuur 'n foto van die {name}-etiket en ek sal dit byvoeg.",
+        "chat.empty.title": "Jou kelder is leeg",
+        "chat.empty.body": (
+            "📷 <b>Stuur my 'n foto van 'n bottel</b> en ek voeg dit by.\n\n"
+            "Mik jou kamera na die voorkant-etiket — ek lees die produsent, druiwe, "
+            "streek en oesjaar, skryf proe-notas, en soek graderings en prys op."
+        ),
+        "chat.empty.unconfigured": (
+            "\n\n<i>{where} het nog geen rakke nie. As jy 'n yskas of rak het, "
+            "voeg dit by op die webwerf en sê hoeveel laaie — "
+            "of stuur net bottels en ek hou hulle hier tot jy dit doen.</i>"
+        ),
+        "chat.empty.storage": "{where} is leeg",
+        "chat.empty.no_storage": "Nog geen stoorplekke nie",
+        "chat.list.removed_named": "📝 Het {name} van jou To-drink-lys afgehaal.",
+        "chat.list.not_on_list": (
+            "{name} is nie op jou To-drink-lys nie. Stuur /list om dit te sien, of noem 'n ander bottel."
+        ),
+        "chat.list.which": (
+            "A paar bottels pas. Watter een moet van die lys af?"
+        ),
+        "chat.fact.named_hit": "{query} in die kelder:",
         "chat.dont_know": "Ek weet nie — ek kan net gaan op wat in jou kelder is.",
         "chat.list_add_need_wine": "Watter bottel moet op die lys? Stuur 'n etiketfoto, of noem dit.",
         "chat.btn.stock": "What's in stock",

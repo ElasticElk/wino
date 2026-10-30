@@ -395,7 +395,7 @@ async def test_afrikaans_drank_barolos_picks_name_and_appellation():
     api.remove_stock.assert_not_called()
     handler._router.handle_text.assert_not_called()
     text = update.message.reply_text.call_args.args[0]
-    assert "Which one" in text
+    assert "Watter een" in text
     labels = _pick_labels(update)
     assert any("Terre del Barolo" in t for t in labels)
     assert any("I Siglati" in t for t in labels)
@@ -509,7 +509,7 @@ async def test_typed_stock_logs_handler_without_chat_id(caplog):
         await handler._unknown_text(update, MagicMock())
     logged = [r.getMessage() for r in caplog.records if "[text]" in r.getMessage()]
     assert any("handler=typed_stock" in msg for msg in logged)
-    assert any("Remove one of my chenins" in msg for msg in logged)
+    assert all("Remove one of my chenins" not in msg for msg in logged)
     assert all("4242" not in msg for msg in logged)
 
 

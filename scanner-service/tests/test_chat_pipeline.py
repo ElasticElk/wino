@@ -237,7 +237,7 @@ CASES = [
     # --- add_wine / search / recommend ---
     dict(id="en_add", text="add Kanonkop Paul Sauer 2019 to the cellar", locale="en",
          parse=_parse("add_wine", slots=_slots(wine="Kanonkop Paul Sauer", vintage=2019, producer="Kanonkop")),
-         expect_intent="add_wine", expect_outcome="answered", must=["photo"]),
+         expect_intent="add_wine", expect_outcome="answered", must=["photo", "Kanonkop"]),
     dict(id="af_add", text="voeg die Kanonkop by die kelder", locale="af",
          parse=_parse("add_wine", slots=_slots(wine="Kanonkop", producer="Kanonkop")),
          expect_intent="add_wine", expect_outcome="answered", must=["foto"]),
@@ -507,6 +507,79 @@ CASES = [
     dict(id="en_wine_chat_decant_af", text="moet ek 'n Barolo dekanteer", locale="af",
          parse=_parse("wine_knowledge", language="af"),
          expect_intent="wine_knowledge", expect_outcome="answered", wine_chat=True),
+    dict(id="af_empty_recommend", text="wat moet ek vanaand drink?", locale="af",
+         parse=_parse("recommend", language="af"), wines=[],
+         expect_intent="recommend", expect_outcome="answered",
+         must=["leeg", "foto"], must_not=["scan"]),
+    dict(id="en_list_remove_named", text="take Sadie off my list", locale="en",
+         flags={"feature_lists": "on"},
+         parse=_parse("list_action", list_op="remove", slots=_slots(wine="Sadie")),
+         expect_intent="list_action", expect_outcome="answered",
+         must=["Sadie"], list_items=[{"id": 3, "name": "Sadie Columella"}]),
+    dict(id="en_list_remove_missing", text="take Malbec off my list", locale="en",
+         flags={"feature_lists": "on"},
+         parse=_parse("list_action", list_op="remove", slots=_slots(wine="Malbec")),
+         expect_intent="list_action", expect_outcome="answered",
+         must=["isn't on"], list_items=[{"id": 3, "name": "Sadie Columella"}]),
+    dict(id="en_list_remove_multi", text="take Sadie off my list", locale="en",
+         flags={"feature_lists": "on"},
+         parse=_parse("list_action", list_op="remove", slots=_slots(wine="Sadie")),
+         expect_intent="list_action", expect_outcome="answered",
+         must=["Which one"],
+         buttons=["Sadie Columella", "Sadie Pofadder"],
+         list_items=[{"id": 3, "name": "Sadie Columella"}, {"id": 4, "name": "Sadie Pofadder"}]),
+    dict(id="af_list_remove_named", text="haal Sadie van my lys af", locale="af",
+         flags={"feature_lists": "on"},
+         parse=_parse("list_action", language="af", list_op="remove", slots=_slots(wine="Sadie")),
+         expect_intent="list_action", expect_outcome="answered",
+         must=["Sadie"], list_items=[{"id": 3, "name": "Sadie Columella"}]),
+    dict(id="af_drink_confirm", text="ek het die Kanonkop gedrink", locale="af",
+         parse=_parse("drink_remove", language="af", wine_ref="Kanonkop",
+                      slots=_slots(wine="Kanonkop")),
+         expect_intent="drink_remove", expect_outcome="answered",
+         must=["gedrink", "Kanonkop"], must_not=["Remove 1"]),
+    dict(id="en_drink_no_match", text="I drank the malbec", locale="en",
+         parse=_parse("drink_remove", wine_ref="malbec", slots=_slots(wine="malbec")),
+         expect_intent="drink_remove", expect_outcome="answered",
+         must=["Nothing matching", "malbec"]),
+    dict(id="en_empty_fact", text="any shiraz?", locale="en",
+         parse=_parse("cellar_query", fact={"kind": "grape", "storage_text": "", "drawer": None, "country_code": "", "grape": "shiraz"},
+                      slots=_slots(grape="shiraz")),
+         wines=[], expect_intent="cellar_query", expect_outcome="answered",
+         must=["photo"], must_not=["scan"]),
+    dict(id="af_empty_fact", text="het ek enige shiraz?", locale="af",
+         parse=_parse("cellar_query", language="af",
+                      fact={"kind": "grape", "storage_text": "", "drawer": None, "country_code": "", "grape": "shiraz"},
+                      slots=_slots(grape="shiraz")),
+         wines=[], expect_intent="cellar_query", expect_outcome="answered",
+         must=["leeg", "foto"], must_not=["scan"]),
+    dict(id="en_list_already", text="add Sadie Columella to my list", locale="en",
+         flags={"feature_lists": "on"},
+         parse=_parse("list_action", list_op="add", slots=_slots(wine="Sadie Columella", producer="Sadie")),
+         expect_intent="list_action", expect_outcome="answered",
+         must=["already"], list_already=True),
+    dict(id="en_where_kanonkop", text="where is the Kanonkop?", locale="en",
+         parse=_parse("cellar_query", slots=_slots(wine="Kanonkop")),
+         expect_intent="cellar_query", expect_outcome="answered",
+         must=["Kanonkop"]),
+    dict(id="af_typo_recommend", text="wat moet ek vanaand drnk", locale="af",
+         parse=_parse("recommend", language="af"),
+         expect_intent="recommend", expect_outcome="answered"),
+    dict(id="en_mixed_recommend", text="wat moet ek drink tonight", locale="af",
+         parse=_parse("recommend", language="af"),
+         expect_intent="recommend", expect_outcome="answered"),
+    dict(id="en_thanks", text="thanks", locale="en",
+         parse=_parse("smalltalk_help", help_topic="other"),
+         expect_intent="smalltalk_help", expect_outcome="answered"),
+    dict(id="af_add_named", text="voeg Sadie Columella by die kelder", locale="af",
+         parse=_parse("add_wine", language="af", slots=_slots(wine="Sadie Columella", producer="Sadie")),
+         expect_intent="add_wine", expect_outcome="answered",
+         must=["foto", "Sadie Columella"]),
+    dict(id="en_drink_multi", text="I drank the Kanonkop", locale="en",
+         parse=_parse("drink_remove", wine_ref="Kanonkop", slots=_slots(wine="Kanonkop")),
+         wines=[_wine(), _wine(wine_id=2, name="Kanonkop Kadette")],
+         expect_intent="drink_remove", expect_outcome="answered",
+         must=["Which one"]),
 ]
 
 
@@ -524,13 +597,14 @@ def _run_handler(api, chat, flags=None, locale="en"):
         "id": 9, "items": [], "count": 0, "offset": 0, "limit": 5, "name": "To drink",
     }
     api.add_list_item.return_value = {"id": 1, "already": False}
+    api.delete_list_item.return_value = {"ok": True}
     return handler
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", CASES, ids=[c["id"] for c in CASES])
 async def test_pipeline_case(case):
-    api = _api(case.get("wines") or [_wine()])
+    api = _api(case["wines"] if "wines" in case else [_wine()])
     if case.get("club_result") is not None:
         api.club_ask.return_value = case["club_result"]
     chat = FakeChat()
@@ -538,6 +612,13 @@ async def test_pipeline_case(case):
     chat.wine_chat_reply = "A Northern Rhône Syrah would suit a steak."
     chat.support_reply = "Send /invite and share the link."
     handler = _run_handler(api, chat, case.get("flags"), case.get("locale", "en"))
+    if case.get("list_items") is not None:
+        api.get_list.return_value = {
+            "id": 9, "items": case["list_items"], "count": len(case["list_items"]),
+            "offset": 0, "limit": 50, "name": "To drink",
+        }
+    if case.get("list_already"):
+        api.add_list_item.return_value = {"id": 1, "already": True}
     handler._router._sleep = _fast_sleep
     update, sent = _text(case["text"])
     handled = await handler._router.handle_text(update, _context(), case["text"])
@@ -696,7 +777,7 @@ async def test_typed_log_includes_intent_slots_outcome(caplog):
     assert "intent=club_query" in logged
     assert "outcome=flag_off" in logged
     assert "handler=chat" in logged
-    assert "What clubs am I in?" in logged
+    assert "What clubs am I in?" not in logged
     assert "You only drink" not in logged
     assert "4242" not in logged
 

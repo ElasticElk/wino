@@ -383,8 +383,8 @@ class ChatRouter:
             classify_ms=classify_ms,
         )
         logger.info(
-            "[chat] parse intent=%s confidence=%.2f slots=%s chat=%s text=%r",
-            intent, confidence, slot_summary(slots), chat_id, text[:60],
+            "[chat] parse intent=%s confidence=%.2f slots=%s",
+            intent, confidence, slot_summary(slots),
         )
         execute_at = self._now()
         features = self._chat_features()
@@ -579,7 +579,7 @@ class ChatRouter:
             }:
                 return await self.handler._maybe_typed_stock(update, context, "Drank this")
             return await self.handler._typed_drink_named(
-                update, context, api, None, wine_ref, location,
+                update, context, api, None, wine_ref, location, locale=locale,
             )
         if intent == "wine_knowledge":
             await self._wine_chat(update, context, api, chat_id, text, locale)
@@ -592,7 +592,7 @@ class ChatRouter:
             return await self._fact(update, context, api, chat_id, parsed, wines, storages, locale)
         if intent in ("recommend", "answer"):
             if not wines:
-                await self._empty(update, api)
+                await self._empty(update, api, locale)
                 return True
             placeholder = asyncio.create_task(self._placeholder(update, wines, locale))
             box["placeholder"] = placeholder
@@ -631,7 +631,10 @@ class ChatRouter:
                 cards = []
             if cards and await self.handler._maybe_typed_add(update, context, "add"):
                 return True
-        await self._say(update, f"📷 {self._c(locale, 'chat.add_photo')}")
+        if wine and wine.casefold() not in {"this", "it", "that", "dit", "hierdie"}:
+            await self._say(update, f"📷 {self._c(locale, 'chat.add_photo_named', name=_esc(wine))}")
+        else:
+            await self._say(update, f"📷 {self._c(locale, 'chat.add_photo')}")
         return True
 
     async def _list_action(self, update, context, api, chat_id, parsed, locale: str = "en") -> bool:
@@ -668,6 +671,58 @@ class ChatRouter:
             key = "chat.list.already_named" if result.get("already") else "chat.list.added_named"
             await self._say(update, self._c(locale, key, name=_esc(wine)))
             return True
+        if op == "remove" and wine:
+            flow = self.handler._list_flow()
+            list_id = flow._personal_list_id(api)
+            if not list_id:
+                await self._say(update, self._c(locale, "list.err"))
+                return True
+            try:
+                payload = api.get_list(list_id, limit=50, offset=0) or {}
+            except Exception as exc:
+                logger.warning("[chat] list get failed chat=%s detail=%s", chat_id, exc)
+                await self._say(update, self._c(locale, "list.err"))
+                return True
+            items = payload.get("items") or []
+            needle = wine.casefold()
+            hits = [
+                item for item in items
+                if needle in (item.get("name") or "").casefold()
+            ]
+            if len(hits) == 1:
+                item = hits[0]
+                try:
+                    api.delete_list_item(list_id, item.get("id"))
+                except Exception as exc:
+                    logger.warning("[chat] list remove failed chat=%s detail=%s", chat_id, exc)
+                    await self._say(update, self._c(locale, "list.err"))
+                    return True
+                await self._say(
+                    update,
+                    self._c(locale, "chat.list.removed_named", name=_esc(item.get("name") or wine)),
+                )
+                return True
+            if not hits:
+                await self._say(update, self._c(locale, "chat.list.not_on_list", name=_esc(wine)))
+                return True
+            cb, *_rest = _tools()
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            rows = []
+            for item in hits[:8]:
+                item_id = item.get("id")
+                if not item_id:
+                    continue
+                rows.append([InlineKeyboardButton(
+                    (item.get("name") or wine)[:30],
+                    callback_data=cb("lx", item_id=item_id),
+                )])
+            if rows:
+                await self._say(
+                    update,
+                    self._c(locale, "chat.list.which"),
+                    InlineKeyboardMarkup(rows),
+                )
+                return True
         await self.handler._list_flow().cmd_list(update, context)
         return True
 
@@ -745,7 +800,8 @@ class ChatRouter:
         payload = dict(ask.get("club_ask") or {})
         payload.update(fields)
         parsed = {"club": payload, "intent": "club_query"}
-        await self._club(update, context, api, chat_id, canonical_parse(parsed), "")
+        locale = self._reply_locale(update, chat_id)
+        await self._club(update, context, api, chat_id, canonical_parse(parsed), "", locale)
 
     async def _help(self, update, context, api, chat_id, text, parsed, locale: str = "en") -> None:
         # Known topics still have a canned line if the model is down.
@@ -816,7 +872,7 @@ class ChatRouter:
                     locale: str | None = None) -> bool:
         locale = locale or self._reply_locale(update, chat_id, parsed)
         if not wines:
-            await self._empty(update, api)
+            await self._empty(update, api, locale)
             return True
         fact = parsed.get("fact") or {}
         # Storages the payload doesn't mention still count when the user names one.
@@ -1341,7 +1397,7 @@ class ChatRouter:
             if wines is None:
                 return
             if not wines:
-                await self._empty(update, api)
+                await self._empty(update, api, locale)
                 return
             placeholder = await message.reply_text(_looking(wines, locale), parse_mode="HTML")
             await self._recommend(
@@ -1566,14 +1622,18 @@ class ChatRouter:
     def _currency(self, chat_id) -> str:
         return (getattr(self.handler, "_chat_id_to_currency", {}) or {}).get(str(chat_id), "")
 
-    async def _empty(self, update, api):
+    async def _empty(self, update, api, locale: str | None = None):
         _cb, _glyph, _nm, unconfigured_storage, empty = _tools()
+        chat_id = str(getattr(getattr(update, "effective_chat", None), "id", "") or "")
+        locale = locale or self._reply_locale(update, chat_id)
         try:
             unconfigured, storage_name = unconfigured_storage(api)
         except Exception:
             unconfigured, storage_name = False, ""
-        text, keyboard = empty(unconfigured=unconfigured, storage_name=storage_name)
-        await update.message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
+        text, keyboard = empty(
+            unconfigured=unconfigured, storage_name=storage_name, locale=locale,
+        )
+        await self._say(update, text, keyboard)
 
     async def _placeholder(self, update, wines, locale: str = "en"):
         await self._wait_pace()
@@ -1655,7 +1715,7 @@ def _slot_fact(parsed: dict, wines: list[dict], locale: str = "en"):
                 name = _esc(wine.get("name") or "a bottle")
                 lines.append(f"• <b>{name}</b>")
             return FactReply(
-                text=f"{_esc(query)}\n" + "\n".join(lines),
+                text=copy_t(locale, "chat.fact.named_hit", query=_esc(query)) + "\n" + "\n".join(lines),
                 kind="name",
                 wine_ids=[i for i in ids if i is not None],
             )
