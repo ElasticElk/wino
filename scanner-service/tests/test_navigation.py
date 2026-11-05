@@ -788,3 +788,176 @@ async def test_existing_users_get_the_bar_once_after_a_deploy():
     intros = [c for c in context.bot.send_message.await_args_list
               if isinstance(c.kwargs.get("reply_markup"), ReplyKeyboardMarkup)]
     assert len(intros) == 1
+
+
+# --------------------------------------------------------------------------
+# Round-2 regressions
+
+def _real_text_update(text, chat_id=4242, sent_at=None):
+    """A real (frozen) PTB Update, so pace_update actually wraps it."""
+    import datetime
+    from telegram import Chat, Message, Update, User
+
+    bot = MagicMock()
+
+    async def _send(*args, **kwargs):
+        if sent_at is not None:
+            import time as _t
+            sent_at.append(_t.monotonic())
+        return MagicMock(message_id=99)
+
+    bot.send_message = AsyncMock(side_effect=_send)
+    bot.defaults = None
+    chat = Chat(id=chat_id, type="private")
+    user = User(id=chat_id, first_name="Riley", is_bot=False, language_code="en")
+    message = Message(
+        message_id=1, date=datetime.datetime.now(datetime.timezone.utc),
+        chat=chat, from_user=user, text=text,
+    )
+    message.set_bot(bot)
+    update = Update(update_id=1, message=message)
+    update.set_bot(bot)
+    return update, bot
+
+
+@pytest.mark.asyncio
+async def test_pending_search_reply_keeps_the_typing_floor():
+    import time as _t
+
+    handler = _handler()
+    handler.set_flags({"chat_min_reply_ms": "600"})
+    handler._router = None
+    sent_at = []
+    update, bot = _real_text_update("ok", sent_at=sent_at)
+    handler._nav().pending.begin("4242", "search")
+    api = handler._get_api("4242")
+    api.search_wines.return_value = []
+    started = _t.monotonic()
+    await handler._unknown_text(update, _context(bot))
+    assert sent_at, "search reply was not sent"
+    assert sent_at[0] - started >= 0.55
+
+
+@pytest.mark.asyncio
+async def test_label_tap_keeps_the_typing_floor():
+    import time as _t
+
+    handler = _handler()
+    handler.set_flags({"chat_min_reply_ms": "600"})
+    sent_at = []
+    update, bot = _real_text_update(BAR_MENU, sent_at=sent_at)
+    started = _t.monotonic()
+    await handler._unknown_text(update, _context(bot))
+    assert sent_at and sent_at[0] - started >= 0.55
+
+
+@pytest.mark.asyncio
+async def test_bar_is_resent_when_a_flag_turns_on_but_not_after_restart():
+    handler = _handler()
+    handler._bar_rollout = True
+
+    class Store(dict):
+        def get(self, key, default=None):
+            return dict.get(self, key, default)
+
+    handler._bar_store = Store()
+    nav = handler._nav()
+    assert nav.needs_bar("4242")
+    nav.mark_bar_given("4242")
+    assert not nav.needs_bar("4242")
+    # A restart: new NavFlow, same store.
+    handler._navflow = None
+    assert not handler._nav().needs_bar("4242")
+    handler.set_flags({"feature_clubs": "on"})
+    assert handler._nav().needs_bar("4242")
+
+
+@pytest.mark.asyncio
+async def test_naming_by_button_installs_the_bar():
+    handler = _handler()
+    flow = handler._invite_flow()
+    flow._rehydrate = AsyncMock(return_value=({"display_name": "Riley", "step": "name"}, None))
+    flow._staff_api = MagicMock(return_value=MagicMock(
+        redeem_invite=MagicMock(return_value={
+            "household_name": "Oak Street", "household_id": 9, "token": "",
+        }),
+    ))
+    flow._hot_add = AsyncMock()
+    flow._ping_created = AsyncMock()
+    context = _context()
+    query = _query("inv:ok")
+    await flow._commit_name(query, context, "CODE", "Riley", "Oak Street")
+    bars = [c for c in context.bot.send_message.await_args_list
+            if isinstance(c.kwargs.get("reply_markup"), ReplyKeyboardMarkup)]
+    assert len(bars) == 1
+
+
+@pytest.mark.asyncio
+async def test_menu_action_while_naming_puts_the_bar_back():
+    handler = _handler()
+    handler._cmd_status = AsyncMock()
+    handler._invite_flow().state_for = MagicMock(return_value={"step": "name"})
+    handler._invite_flow().clear = MagicMock()
+    context = _context()
+    await handler._handle_callback(_tap(menu_cb("x", "status")), context)
+    bars = [c for c in context.bot.send_message.await_args_list
+            if isinstance(c.kwargs.get("reply_markup"), ReplyKeyboardMarkup)]
+    assert len(bars) == 1
+    handler._cmd_status.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_typed_menu_in_confirm_step_is_the_menu():
+    handler = _handler()
+    handler._invite_flow().state_for = MagicMock(return_value={"step": "confirm"})
+    handler._invite_flow().clear = MagicMock()
+    context = _context()
+    await handler._unknown_text(_update("menu"), context)
+    assert any(
+        "Menu" in (c.kwargs.get("text") or "") for c in context.bot.send_message.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_help_label_is_the_tracked_live_menu():
+    handler = _handler()
+    context = _context()
+    await handler._unknown_text(_update("help"), context)
+    assert handler._nav()._live_menu["4242"] == 55
+
+
+@pytest.mark.asyncio
+async def test_store_error_frees_the_confirm_for_a_retry():
+    from integrations.card_store import StoreError
+
+    handler = _handler(feature_clubs=True)
+    handler._dispatch_callback = AsyncMock(side_effect=[StoreError("x"), None])
+    handler._resend_photo = AsyncMock()
+    await handler._handle_callback(_tap(club_cb("ly", 3)), _context())
+    second = _tap(club_cb("ly", 3))
+    await handler._handle_callback(second, _context())
+    assert handler._dispatch_callback.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_dropping_a_place_ask_brings_the_bar_back():
+    handler = _handler()
+    router = MagicMock()
+    router._pending_place = MagicMock(return_value={"query": "near me"})
+    router.abandon = AsyncMock()
+    handler._router = router
+    assert await handler._abandon_pending_states("4242", None) is True
+
+
+@pytest.mark.asyncio
+async def test_comment_prompt_names_the_bottle():
+    api = MagicMock()
+    api.list_clubs.return_value = {"clubs": [{"id": 3, "is_last_used": True}]}
+    api.club_feed.return_value = {"events": [{
+        "id": 88, "kind": "opened", "actor_name": "Sam", "wine_name": "Chenin", "vintage": 2019,
+    }], "count": 1}
+    handler = _handler(api, feature_clubs=True, feature_club_comments=True)
+    say = _tap(club_cb("cm", 88))
+    await handler._club_flow().on_callback(say, _context())
+    prompt = say.callback_query.message.reply_text.call_args.args[0]
+    assert "Sam" in prompt and "Chenin" in prompt

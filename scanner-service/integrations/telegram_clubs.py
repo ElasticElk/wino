@@ -256,6 +256,8 @@ class ClubFlow:
     def __init__(self, handler):
         self.handler = handler
         self._states: dict[str, dict] = {}
+        # event_id -> feed event, from the last lookup (names the comment prompt).
+        self._events_seen: dict[int, dict] = {}
 
     def locale(self, update=None, chat_id=None) -> str:
         return locale_for(self.handler, update=update, chat_id=chat_id)
@@ -1647,7 +1649,11 @@ class ClubFlow:
             except Exception:
                 continue
             events = payload.get("events") or []
-            if any(e.get("id") == event_id for e in events):
+            match = next((e for e in events if e.get("id") == event_id), None)
+            if match is not None:
+                if len(self._events_seen) > 200:
+                    self._events_seen.clear()
+                self._events_seen[event_id] = match
                 return club["id"]
         return last["id"] if last else None
 
@@ -1688,9 +1694,14 @@ class ClubFlow:
         nav = getattr(self.handler, "_nav", None)
         if callable(nav):
             nav().pending.cancel(chat_id)  # one "next message" slot per chat
+        # Say what the note goes under: a home-card shortcut is not obviously
+        # tied to one bottle.
+        prompt = t(loc, "club.comment.prompt")
+        event = self._events_seen.pop(event_id, None)
+        if event and (event.get("kind") or "opened") == "opened":
+            prompt = f"\U0001F4AC {_wine_line(event, loc)}\n\n{prompt}"
         sent = await query.message.reply_text(
-            t(loc, "club.comment.prompt"),
-            reply_markup=_cancel_markup(),
+            prompt, parse_mode="HTML", reply_markup=_cancel_markup(),
         )
         self.remember(
             chat_id,

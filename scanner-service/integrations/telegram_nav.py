@@ -513,8 +513,9 @@ class NavFlow:
         self._clock = clock or time.monotonic
         # chat_id -> message_id of the menu that still has live buttons.
         self._live_menu: dict[str, int] = {}
-        # Chats that already have the bottom bar from this process.
-        self._bar_given: set[str] = set()
+        # chat_id -> signature of the bar it was last sent (memory fallback
+        # for the Redis store).
+        self._bar_given: dict[str, str] = {}
 
     # -- context ----------------------------------------------------------
 
@@ -664,9 +665,12 @@ class NavFlow:
             await self.send_menu(bot, chat_id)
             return
         if action == "help":
-            ctx = await self.context_for(chat_id)
-            text, markup = build_screen("help", ctx)
-            await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+            if bot is None:
+                ctx = await self.context_for(chat_id)
+                text, markup = build_screen("help", ctx)
+                await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+                return
+            await self.send_menu(bot, chat_id, "help")
             return
         if action == "search":
             await self.ask_search(update.message, chat_id)
@@ -790,22 +794,45 @@ class NavFlow:
 
     # -- first contact after a deploy ------------------------------------
 
+    def _bar_signature(self) -> str:
+        return "|".join(bar_labels(self.flags()))
+
+    def _bar_seen(self, chat_id) -> str:
+        store = getattr(self.handler, "_bar_store", None)
+        if store is not None:
+            try:
+                entry = store.get(str(chat_id))
+                if entry is not None:
+                    return str(entry.get("sig") or "")
+            except Exception:
+                pass
+        return self._bar_given.get(str(chat_id), "")
+
+    def needs_bar(self, chat_id) -> bool:
+        """Existing chats never saw /start since the bar shipped, and a flag
+        switched on later changes it. True when this chat's bar is missing or
+        out of date (per-chat signature, kept in Redis across restarts)."""
+        if not getattr(self.handler, "_bar_rollout", False):
+            return False
+        return self._bar_seen(chat_id) != self._bar_signature()
+
     async def ensure_bar(self, bot, chat_id) -> None:
-        """Existing users never saw /start since the bar shipped. Give each
-        provisioned chat the bar once per process, on its first message."""
-        if not getattr(self.handler, "_bar_rollout", False) or bot is None:
+        if bot is None or not self.needs_bar(chat_id):
             return
-        cid = str(chat_id)
-        if cid in self._bar_given:
-            return
-        self._bar_given.add(cid)
         try:
-            await self.send_bar_intro(bot, cid)
+            await self.send_bar_intro(bot, chat_id)
         except Exception as e:
-            logger.info("[nav] bar intro failed for %s: %s", cid, e)
+            logger.info("[nav] bar intro failed for %s: %s", chat_id, e)
 
     def mark_bar_given(self, chat_id) -> None:
-        self._bar_given.add(str(chat_id))
+        sig = self._bar_signature()
+        self._bar_given[str(chat_id)] = sig
+        store = getattr(self.handler, "_bar_store", None)
+        if store is not None:
+            try:
+                store[str(chat_id)] = {"sig": sig}
+            except Exception:
+                pass
 
     # -- callbacks --------------------------------------------------------
 
@@ -862,7 +889,12 @@ class NavFlow:
             await query.answer()
         except Exception:
             pass
-        await self.handler._abandon_pending_states(chat_id, getattr(context, "bot", None))
+        bot = getattr(context, "bot", None)
+        if await self.handler._abandon_pending_states(chat_id, bot) and bot is not None:
+            try:
+                await self.send_bar_intro(bot, chat_id)
+            except Exception as e:
+                logger.info("[nav] bar after naming failed: %s", e)
         if action == "search":
             from_menu = self.from_live_menu(query, chat_id)
             await self.ask_search(query.message, chat_id, query=query if from_menu else None)

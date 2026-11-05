@@ -389,6 +389,14 @@ class ChatRouter:
                 )
                 box["handled"] = True
                 return
+            # Moved on: the location keyboard goes, the bottom bar comes back.
+            nav = getattr(self.handler, "_nav", None)
+            bot = getattr(context, "bot", None)
+            if callable(nav) and bot is not None:
+                try:
+                    await nav().send_bar_intro(bot, chat_id)
+                except Exception:
+                    logger.info("[chat] bar after place failed chat=%s", chat_id)
         if _whole_word_in_names(text, wines):
             box["handled"] = False
             return

@@ -852,6 +852,8 @@ class InviteFlow:
         if action == "drop":
             self.clear(chat_id)
             await query.edit_message_text(KEEP_SEARCHING)
+            if self.handler._is_known(update):
+                await self._send_bar(context, chat_id)
             return True
         if action == "start":
             state, error = await self._rehydrate(chat_id, code, display)
@@ -1056,6 +1058,8 @@ class InviteFlow:
         self.clear(chat_id)
         await self._hot_add(chat_id, result)
         await query.edit_message_text(i2_text(result.get("household_name") or name))
+        # The naming keyboard (Use my suburb / Skip) is still up: swap in the bar.
+        await self._send_bar(context, chat_id)
         if result.get("first_cellar"):
             await self._ask_country(context, chat_id)
         await self._ping_created(context, result, display)
@@ -1092,6 +1096,12 @@ class InviteFlow:
         await self._hot_add(chat_id, result)
         household = result.get("household_name") or name
         bar = self._bar()
+        nav = getattr(self.handler, "_nav", None)
+        if callable(nav):
+            try:
+                nav().mark_bar_given(chat_id)
+            except Exception:
+                pass
         if photo:
             await update.message.reply_text(
                 f"{household} it is. Reading the label\u2026",

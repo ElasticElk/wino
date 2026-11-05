@@ -413,8 +413,7 @@ def _refresh_vote(vote: ClubDismantleVote) -> ClubDismantleVote:
 def resolve_dismantle(vote: ClubDismantleVote, status: str, rejector=None):
     if vote.status != ClubDismantleVote.STATUS_OPEN:
         return vote
-    club = vote.club
-    club_name = club.name
+    # Read what the fan-out needs before flipping (ballots and club stay).
     recipients = _ballot_recipients(vote)
     now = timezone.now()
     # Conditional update: only the first resolver (double tap, the last two
@@ -424,12 +423,14 @@ def resolve_dismantle(vote: ClubDismantleVote, status: str, rejector=None):
     ).update(status=status, resolved_at=now)
     if not won:
         # Lost the race. If the winner passed it, the club (and this vote,
-        # by cascade) is gone already.
+        # by cascade) is gone already — don't touch vote.club.
         try:
             vote.refresh_from_db()
         except ClubDismantleVote.DoesNotExist:
             vote.status = ClubDismantleVote.STATUS_PASSED
         return vote
+    club = vote.club
+    club_name = club.name
     vote.status = status
     vote.resolved_at = now
     from wine_cellar.apps.club.tasks import notify_dismantle_resolved
@@ -486,8 +487,12 @@ def cancel_dismantle(vote: ClubDismantleVote):
     vote = expire_if_needed(vote)
     if vote.status != ClubDismantleVote.STATUS_OPEN:
         return vote, "over"
-    resolve_dismantle(vote, ClubDismantleVote.STATUS_CANCELLED)
-    vote.refresh_from_db()
+    vote = resolve_dismantle(vote, ClubDismantleVote.STATUS_CANCELLED)
+    if vote.status not in (
+        ClubDismantleVote.STATUS_CANCELLED, ClubDismantleVote.STATUS_OPEN,
+    ):
+        # Lost to the last yes (passed, club gone) or a no: not cancelled.
+        return vote, "over"
     return vote, None
 
 

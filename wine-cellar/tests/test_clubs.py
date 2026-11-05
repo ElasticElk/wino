@@ -760,3 +760,16 @@ def test_resolve_dismantle_only_once(client, db, django_user_model):
     assert result.status == ClubDismantleVote.STATUS_REJECTED
     assert Club.objects.filter(id=club.id).exists()
     notify.assert_not_called()
+
+
+def test_cancel_after_vote_passed_is_over_not_error(client, db, django_user_model):
+    from wine_cellar.apps.club.services import cancel_dismantle
+
+    club, vote_id, _riley, sam, lee = _three_member_vote(client, django_user_model)
+    stale = ClubDismantleVote.objects.get(id=vote_id)
+    assert _ballot(client, sam, club, vote_id, "yes").status_code == 200
+    passed = _ballot(client, lee, club, vote_id, "yes")
+    assert passed.json()["status"] == "passed"
+    vote, err = cancel_dismantle(stale)
+    assert err == "over"
+    assert vote.status == ClubDismantleVote.STATUS_PASSED

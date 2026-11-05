@@ -3385,13 +3385,21 @@ class TelegramBotHandler:
             club.clear(chat_id)
         router = getattr(self, "_router", None)
         if router is not None:
+            # A pending "near me" shows its own location keyboard instead of
+            # the bar; dropping it means the bar should come back too.
+            try:
+                naming = naming or bool(router._pending_place(chat_id))
+            except Exception:
+                pass
             await router.abandon(chat_id)
         return naming
 
     def _naming_in_progress(self, chat_id: str) -> bool:
         """A cellar or club name is being typed: only exact bar taps are labels."""
+        # Only the name step: in "confirm" the name is already typed and the
+        # buttons decide, so "menu" there is the menu.
         state = self._invite_flow().state_for(chat_id)
-        if state and state.get("step") in ("name", "confirm"):
+        if state and state.get("step") == "name":
             return True
         club_state = self._club_flow().state_for(chat_id)
         return bool(club_state and club_state.get("step") in (
@@ -3626,7 +3634,9 @@ class TelegramBotHandler:
             # Bottom-bar labels beat everything typed: never a search, a club
             # comment, a cellar name or the answer to a pending prompt.
             from integrations.chat_router import match_label
-            await self._nav().ensure_bar(getattr(context, "bot", None), chat_id)
+            if self._nav().needs_bar(chat_id):
+                await pacer.wait()  # the intro is the first reply; keep the floor
+                await self._nav().ensure_bar(getattr(context, "bot", None), chat_id)
             label = match_label(
                 text, getattr(self, "flags", None) or {},
                 exact_only=self._naming_in_progress(chat_id),
@@ -4347,6 +4357,7 @@ class TelegramBotHandler:
                 chat_id=chat_id, text=text, parse_mode="HTML",
                 reply_markup=self.bottom_bar(),
             )
+            self._nav().mark_bar_given(chat_id)
             return True
         except Exception as e:
             logger.info(f"[adduser] could not welcome {chat_id}: {e}")
@@ -5334,14 +5345,19 @@ class TelegramBotHandler:
                 str(update.effective_chat.id), getattr(context, "bot", None),
             )
         try:
-            result = await self._handle_callback_once(update, context)
+            ok = await self._handle_callback_once(update, context)
         except Exception:
-            if guard_key:
-                self._nav().guard.release(guard_key)
+            ok = False
             raise
-        if guard_key:
-            self._nav().guard.done(guard_key)
-        return result
+        finally:
+            if guard_key:
+                # Done: a short cooldown against a queued repeat. Failed
+                # (raised, or the store hiccupped): free for a retry now.
+                if ok is False:
+                    self._nav().guard.release(guard_key)
+                else:
+                    self._nav().guard.done(guard_key)
+        return ok
 
     async def _claim_confirm(self, query):
         """Double-tap safety for yes/no buttons. None: not a confirm button.
@@ -5366,6 +5382,7 @@ class TelegramBotHandler:
         except StoreError:
             logger.exception("[tap] store")
             await self._resend_photo(query)
+            return False
         except BadRequest as e:
             if not _not_modified(e):
                 raise
