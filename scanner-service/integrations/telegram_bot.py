@@ -3355,14 +3355,13 @@ class TelegramBotHandler:
         command = parts[0].split("@")[0] if parts else ""
         # /start and /help carry the bar themselves; don't send it twice.
         brings_bar = command in ("/start", "/help")
-        place_pending = self._place_pending(chat_id)
         if await self._abandon_pending_states(chat_id, bot):
             if not brings_bar:
                 try:
                     await self._nav().send_bar_intro(bot, chat_id)
                 except Exception as e:
                     logger.info("[nav] bar after naming failed: %s", e)
-        elif not brings_bar and not place_pending:
+        elif not brings_bar:
             # Missing or out-of-date bar (a flag changed, an expired
             # location ask): commands repair it too, not only typed text.
             await self._nav().ensure_bar(bot, chat_id)
@@ -3664,8 +3663,11 @@ class TelegramBotHandler:
             flag_off_tap = (
                 label in LABEL_FLAGS and not flags_now.get(LABEL_FLAGS[label])
             )
+            # A label repairs the bar itself (on_label), after any naming
+            # keyboard it drops, so it never sends two.
             if (
-                not flag_off_tap and not self._place_pending(chat_id)
+                label is None and not flag_off_tap
+                and not self._place_pending(chat_id)
                 and self._nav().needs_bar(chat_id)
             ):
                 await pacer.wait()  # the intro is the first reply; keep the floor
@@ -3677,6 +3679,20 @@ class TelegramBotHandler:
                 await pacer.wait()
                 await self._nav().on_label(update, context, label)
                 return
+
+            # A "near me" ask only survives an area name; anything else (even
+            # a message the router never sees) drops it and the bar returns.
+            if self._place_pending(chat_id):
+                from integrations.chat_router import _looks_like_area
+                # Under 3 characters never reaches the router's area check.
+                if len(text) < 3 or not _looks_like_area(text):
+                    router = getattr(self, "_router", None)
+                    router._drop_place(chat_id)
+                    await pacer.wait()
+                    try:
+                        await self._nav().send_bar_intro(getattr(context, "bot", None), chat_id)
+                    except Exception as e:
+                        logger.info("[nav] bar after place failed: %s", e)
 
             # "Type a wine name…" — only this one message is the query.
             if await self._nav().on_pending_text(update, context, text):

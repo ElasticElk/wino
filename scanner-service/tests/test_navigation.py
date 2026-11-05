@@ -1071,3 +1071,52 @@ async def test_commands_repair_a_missing_bar():
     assert len(_bar_sends(context)) == 1
     await handler._abandon_invite_if_command(_update("/status"), context)
     assert len(_bar_sends(context)) == 1
+
+
+# --------------------------------------------------------------------------
+# Round-5 regressions
+
+@pytest.mark.asyncio
+async def test_start_and_help_after_naming_deliver_exactly_one_bar():
+    for command in ("/start", "/help"):
+        handler = _handler()
+        handler._invite_flow().state_for = MagicMock(return_value={"step": "name"})
+        handler._invite_flow().clear = MagicMock()
+        handler._invite_flow().start = AsyncMock(return_value=False)
+        handler._country_for = MagicMock(return_value="GB")
+        context = _context()
+        update = _update(command)
+        await handler._abandon_invite_if_command(update, context)
+        if command == "/start":
+            await handler._cmd_start(update, context)
+        else:
+            await handler._cmd_help(update, context)
+        replies = [c for c in update.message.reply_text.await_args_list
+                   if isinstance(c.kwargs.get("reply_markup"), ReplyKeyboardMarkup)]
+        assert len(_bar_sends(context)) + len(replies) == 1, command
+
+
+@pytest.mark.asyncio
+async def test_label_while_naming_with_outdated_bar_sends_one_bar():
+    handler = _handler()
+    handler._bar_rollout = True
+    handler._invite_flow().state_for = MagicMock(return_value={"step": "confirm"})
+    handler._invite_flow().clear = MagicMock()
+    context = _context()
+    await handler._unknown_text(_update("menu"), context)
+    assert len(_bar_sends(context)) == 1
+
+
+@pytest.mark.asyncio
+async def test_short_reply_during_place_ask_drops_it_and_restores_the_bar():
+    handler = _handler()
+    router = MagicMock()
+    router._pending_place = MagicMock(return_value={"query": "near me"})
+    router._drop_place = MagicMock()
+    router.abandon = AsyncMock()
+    router.handle_text = AsyncMock(return_value=True)
+    handler._router = router
+    context = _context()
+    await handler._unknown_text(_update("ok"), context)
+    router._drop_place.assert_called_once_with("4242")
+    assert len(_bar_sends(context)) == 1

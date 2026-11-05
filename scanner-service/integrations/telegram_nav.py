@@ -69,6 +69,7 @@ BAR_INTRO = (
     "The buttons below are always here \u2014 <b>\u2630 Menu</b> has the rest."
 )
 STAFF_ONLY = "That's for staff only."
+LABEL_FLAG = {"list": "feature_lists", "clubs": "feature_clubs"}
 NOT_PROVISIONED = "You're not in a cellar any more. Ask for a new invite."
 
 
@@ -660,6 +661,10 @@ class NavFlow:
                 await self.send_bar_intro(bot, chat_id)
             except Exception as e:
                 logger.info("[nav] bar after naming failed: %s", e)
+        elif action not in ("list", "clubs") or self.flags().get(LABEL_FLAG.get(action, "")):
+            # Missing or out-of-date bar. (A flag-off List/Clubs tap gets
+            # "not on yet" with a fresh bar below instead.)
+            await self.ensure_bar(bot, chat_id)
         if action == "menu":
             if bot is None:
                 ctx = await self.context_for(chat_id)
