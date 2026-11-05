@@ -3352,11 +3352,29 @@ class TelegramBotHandler:
             return
         chat_id = str(update.effective_chat.id)
         bot = getattr(context, "bot", None)
+        command = parts[0].split("@")[0] if parts else ""
+        # /start and /help carry the bar themselves; don't send it twice.
+        brings_bar = command in ("/start", "/help")
+        place_pending = self._place_pending(chat_id)
         if await self._abandon_pending_states(chat_id, bot):
-            try:
-                await self._nav().send_bar_intro(bot, chat_id)
-            except Exception as e:
-                logger.info("[nav] bar after naming failed: %s", e)
+            if not brings_bar:
+                try:
+                    await self._nav().send_bar_intro(bot, chat_id)
+                except Exception as e:
+                    logger.info("[nav] bar after naming failed: %s", e)
+        elif not brings_bar and not place_pending:
+            # Missing or out-of-date bar (a flag changed, an expired
+            # location ask): commands repair it too, not only typed text.
+            await self._nav().ensure_bar(bot, chat_id)
+
+    def _place_pending(self, chat_id: str) -> bool:
+        router = getattr(self, "_router", None)
+        if router is None:
+            return False
+        try:
+            return bool(router._pending_place(chat_id))
+        except Exception:
+            return False
 
     async def _abandon_pending_states(self, chat_id: str, bot=None) -> bool:
         """Drop every "your next message is ..." state for a chat.
@@ -3634,24 +3652,24 @@ class TelegramBotHandler:
             # Bottom-bar labels beat everything typed: never a search, a club
             # comment, a cellar name or the answer to a pending prompt.
             from integrations.chat_router import match_label
-            from integrations.chat_router import BAR_LABELS
-            stale_bar_tap = " ".join(text.split()) in BAR_LABELS
-            # A pending "near me" ask restores the bar itself (with the place
-            # search, or when the person moves on), so don't send it twice.
-            place_pending = False
-            router = getattr(self, "_router", None)
-            if router is not None:
-                try:
-                    place_pending = bool(router._pending_place(chat_id))
-                except Exception:
-                    place_pending = False
-            if not stale_bar_tap and not place_pending and self._nav().needs_bar(chat_id):
+            flags_now = getattr(self, "flags", None) or {}
+            label = match_label(
+                text, flags_now, exact_only=self._naming_in_progress(chat_id),
+            )
+            # A stale List/Clubs tap (flag now off) answers with a fresh bar
+            # itself. A pending "near me" ask restores the bar itself (with the
+            # place search, or when the person moves on). Otherwise repair a
+            # missing or out-of-date bar first.
+            from integrations.chat_router import LABEL_FLAGS
+            flag_off_tap = (
+                label in LABEL_FLAGS and not flags_now.get(LABEL_FLAGS[label])
+            )
+            if (
+                not flag_off_tap and not self._place_pending(chat_id)
+                and self._nav().needs_bar(chat_id)
+            ):
                 await pacer.wait()  # the intro is the first reply; keep the floor
                 await self._nav().ensure_bar(getattr(context, "bot", None), chat_id)
-            label = match_label(
-                text, getattr(self, "flags", None) or {},
-                exact_only=self._naming_in_progress(chat_id),
-            )
             if label is not None:
                 handled_by = "label"
                 self._text_meta["intent"] = f"label:{label}"

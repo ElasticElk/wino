@@ -1023,3 +1023,51 @@ async def test_stale_list_tap_sends_one_bar_not_two():
     assert intros == []
     assert isinstance(update.message.reply_text.call_args.kwargs["reply_markup"], ReplyKeyboardMarkup)
     assert not handler._nav().needs_bar("4242")
+
+
+# --------------------------------------------------------------------------
+# Round-4 regressions
+
+def _bar_sends(context):
+    return [c for c in context.bot.send_message.await_args_list
+            if isinstance(c.kwargs.get("reply_markup"), ReplyKeyboardMarkup)]
+
+
+@pytest.mark.asyncio
+async def test_bar_tap_after_flag_turns_on_gets_the_new_bar_once():
+    handler = _handler()
+    handler._bar_rollout = True
+    handler._nav().mark_bar_given("4242")          # old bar, lists off
+    handler.set_flags({"feature_lists": "on"})
+    handler._cmd_fridge = AsyncMock()
+    context = _context()
+    await handler._unknown_text(_update(BAR_CELLAR), context)
+    sends = _bar_sends(context)
+    assert len(sends) == 1
+    labels = [b.text for row in sends[0].kwargs["reply_markup"].keyboard for b in row]
+    assert BAR_LIST in labels
+    handler._cmd_fridge.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_start_and_help_during_naming_send_one_bar():
+    for command in ("/start", "/help"):
+        handler = _handler()
+        handler._invite_flow().state_for = MagicMock(return_value={"step": "name"})
+        handler._invite_flow().clear = MagicMock()
+        context = _context()
+        await handler._abandon_invite_if_command(_update(command), context)
+        assert _bar_sends(context) == [], command
+
+
+@pytest.mark.asyncio
+async def test_commands_repair_a_missing_bar():
+    handler = _handler()
+    handler._bar_rollout = True
+    handler._nav().mark_bar_given("4242")
+    handler._nav().forget_bar("4242")               # e.g. expired location ask
+    context = _context()
+    await handler._abandon_invite_if_command(_update("/fridge"), context)
+    assert len(_bar_sends(context)) == 1
+    await handler._abandon_invite_if_command(_update("/status"), context)
+    assert len(_bar_sends(context)) == 1
