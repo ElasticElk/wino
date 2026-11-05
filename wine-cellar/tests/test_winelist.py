@@ -436,7 +436,9 @@ def _list_item(auth):
     return list_id, item["id"]
 
 
-def test_to_cellar_racing_second_tap_adds_no_stock(client, db, django_user_model, monkeypatch):
+def test_to_cellar_racing_second_tap_adds_no_stock(
+    client, db, django_user_model, monkeypatch,
+):
     """Two taps both pass the moved_at read; only the conditional claim decides."""
     from django.utils import timezone
 

@@ -190,6 +190,7 @@ def test_invite_codes_are_masked():
     assert "Ab3x" not in mask_invite_code("Ab3xY9k2")
 
 
+@pytest.mark.django_db
 def test_lock_invite_sql_does_not_join():
     """The query that 500'd every redeem on Postgres: FOR UPDATE + LEFT JOIN."""
     from wine_cellar.apps.scanner.views import lock_invite_qs

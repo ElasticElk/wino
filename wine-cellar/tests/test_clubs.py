@@ -443,6 +443,7 @@ def test_join_blocked_while_dismantle_open(client, db, django_user_model):
     assert minted.json()["error"] == "dismantle_in_progress"
 
 
+@pytest.mark.django_db
 def test_lock_club_invite_qs_has_no_join():
     from wine_cellar.apps.api.club_views import lock_club_invite_qs
 
