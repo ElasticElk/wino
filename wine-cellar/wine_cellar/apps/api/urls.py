@@ -128,7 +128,9 @@ urlpatterns = [
         global_views.ClubDiscoverView.as_view(),
         name="api-clubs-discover",
     ),
-    path("clubs/<int:pk>/", club_views.ClubDetailView.as_view(), name="api-club-detail"),
+    path(
+        "clubs/<int:pk>/", club_views.ClubDetailView.as_view(), name="api-club-detail"
+    ),
     path(
         "clubs/<int:pk>/join/",
         global_views.ClubJoinView.as_view(),

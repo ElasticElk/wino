@@ -4,6 +4,7 @@ StockAddView and list to-cellar must create StorageItem the same way. Calling
 HTTP-to-self from to-cellar would nest auth and drop X-Household.
 """
 
+import logging
 from datetime import timedelta
 
 from django.utils import timezone
@@ -11,8 +12,6 @@ from django.utils import timezone
 from wine_cellar.apps.storage.models import Storage, StorageItem
 from wine_cellar.apps.wine.achievements import award_for_add
 from wine_cellar.apps.wine.taste import rebuild_snapshot
-
-import logging
 
 logger = logging.getLogger(__name__)
 

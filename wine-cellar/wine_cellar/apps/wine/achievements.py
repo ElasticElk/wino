@@ -163,7 +163,7 @@ def award_for_add(wine: Wine, user, storage=None, drank=False) -> list[dict]:
             take(
                 "producer", producer[:120],
                 "🏡", f"First {producer}",
-                f"A new producer lands in the cellar.",
+                "A new producer lands in the cellar.",
             )
         letter = producer[0].upper()
         if letter.isalpha():
@@ -562,7 +562,9 @@ def progress(household) -> dict:
                 "next": nxt,
             })
     decades = {}
-    for vintage in wines.filter(vintage__isnull=False).values_list("vintage", flat=True):
+    for vintage in wines.filter(vintage__isnull=False).values_list(
+        "vintage", flat=True
+    ):
         decade = (vintage // 10) * 10
         decades[decade] = decades.get(decade, 0) + 1
     for decade, n in decades.items():

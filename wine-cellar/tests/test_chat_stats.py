@@ -106,9 +106,17 @@ def test_thumbs_down_on_the_pick_ranks_worst(cellar):
     bad = _ask(household, user, {"sentence": "bad", "shown": picked.id})
     _opened(storage, picked, user, bad.created + timedelta(hours=1), vote="down")
     # Days earlier, so the bottle opened after "bad" is outside its window.
-    _ask(household, user, {
-        "sentence": "fussy", "shown": picked.id, "rejected": [1, 2], "outcome": "rejected",
-    }, created=timezone.now() - timedelta(days=5))
+    _ask(
+        household,
+        user,
+        {
+            "sentence": "fussy",
+            "shown": picked.id,
+            "rejected": [1, 2],
+            "outcome": "rejected",
+        },
+        created=timezone.now() - timedelta(days=5),
+    )
 
     worst = chat_stats(30)["worst"]
 
@@ -118,8 +126,15 @@ def test_thumbs_down_on_the_pick_ranks_worst(cellar):
 
 def test_old_asks_and_other_kinds_are_left_out(cellar):
     user, household, _storage, picked, _other = cellar
-    _ask(household, user, {"shown": picked.id}, created=timezone.now() - timedelta(days=40))
-    TasteIntent.objects.create(household=household, user=user, kind=TasteIntent.LOOK, payload={})
+    _ask(
+        household,
+        user,
+        {"shown": picked.id},
+        created=timezone.now() - timedelta(days=40),
+    )
+    TasteIntent.objects.create(
+        household=household, user=user, kind=TasteIntent.LOOK, payload={}
+    )
 
     assert chat_stats(30)["asks"] == 0
 
@@ -159,7 +174,10 @@ def test_endpoint_rejects_bad_days(client, cellar):
     token, _ = Token.objects.get_or_create(user=user)
     client.defaults["HTTP_AUTHORIZATION"] = f"Token {token.key}"
 
-    assert client.get(reverse("api-scanner-chat-stats"), {"days": "lots"}).status_code == 400
+    assert (
+        client.get(reverse("api-scanner-chat-stats"), {"days": "lots"}).status_code
+        == 400
+    )
 
 
 def test_model_and_latency_can_be_patched_onto_an_ask(client, cellar):

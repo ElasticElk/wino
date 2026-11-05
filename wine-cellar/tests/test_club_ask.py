@@ -337,7 +337,7 @@ def test_tasteoff_flag_and_winner(client, db, django_user_model):
     assert won["tasteoff"]["winner"]["labels"] == ["Bottle A"]
     friday = _ask(client, riley, kind="tasteoff", when="friday").json()
     assert friday["tasteoff"]["title"] == "Friday reds"
-    upcoming = TasteOff.objects.create(
+    TasteOff.objects.create(
         club=club, host=lee, title="Next flight", status=TasteOff.STATUS_SETUP,
     )
     nxt = _ask(client, riley, kind="tasteoff", when="next").json()

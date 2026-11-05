@@ -283,7 +283,12 @@ def test_redeem_already_member_idempotent(client, db, django_user_model):
     ).json()["code"]
     first = _auth(client, riley).post(
         reverse("api-scanner-club-invites-redeem"),
-        data={"code": code, "chat_id": "300", "display_name": "Lee", "household_id": riverside.id},
+        data={
+            "code": code,
+            "chat_id": "300",
+            "display_name": "Lee",
+            "household_id": riverside.id,
+        },
         content_type="application/json",
     )
     assert first.status_code == 200
@@ -480,7 +485,7 @@ def test_stock_remove_creates_event_move_does_not(
     )
     storage = _fridge(hillside)
     item = StorageItem.objects.create(storage=storage, wine=wine, user=riley)
-    other = Storage.objects.create(
+    Storage.objects.create(
         name="Rack", household=hillside, user=riley, location="R",
     )
     club = Club.objects.create(name="Thursday reds", created_by=riley)
@@ -541,7 +546,12 @@ def test_share_notice_copy_has_no_names(db, django_user_model):
 @patch("wine_cellar.apps.club.tasks._bot_token", return_value="token")
 @patch("wine_cellar.apps.club.tasks._send")
 def test_founding_notifies_other_household_members(
-    mock_send, _mock_token, client, db, django_user_model, django_capture_on_commit_callbacks,
+    mock_send,
+    _mock_token,
+    client,
+    db,
+    django_user_model,
+    django_capture_on_commit_callbacks,
 ):
     mock_send.return_value = 11
     _people(django_user_model)
@@ -622,7 +632,9 @@ def test_expire_dismantle_noop_when_flag_off(db, django_user_model):
 
 @patch("wine_cellar.apps.club.tasks._bot_token", return_value="token")
 @patch("wine_cellar.apps.club.tasks._send")
-def test_share_notice_sent_once_not_to_joiner(mock_send, _mock_token, db, django_user_model):
+def test_share_notice_sent_once_not_to_joiner(
+    mock_send, _mock_token, db, django_user_model
+):
     mock_send.return_value = 11
     _enable_clubs()
     hillside, _riverside, riley, sam, lee = _people(django_user_model)
@@ -630,7 +642,10 @@ def test_share_notice_sent_once_not_to_joiner(mock_send, _mock_token, db, django
         name="Thursday reds", created_by=lee, cellar_visibility="full",
     )
     ClubMembership.objects.create(
-        club=club, user=lee, role="owner", household=Household.objects.get(name="Riverside"),
+        club=club,
+        user=lee,
+        role="owner",
+        household=Household.objects.get(name="Riverside"),
     )
     ClubMembership.objects.create(
         club=club, user=riley, role="member", household=hillside,

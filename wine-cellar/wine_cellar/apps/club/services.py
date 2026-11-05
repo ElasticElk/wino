@@ -257,7 +257,9 @@ def apply_policy(club: Club, cellar_visibility=None, badges_visible=None):
 
 
 def leave_club(membership: ClubMembership):
-    """Return ('left', None) | ('deleted', None) | ('handover', None) | ('passed', club_id)."""
+    """Return one of ('left', None), ('deleted', None), ('handover', None)
+    or ('passed', club_id)."""
+
     club = membership.club
     household = membership.household
     others = club.memberships.exclude(pk=membership.pk).count()
@@ -436,13 +438,17 @@ def resolve_dismantle(vote: ClubDismantleVote, status: str, rejector=None):
     from wine_cellar.apps.club.tasks import notify_dismantle_resolved
 
     transaction.on_commit(
-        lambda vid=vote.id, st=status, nm=club_name, rid=(rejector.id if rejector else None), rec=recipients: (
-            notify_dismantle_resolved.delay(vid, st, nm, rid, rec)
-        )
+        lambda vid=vote.id, st=status, nm=club_name, rid=(
+            rejector.id if rejector else None
+        ), rec=recipients: (notify_dismantle_resolved.delay(vid, st, nm, rid, rec))
     )
     if status == ClubDismantleVote.STATUS_PASSED:
         households = list(
-            {m.household for m in club.memberships.select_related("household") if m.household}
+            {
+                m.household
+                for m in club.memberships.select_related("household")
+                if m.household
+            }
         )
         club.delete()
         for household in households:

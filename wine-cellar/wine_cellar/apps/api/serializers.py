@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from wine_cellar.apps.storage.models import Storage, StorageItem
+from wine_cellar.apps.storage.models import StorageItem
 from wine_cellar.apps.wine.models import (
     Appellation,
     Attribute,
@@ -16,7 +16,9 @@ from wine_cellar.apps.wine.models import (
 class WineSerializer(serializers.ModelSerializer):
     stock_count = serializers.SerializerMethodField()
     grape_variety = serializers.CharField(source="get_grapes", read_only=True)
-    region_name = serializers.CharField(source="region.name", read_only=True, default="")
+    region_name = serializers.CharField(
+        source="region.name", read_only=True, default=""
+    )
     appellation_name = serializers.CharField(
         source="appellation.name", read_only=True, default=""
     )
@@ -91,7 +93,9 @@ class WineCreateSerializer(serializers.Serializer):
     country = serializers.CharField(max_length=3, required=False, default="CH")
     abv = serializers.FloatField(required=False, allow_null=True)
     wine_type = serializers.CharField(max_length=2, required=False, default="RE")
-    category = serializers.CharField(max_length=2, required=False, allow_null=True, default=None)
+    category = serializers.CharField(
+        max_length=2, required=False, allow_null=True, default=None
+    )
     barcode = serializers.CharField(max_length=100, required=False, default="")
     price = serializers.DecimalField(
         max_digits=6, decimal_places=2, required=False, allow_null=True
@@ -100,7 +104,9 @@ class WineCreateSerializer(serializers.Serializer):
     rating = serializers.IntegerField(
         required=False, allow_null=True, min_value=0, max_value=10
     )
-    vineyard = serializers.CharField(max_length=100, required=False, default="", allow_blank=True)
+    vineyard = serializers.CharField(
+        max_length=100, required=False, default="", allow_blank=True
+    )
     size = serializers.FloatField(required=False, allow_null=True)
     drink_by = serializers.DateField(required=False, allow_null=True)
     food_pairings = serializers.ListField(
@@ -116,25 +122,39 @@ class WineCreateSerializer(serializers.Serializer):
     critic_score = serializers.IntegerField(
         required=False, allow_null=True, min_value=0, max_value=100,
     )
-    critic_score_confidence = serializers.CharField(required=False, allow_null=True, allow_blank=True)
-    critic_score_reasoning = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    critic_score_confidence = serializers.CharField(
+        required=False, allow_null=True, allow_blank=True
+    )
+    critic_score_reasoning = serializers.CharField(
+        required=False, allow_null=True, allow_blank=True
+    )
     vivino_rating = serializers.DecimalField(
         max_digits=3, decimal_places=1, required=False, allow_null=True,
         min_value=0, max_value=5,
     )
-    vivino_rating_confidence = serializers.CharField(required=False, allow_null=True, allow_blank=True)
-    vivino_rating_reasoning = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    vivino_rating_confidence = serializers.CharField(
+        required=False, allow_null=True, allow_blank=True
+    )
+    vivino_rating_reasoning = serializers.CharField(
+        required=False, allow_null=True, allow_blank=True
+    )
     market_price = serializers.DecimalField(
         max_digits=10, decimal_places=2, required=False, allow_null=True,
     )
     market_price_currency = serializers.CharField(
         max_length=3, required=False, allow_null=True, allow_blank=True,
     )
-    market_price_confidence = serializers.CharField(required=False, allow_null=True, allow_blank=True)
-    market_price_reasoning = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    market_price_confidence = serializers.CharField(
+        required=False, allow_null=True, allow_blank=True
+    )
+    market_price_reasoning = serializers.CharField(
+        required=False, allow_null=True, allow_blank=True
+    )
     # Aggregate confidence (set by the scanner merger) — kept for compatibility
     # but per-field _confidence values are what gate persistence in create().
-    reference_confidence = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    reference_confidence = serializers.CharField(
+        required=False, allow_null=True, allow_blank=True
+    )
 
     def create(self, validated_data):
         user = self.context["request"].user
@@ -187,7 +207,9 @@ class WineCreateSerializer(serializers.Serializer):
             ref_pulls["critic_score_reasoning"],
         ):
             reference_kwargs["critic_score"] = ref_pulls["critic_score"]
-            persisted_confidences.append((ref_pulls["critic_score_confidence"] or "").lower())
+            persisted_confidences.append(
+                (ref_pulls["critic_score_confidence"] or "").lower()
+            )
 
         if validate_reference_field(
             ref_pulls["vivino_rating"],
@@ -195,7 +217,9 @@ class WineCreateSerializer(serializers.Serializer):
             ref_pulls["vivino_rating_reasoning"],
         ):
             reference_kwargs["vivino_rating"] = ref_pulls["vivino_rating"]
-            persisted_confidences.append((ref_pulls["vivino_rating_confidence"] or "").lower())
+            persisted_confidences.append(
+                (ref_pulls["vivino_rating_confidence"] or "").lower()
+            )
 
         if validate_reference_field(
             ref_pulls["market_price"],
@@ -204,8 +228,12 @@ class WineCreateSerializer(serializers.Serializer):
         ):
             reference_kwargs["market_price"] = ref_pulls["market_price"]
             if ref_pulls["market_price_currency"]:
-                reference_kwargs["market_price_currency"] = ref_pulls["market_price_currency"]
-            persisted_confidences.append((ref_pulls["market_price_confidence"] or "").lower())
+                reference_kwargs["market_price_currency"] = ref_pulls[
+                    "market_price_currency"
+                ]
+            persisted_confidences.append(
+                (ref_pulls["market_price_confidence"] or "").lower()
+            )
 
         if reference_kwargs:
             from django.utils import timezone
@@ -251,8 +279,12 @@ class WineCreateSerializer(serializers.Serializer):
 
         if vineyard_name:
             vy, _ = Vineyard.objects.get_or_create(
-                name=vineyard_name, user=user,
-                defaults={"region": region_name, "country": validated_data.get("country", "")},
+                name=vineyard_name,
+                user=user,
+                defaults={
+                    "region": region_name,
+                    "country": validated_data.get("country", ""),
+                },
             )
             wine.vineyard.add(vy)
 

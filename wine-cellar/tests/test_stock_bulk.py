@@ -18,8 +18,12 @@ def cellar(db):
     gat = StorageFactory(user=user, household=household, name="Gat", rows=8)
     small = StorageFactory(user=user, household=household, name="Small", rows=4)
     rack = StorageFactory(user=user, household=household, name="Rack", rows=0)
-    pinot = WineFactory(user=user, household=household, name="Kanonkop Pinotage", vintage=2019)
-    syrah = WineFactory(user=user, household=household, name="Mullineux Syrah", vintage=2020)
+    pinot = WineFactory(
+        user=user, household=household, name="Kanonkop Pinotage", vintage=2019
+    )
+    syrah = WineFactory(
+        user=user, household=household, name="Mullineux Syrah", vintage=2020
+    )
     token, _ = Token.objects.get_or_create(user=user)
     return user, household, gat, small, rack, pinot, syrah, token
 
@@ -139,7 +143,12 @@ def test_bulk_duplicate_item_is_409(client, cellar):
         reverse("api-stock-bulk"),
         data={
             "ops": [
-                {"op": "remove", "item_id": item.id, "expected_storage": "Gat", "expected_row": 3},
+                {
+                    "op": "remove",
+                    "item_id": item.id,
+                    "expected_storage": "Gat",
+                    "expected_row": 3,
+                },
                 {
                     "op": "move",
                     "item_id": item.id,

@@ -255,7 +255,12 @@ class WineListItemCreateView(ListsEnabledMixin, ScannerAPIView):
             )
         payload = sanitize_payload(data.get("payload") if "payload" in data else data)
         producer = str(data.get("producer") or "").strip()[:100]
-        grape = str(data.get("grape") or payload.get("grape_variety") or payload.get("grape") or "").strip()[:100]
+        grape = str(
+            data.get("grape")
+            or payload.get("grape_variety")
+            or payload.get("grape")
+            or ""
+        ).strip()[:100]
         barcode = str(data.get("barcode") or payload.get("barcode") or "").strip()[:100]
         wine_type = str(data.get("wine_type") or payload.get("wine_type") or "")[:2]
         country = str(data.get("country") or payload.get("country") or "")[:3]

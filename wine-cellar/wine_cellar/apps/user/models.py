@@ -19,7 +19,8 @@ class UserSettings(models.Model):
         max_length=3, choices=settings.CURRENCIES, default="EUR"
     )
     # Used to ground Grok price estimates ("typical retail price in {country}").
-    # Distinct from currency — a UK expat in HK might want HKD display but UK reference prices.
+    # Distinct from currency — a UK expat in HK might want HKD display but UK
+    # reference prices.
     country = models.CharField(
         max_length=2,
         blank=True,

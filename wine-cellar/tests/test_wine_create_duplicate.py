@@ -6,7 +6,6 @@ from rest_framework.authtoken.models import Token
 from wine_cellar.apps.scanner.models import Household, HouseholdMembership
 from wine_cellar.apps.wine.models import Wine
 
-
 PAYLOAD = {
     "name": "Old Vine Chenin",
     "producer": "Bosman",

@@ -441,7 +441,11 @@ def refresh_dismantle_status(vote_id):
     if not token:
         return
     proposer_ballot = vote.ballots.filter(user_id=vote.proposed_by_id).first()
-    if proposer_ballot is None or not proposer_ballot.chat_id or not proposer_ballot.message_id:
+    if (
+        proposer_ballot is None
+        or not proposer_ballot.chat_id
+        or not proposer_ballot.message_id
+    ):
         return
     loc = locale_for_user(vote.proposed_by)
     text = _vote_status_text(vote, loc)
@@ -462,7 +466,9 @@ def refresh_dismantle_status(vote_id):
 
 
 @shared_task(name="notify_dismantle_resolved")
-def notify_dismantle_resolved(vote_id, status, club_name, rejector_id=None, recipients=None):
+def notify_dismantle_resolved(
+    vote_id, status, club_name, rejector_id=None, recipients=None
+):
     if not flag_on("feature_clubs"):
         return
     if recipients:

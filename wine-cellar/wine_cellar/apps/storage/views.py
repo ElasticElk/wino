@@ -170,10 +170,11 @@ class StorageItemAddView(HouseholdScopedMixin, FormView):
         for badge in award_for_add(
             wine, self.request.user, storage=form.cleaned_data.get("storage"),
         ):
-            messages.success(
-                self.request,
-                f"{badge.get('emoji', '🎉')} {badge['title']} — {badge.get('detail', '')}".strip(" —"),
+            text = (
+                f"{badge.get('emoji', '🎉')} {badge['title']} — "
+                f"{badge.get('detail', '')}"
             )
+            messages.success(self.request, text.strip(" —"))
         self.success_url = reverse_lazy("wine-detail", kwargs={"pk": wine.pk})
         return super().form_valid(form)
 

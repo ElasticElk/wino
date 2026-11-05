@@ -284,11 +284,14 @@ class Wine(UserContentModel):
 
     @property
     def category_label(self) -> str:
-        """Word label for category_rating (Outstanding / Excellent / Very Good / Good / Average).
+        """Word label for category_rating.
+
+        Outstanding / Excellent / Very Good / Good / Average.
 
         Bands recalibrated for the 70/30 critic+Vivino composite, which tops out
         ~5 points below pure critic scores because Vivino rarely exceeds 4.3-4.5.
         """
+
         score = self.category_rating
         if score is None:
             return ""

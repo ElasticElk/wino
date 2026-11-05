@@ -3,7 +3,11 @@
 from django.urls import reverse
 from rest_framework.authtoken.models import Token
 
-from wine_cellar.apps.scanner.models import Household, HouseholdMembership, ServiceConfig
+from wine_cellar.apps.scanner.models import (
+    Household,
+    HouseholdMembership,
+    ServiceConfig,
+)
 from wine_cellar.apps.storage.models import Storage, StorageItem
 from wine_cellar.apps.wine.models import CellarAchievement, Wine, WineList, WineListItem
 
@@ -134,7 +138,9 @@ def test_duplicate_free_text_without_wine_id_is_allowed(client, db, django_user_
     assert first.json()["id"] != second.json()["id"]
 
 
-def test_to_cellar_creates_stock_and_second_call_conflicts(client, db, django_user_model):
+def test_to_cellar_creates_stock_and_second_call_conflicts(
+    client, db, django_user_model
+):
     _enable_lists()
     household, riley, _sam = _pair(django_user_model)
     Storage.objects.create(

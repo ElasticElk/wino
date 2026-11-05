@@ -13,12 +13,12 @@ from django.utils.formats import number_format
 from django.views.generic import DeleteView, DetailView, FormView, TemplateView
 from django_filters.views import FilterView
 
-from wine_cellar.apps.scanner.households import HouseholdScopedMixin, scope
+from wine_cellar.apps.scanner.households import HouseholdScopedMixin
 from wine_cellar.apps.storage.models import StorageItem
 from wine_cellar.apps.user.views import get_user_settings
+from wine_cellar.apps.wine.achievements import month_tally, progress
 from wine_cellar.apps.wine.filters import WineFilter
 from wine_cellar.apps.wine.forms import WineEditForm, WineForm, image_fields_map
-from wine_cellar.apps.wine.achievements import month_tally, progress
 from wine_cellar.apps.wine.models import CellarAchievement, Wine, WineImage
 
 
@@ -322,7 +322,9 @@ class WineScannedView(HouseholdScopedMixin, TemplateView):
                     (
                         row
                         for row in self.scoped(
-                            Wine.objects.exclude(barcode__isnull=True).exclude(barcode="")
+                            Wine.objects.exclude(barcode__isnull=True).exclude(
+                                barcode=""
+                            )
                         )
                         if normalise_barcode(row.barcode) == wanted
                     ),

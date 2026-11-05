@@ -1,3 +1,4 @@
+import logging
 import uuid
 from datetime import timedelta
 
@@ -11,29 +12,25 @@ from django.utils import timezone
 from django.utils.decorators import method_decorator
 from rest_framework import status
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
+from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from rest_framework.parsers import MultiPartParser
-
-from wine_cellar.apps.api.stock import add_stock_item, refresh_taste as _refresh_taste
-from wine_cellar.apps.club.events import queue_club_event
+from wine_cellar.apps.api.stock import add_stock_item
+from wine_cellar.apps.api.stock import refresh_taste as _refresh_taste
 from wine_cellar.apps.api.task_access import remember_task, task_visible
+from wine_cellar.apps.club.events import queue_club_event
 from wine_cellar.apps.scanner.households import get_user_household
 from wine_cellar.apps.scanner.models import Household, TelegramUser
 from wine_cellar.apps.storage.models import Storage, StorageItem
-from wine_cellar.apps.wine.achievements import (
-    award_for_add,
-    backfill,
-    month_tally,
-    serialize_achievement,
+from wine_cellar.apps.wine.achievements import award_for_add
+from wine_cellar.apps.wine.models import (
+    ImageType,
+    Size,
+    Wine,
+    WineImage,
 )
-from wine_cellar.apps.wine.models import CellarAchievement, ImageType, Size, Wine, WineImage
-
-import logging
-
-logger = logging.getLogger(__name__)
 
 from .serializers import (
     StockAddSerializer,
@@ -45,6 +42,8 @@ from .serializers import (
     WineCreateSerializer,
     WineSerializer,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def wine_queryset(household):
@@ -133,7 +132,9 @@ class WineByBarcodeView(ScannerAPIView):
         household = self.get_household(request)
         wanted = normalise_barcode(ean)
         variants = barcode_lookup_variants(ean)
-        wines = wine_queryset(household).exclude(barcode__isnull=True).exclude(barcode="")
+        wines = (
+            wine_queryset(household).exclude(barcode__isnull=True).exclude(barcode="")
+        )
         matches = list(wines.filter(barcode__in=variants))
         if not matches and wanted:
             matches = [
@@ -251,7 +252,11 @@ class StockRemoveView(ScannerAPIView):
                 wine=wine, wine__household=household, deleted=False
             )
             if storage_name:
-                item = items.filter(storage__name=storage_name).order_by("-created").first()
+                item = (
+                    items.filter(storage__name=storage_name)
+                    .order_by("-created")
+                    .first()
+                )
                 if item is None:
                     return Response(
                         {"error": f"No stock of this wine in {storage_name}"},
@@ -651,7 +656,12 @@ class StockSetView(ScannerAPIView):
             storage, _ = Storage.objects.get_or_create(
                 name=storage_name or "Wine Fridge",
                 household=household,
-                defaults={"user": request.user, "location": storage_name or "Wine Fridge", "rows": 0, "columns": 0},
+                defaults={
+                    "user": request.user,
+                    "location": storage_name or "Wine Fridge",
+                    "rows": 0,
+                    "columns": 0,
+                },
             )
             for _ in range(diff):
                 StorageItem.objects.create(
@@ -677,7 +687,11 @@ class StockSetView(ScannerAPIView):
                 "wine_name": f"{wine.name} {wine.vintage or ''}".strip(),
                 "stock_count": wine.total_stock,
                 "action": "set",
-                "achievements": award_for_add(wine, request.user, storage=storage) if diff > 0 else [],
+                "achievements": (
+                    award_for_add(wine, request.user, storage=storage)
+                    if diff > 0
+                    else []
+                ),
             }
         )
 
@@ -811,7 +825,9 @@ class WineInStockView(ScannerAPIView):
                     "rating": wine.rating,
                     "critic_score": wine.critic_score,
                     "vivino_rating": (
-                        None if wine.vivino_rating is None else float(wine.vivino_rating)
+                        None
+                        if wine.vivino_rating is None
+                        else float(wine.vivino_rating)
                     ),
                     "attributes": [str(a) for a in wine.attributes.all()],
                     "food_pairings": [str(f) for f in wine.food_pairings.all()],
@@ -893,13 +909,24 @@ class WineUpdateView(ScannerAPIView):
             )
 
         serializer = WineCreateSerializer(
-            data=request.data, context={"request": request, "household": household}, partial=True
+            data=request.data,
+            context={"request": request, "household": household},
+            partial=True,
         )
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
         # Update simple fields
-        for field in ("name", "wine_type", "category", "vintage", "country", "abv", "price", "barcode"):
+        for field in (
+            "name",
+            "wine_type",
+            "category",
+            "vintage",
+            "country",
+            "abv",
+            "price",
+            "barcode",
+        ):
             if field in data:
                 setattr(wine, field, data[field])
 
@@ -924,7 +951,9 @@ class WineUpdateView(ScannerAPIView):
         size_litres = data.get("size")
         if size_litres:
             from wine_cellar.apps.wine.models import Size
-            size_obj, _ = Size.objects.get_or_create(name=size_litres, user=request.user)
+            size_obj, _ = Size.objects.get_or_create(
+                name=size_litres, user=request.user
+            )
             wine.size = size_obj
 
         wine.save()
@@ -941,7 +970,9 @@ class WineUpdateView(ScannerAPIView):
         region_name = data.get("region", "")
         if region_name:
             from wine_cellar.apps.wine.models import Region
-            region, _ = Region.objects.get_or_create(name=region_name, user=request.user)
+            region, _ = Region.objects.get_or_create(
+                name=region_name, user=request.user
+            )
             wine.region = region
             wine.save()
 
@@ -972,7 +1003,9 @@ class WineUpdateView(ScannerAPIView):
             from wine_cellar.apps.wine.models import FoodPairing
             wine.food_pairings.clear()
             for fp_name in food_pairing_names:
-                fp, _ = FoodPairing.objects.get_or_create(name=fp_name, user=request.user)
+                fp, _ = FoodPairing.objects.get_or_create(
+                    name=fp_name, user=request.user
+                )
                 wine.food_pairings.add(fp)
 
         # Update attributes if provided
@@ -981,7 +1014,9 @@ class WineUpdateView(ScannerAPIView):
             from wine_cellar.apps.wine.models import Attribute
             wine.attributes.clear()
             for attr_name in attribute_names:
-                attr, _ = Attribute.objects.get_or_create(name=attr_name, user=request.user)
+                attr, _ = Attribute.objects.get_or_create(
+                    name=attr_name, user=request.user
+                )
                 wine.attributes.add(attr)
 
         return Response(
@@ -1018,7 +1053,9 @@ class WineRefreshReferencesView(ScannerAPIView):
 
         wine = self._get_wine(request, pk)
         if wine is None:
-            return Response({"error": "Wine not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "Wine not found"}, status=status.HTTP_404_NOT_FOUND
+            )
 
         payload = request.data if isinstance(request.data, dict) else {}
         force = bool(payload.get("force"))
@@ -1046,13 +1083,19 @@ class WineRefreshReferencesView(ScannerAPIView):
 
         wine = self._get_wine(request, pk)
         if wine is None:
-            return Response({"error": "Wine not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "Wine not found"}, status=status.HTTP_404_NOT_FOUND
+            )
 
         current = {
             "critic_score": wine.critic_score,
-            "vivino_rating": float(wine.vivino_rating) if wine.vivino_rating is not None else None,
+            "vivino_rating": (
+                float(wine.vivino_rating) if wine.vivino_rating is not None else None
+            ),
             "category_rating": wine.category_rating,
-            "market_price": float(wine.market_price) if wine.market_price is not None else None,
+            "market_price": (
+                float(wine.market_price) if wine.market_price is not None else None
+            ),
             "market_price_currency": wine.market_price_currency,
             "confidence": wine.reference_confidence,
             "reference_updated": wine.reference_updated,
@@ -1314,7 +1357,12 @@ class StockMoveView(ScannerAPIView):
             storage, _ = Storage.objects.get_or_create(
                 name=storage_name,
                 household=household,
-                defaults={"user": request.user, "location": storage_name, "rows": 0, "columns": 0},
+                defaults={
+                    "user": request.user,
+                    "location": storage_name,
+                    "rows": 0,
+                    "columns": 0,
+                },
             )
             item.storage = storage
 
@@ -1414,18 +1462,24 @@ class WineImageUploadView(ScannerAPIView):
             )
 
         images = WineImage.objects.filter(wine=wine)
-        return Response({
-            "wine_id": wine.id,
-            "images": [
-                {
-                    "id": img.id,
-                    "image_url": request.build_absolute_uri(img.image.url),
-                    "thumbnail_url": request.build_absolute_uri(img.thumbnail.url) if img.thumbnail else None,
-                    "image_type": img.image_type,
-                }
-                for img in images
-            ],
-        })
+        return Response(
+            {
+                "wine_id": wine.id,
+                "images": [
+                    {
+                        "id": img.id,
+                        "image_url": request.build_absolute_uri(img.image.url),
+                        "thumbnail_url": (
+                            request.build_absolute_uri(img.thumbnail.url)
+                            if img.thumbnail
+                            else None
+                        ),
+                        "image_type": img.image_type,
+                    }
+                    for img in images
+                ],
+            }
+        )
 
 
 class WineImageFileView(ScannerAPIView):

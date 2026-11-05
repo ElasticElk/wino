@@ -3,8 +3,8 @@ import random
 import factory
 from factory.django import DjangoModelFactory
 
-from wine_cellar.apps.storage.models import Storage, StorageItem
 from wine_cellar.apps.scanner.households import get_user_household
+from wine_cellar.apps.storage.models import Storage, StorageItem
 from wine_cellar.apps.user.tests.factories import UserFactory
 from wine_cellar.apps.wine.tests.factories import WineFactory
 

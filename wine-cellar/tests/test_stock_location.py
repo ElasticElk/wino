@@ -5,7 +5,7 @@ from django.urls import reverse
 from rest_framework.authtoken.models import Token
 
 from wine_cellar.apps.scanner.households import get_user_household
-from wine_cellar.apps.storage.models import Storage, StorageItem
+from wine_cellar.apps.storage.models import StorageItem
 from wine_cellar.apps.storage.tests.factories import StorageFactory
 from wine_cellar.apps.user.tests.factories import UserFactory
 from wine_cellar.apps.wine.tests.factories import WineFactory, WineImageFactory
@@ -60,8 +60,13 @@ def test_remove_prefers_the_named_fridge(client, cellar):
     body = response.json()
     assert body["storage"] == "Big Fridge"
     assert body["storage_id"] == big.id
-    assert StorageItem.objects.filter(storage=big, wine=wine, deleted=False).count() == 0
-    assert StorageItem.objects.filter(storage=kitchen, wine=wine, deleted=False).count() == 1
+    assert (
+        StorageItem.objects.filter(storage=big, wine=wine, deleted=False).count() == 0
+    )
+    assert (
+        StorageItem.objects.filter(storage=kitchen, wine=wine, deleted=False).count()
+        == 1
+    )
 
 
 def test_remove_named_fridge_does_not_steal_from_another(client, cellar):
@@ -76,7 +81,10 @@ def test_remove_named_fridge_does_not_steal_from_another(client, cellar):
     )
     assert response.status_code == 409
     assert "Big Fridge" in response.json()["error"]
-    assert StorageItem.objects.filter(storage=kitchen, wine=wine, deleted=False).count() == 1
+    assert (
+        StorageItem.objects.filter(storage=kitchen, wine=wine, deleted=False).count()
+        == 1
+    )
 
 
 def test_drank_does_not_take_fridge_stock(client, cellar):
@@ -129,8 +137,12 @@ def test_vote_works_on_a_deleted_bottle(client, cellar):
 
 def test_stock_history_lists_drank_newest_first(client, cellar):
     user, household, wine, big, kitchen, token = cellar
-    older = WineFactory(user=user, household=household, name="Older Chenin", vintage=2018)
-    newer = WineFactory(user=user, household=household, name="Newer Pinot", vintage=2020)
+    older = WineFactory(
+        user=user, household=household, name="Older Chenin", vintage=2018
+    )
+    newer = WineFactory(
+        user=user, household=household, name="Newer Pinot", vintage=2020
+    )
     older.comment = "Green apple and wet stone."
     older.save(update_fields=["comment"])
     StorageItem.objects.create(storage=big, wine=older, user=user, deleted=True)
@@ -154,7 +166,9 @@ def test_stock_history_lists_drank_newest_first(client, cellar):
 def test_stock_history_paginates(client, cellar):
     user, household, wine, big, kitchen, token = cellar
     for i in range(6):
-        w = WineFactory(user=user, household=household, name=f"Bottle {i}", vintage=2010 + i)
+        w = WineFactory(
+            user=user, household=household, name=f"Bottle {i}", vintage=2010 + i
+        )
         StorageItem.objects.create(storage=big, wine=w, user=user, deleted=True)
     _auth(client, token, household)
 

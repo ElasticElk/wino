@@ -1,7 +1,12 @@
 from django.contrib import admin
 
 from .models import (
-    Household, HouseholdInvite, HouseholdMembership, Scanner, ServiceConfig, TelegramUser,
+    Household,
+    HouseholdInvite,
+    HouseholdMembership,
+    Scanner,
+    ServiceConfig,
+    TelegramUser,
 )
 
 
@@ -45,7 +50,15 @@ class TelegramUserAdmin(admin.ModelAdmin):
 
 @admin.register(HouseholdInvite)
 class HouseholdInviteAdmin(admin.ModelAdmin):
-    list_display = ("code", "kind", "household", "created_by", "created", "expires_at", "used_at")
+    list_display = (
+        "code",
+        "kind",
+        "household",
+        "created_by",
+        "created",
+        "expires_at",
+        "used_at",
+    )
     list_filter = ("kind",)
     search_fields = ("code",)
     readonly_fields = ("code", "created")
@@ -53,7 +66,14 @@ class HouseholdInviteAdmin(admin.ModelAdmin):
 
 @admin.register(Scanner)
 class ScannerAdmin(admin.ModelAdmin):
-    list_display = ("name", "household", "user", "default_storage", "is_active", "created")
+    list_display = (
+        "name",
+        "household",
+        "user",
+        "default_storage",
+        "is_active",
+        "created",
+    )
     list_filter = ("is_active", "household")
     filter_horizontal = ("notify_users",)
     readonly_fields = ("api_key",)

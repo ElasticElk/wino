@@ -38,7 +38,8 @@ MIN_REASONING_LEN = 15  # below this we treat reasoning as effectively empty
 
 
 def is_valid_reasoning(text) -> bool:
-    """Return True iff reasoning is non-empty, long enough, and not generic boilerplate."""
+    """Return True iff reasoning is non-empty, long enough, and not generic
+    boilerplate."""
     if not isinstance(text, str):
         return False
     t = text.strip()
@@ -75,7 +76,18 @@ def _location_phrase(country: str) -> str:
     return f" in {country}"
 
 
-def _build_prompt(name, producer, vintage, country, region, appellation, grape, vineyard, target_currency, target_country):
+def _build_prompt(
+    name,
+    producer,
+    vintage,
+    country,
+    region,
+    appellation,
+    grape,
+    vineyard,
+    target_currency,
+    target_country,
+):
     parts = [name]
     if vintage:
         parts.append(str(vintage))
@@ -93,11 +105,11 @@ def _build_prompt(name, producer, vintage, country, region, appellation, grape, 
         extras.append(f"region: {region}")
     if country:
         extras.append(f"country: {country}")
-    extras_str = "\n".join(f"  - {e}" for e in extras) if extras else "  (no further details available)"
-    location_phrase = _location_phrase(target_country)
-    market_context = f"the typical retail price{location_phrase} expressed in {target_currency}"
-
-    place = region or country or "unknown region"
+    extras_str = (
+        "\n".join(f"  - {e}" for e in extras)
+        if extras
+        else "  (no further details available)"
+    )
     return f"""You are looking up reference data on a specific wine. Use live web search to find:
   1. The wine's Vivino page (vivino.com) — note the average rating and number of ratings.
   2. Critic reviews — search wine-critic sites and publications (Wine Spectator, Wine Advocate, Decanter, James Suckling, Vinous, Tim Atkin, Jancis Robinson, CellarTracker, Gilbert & Gaillard, Falstaff, regional press) for any score on this exact wine + vintage.
@@ -138,7 +150,7 @@ End your response with ONLY this JSON object (no markdown fences, nothing after 
   "market_price_currency": "{target_currency}",
   "market_price_confidence": "low",
   "market_price_reasoning": null
-}}"""
+}}"""  # noqa: E501
 
 
 def _has_any_value(data: dict | None) -> bool:
@@ -206,7 +218,9 @@ def fetch_references(
             body = resp.json()
             content = _extract_responses_text(body)
             if content is None:
-                logger.error(f"Grok responses returned no text on attempt {attempt}: {body!r}")
+                logger.error(
+                    f"Grok responses returned no text on attempt {attempt}: {body!r}"
+                )
                 if attempt < max_attempts:
                     continue
                 return None
@@ -217,7 +231,9 @@ def fetch_references(
                 continue
             return None
         except (json.JSONDecodeError, KeyError, IndexError) as e:
-            logger.error(f"Failed to parse Grok references response on attempt {attempt}: {e}")
+            logger.error(
+                f"Failed to parse Grok references response on attempt {attempt}: {e}"
+            )
             if attempt < max_attempts:
                 continue
             return None
@@ -228,7 +244,11 @@ def fetch_references(
                 logger.info(f"Grok references found on retry attempt {attempt}")
             return data
         # All-null result — retry to compensate for web-search variance
-        logger.info(f"Grok references all-null on attempt {attempt}; retrying" if attempt < max_attempts else f"Grok references still all-null after {max_attempts} attempts")
+        logger.info(
+            f"Grok references all-null on attempt {attempt}; retrying"
+            if attempt < max_attempts
+            else f"Grok references still all-null after {max_attempts} attempts"
+        )
 
     return last_data
 
@@ -236,7 +256,8 @@ def fetch_references(
 def _extract_responses_text(body: dict) -> str | None:
     """Pull the assistant text out of a /v1/responses payload.
 
-    Shape: {"output": [{"type": "message", "content": [{"type": "output_text", "text": "..."}]}, ...]}
+    Shape: {"output": [{"type": "message", "content": [
+        {"type": "output_text", "text": "..."}]}, ...]}
     """
     if not isinstance(body, dict):
         return None
@@ -252,7 +273,9 @@ def _extract_responses_text(body: dict) -> str | None:
         for c in item.get("content") or []:
             if not isinstance(c, dict):
                 continue
-            if c.get("type") in ("output_text", "text") and isinstance(c.get("text"), str):
+            if c.get("type") in ("output_text", "text") and isinstance(
+                c.get("text"), str
+            ):
                 chunks.append(c["text"])
     return "\n".join(chunks) if chunks else None
 

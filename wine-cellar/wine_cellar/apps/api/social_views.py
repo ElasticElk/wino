@@ -280,7 +280,9 @@ def _peek_wine_if_full(membership, wine_id):
     return wine
 
 
-def serialize_bottle(bottle: TasteOffBottle, *, scores=None, hide_others=True, user=None):
+def serialize_bottle(
+    bottle: TasteOffBottle, *, scores=None, hide_others=True, user=None
+):
     body = {"id": bottle.id, "label": bottle.label, "sort_order": bottle.sort_order}
     if scores is None:
         return body
@@ -370,7 +372,9 @@ class TasteOffDetailView(TasteoffsEnabledMixin, ScannerAPIView):
         tasteoff = TasteOff.objects.filter(club=membership.club, id=tid).first()
         if tasteoff is None:
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
-        return Response(serialize_tasteoff(tasteoff, user=request.user, include_scores=True))
+        return Response(
+            serialize_tasteoff(tasteoff, user=request.user, include_scores=True)
+        )
 
 
 class TasteOffBottleView(TasteoffsEnabledMixin, ScannerAPIView):
@@ -386,10 +390,14 @@ class TasteOffBottleView(TasteoffsEnabledMixin, ScannerAPIView):
         if tasteoff.status != TasteOff.STATUS_SETUP:
             return Response({"error": "not_setup"}, status=status.HTTP_409_CONFLICT)
         if tasteoff.bottles.count() >= 8:
-            return Response({"error": "max_bottles"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "max_bottles"}, status=status.HTTP_400_BAD_REQUEST
+            )
         label = str((request.data or {}).get("label") or "").strip()[:160]
         if len(label) < 2:
-            return Response({"error": "label required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "label required"}, status=status.HTTP_400_BAD_REQUEST
+            )
         wine_id = (request.data or {}).get("wine_id")
         stored_wine_id = None
         if wine_id not in (None, ""):
@@ -494,7 +502,11 @@ class TasteOffCloseView(TasteoffsEnabledMixin, ScannerAPIView):
         ):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
         if tasteoff.status == TasteOff.STATUS_CLOSED:
-            return Response({"error": "already_closed"}, status=status.HTTP_409_CONFLICT)
+            return Response(
+                {"error": "already_closed"}, status=status.HTTP_409_CONFLICT
+            )
         close_tasteoff(tasteoff)
         tasteoff.refresh_from_db()
-        return Response(serialize_tasteoff(tasteoff, user=request.user, include_scores=True))
+        return Response(
+            serialize_tasteoff(tasteoff, user=request.user, include_scores=True)
+        )

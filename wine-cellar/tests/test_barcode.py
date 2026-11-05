@@ -4,10 +4,13 @@ from rest_framework.authtoken.models import Token
 
 from wine_cellar.apps.scanner.households import get_user_household
 from wine_cellar.apps.user.tests.factories import UserFactory
-from wine_cellar.apps.wine.barcodes import accepted_barcode, gs1_check_ok, normalise_barcode
+from wine_cellar.apps.wine.barcodes import (
+    accepted_barcode,
+    gs1_check_ok,
+    normalise_barcode,
+)
 from wine_cellar.apps.wine.models import Wine
 from wine_cellar.apps.wine.tests.factories import WineFactory
-
 
 EAN13 = "0123456789012"
 UPC_A = "123456789012"

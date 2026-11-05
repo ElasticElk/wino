@@ -179,7 +179,9 @@ def test_existing_telegram_user_gets_a_second_membership(
         content_type="application/json",
     )
     assert response.status_code == 200, response.content
-    assert HouseholdMembership.objects.filter(user=existing, household=household).exists()
+    assert HouseholdMembership.objects.filter(
+        user=existing, household=household
+    ).exists()
     assert HouseholdMembership.objects.filter(user=existing, household=other).exists()
 
 
@@ -459,7 +461,9 @@ def test_cancel_drops_last_unused(client, member_user):
     auth = _auth(client, member_user)
     first = _mint(auth, "join").json()["code"]
     second = _mint(auth, "join").json()["code"]
-    response = auth.post(reverse("api-scanner-invites-cancel"), data={}, content_type="application/json")
+    response = auth.post(
+        reverse("api-scanner-invites-cancel"), data={}, content_type="application/json"
+    )
     assert response.status_code == 200
     body = response.json()
     assert body["code"] == second
@@ -471,7 +475,9 @@ def test_cancel_drops_last_unused(client, member_user):
 
 def _cancel(auth, **data):
     return auth.post(
-        reverse("api-scanner-invites-cancel"), data=data, content_type="application/json",
+        reverse("api-scanner-invites-cancel"),
+        data=data,
+        content_type="application/json",
     )
 
 
