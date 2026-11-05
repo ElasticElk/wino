@@ -389,11 +389,15 @@ class ChatRouter:
                 )
                 box["handled"] = True
                 return
-            # Moved on: the location keyboard goes, the bottom bar comes back.
+            # Moved on: the location keyboard goes, the bottom bar comes back
+            # (after the typing floor, like any first reply).
             nav = getattr(self.handler, "_nav", None)
             bot = getattr(context, "bot", None)
             if callable(nav) and bot is not None:
                 try:
+                    pacer = getattr(self.handler, "_text_pacer", None)
+                    if pacer is not None:
+                        await pacer.wait()
                     await nav().send_bar_intro(bot, chat_id)
                 except Exception:
                     logger.info("[chat] bar after place failed chat=%s", chat_id)
@@ -535,6 +539,14 @@ class ChatRouter:
         await update.message.reply_text(
             self._c(locale, "chat.place.ask_location"), reply_markup=keyboard,
         )
+        # The location keyboard replaced the bar. Forget the chat's bar, so
+        # its next message brings it back even after the ask has expired.
+        nav = getattr(self.handler, "_nav", None)
+        if callable(nav):
+            try:
+                nav().forget_bar(chat_id)
+            except Exception:
+                pass
 
     async def _search_places(self, update, context, api, chat_id, query, *, area="", lat=None, lon=None,
                              clear_keyboard=False):
@@ -559,6 +571,12 @@ class ChatRouter:
                 except Exception:
                     markup = ReplyKeyboardRemove()
             await update.message.reply_text(got, reply_markup=markup)
+            nav = getattr(self.handler, "_nav", None)
+            if callable(nav) and not isinstance(markup, ReplyKeyboardRemove):
+                try:
+                    nav().mark_bar_given(chat_id)
+                except Exception:
+                    pass
         placeholder = await update.message.reply_text(lines[0])
         try:
             taste = await loop.run_in_executor(None, api.get_taste)

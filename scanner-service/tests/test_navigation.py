@@ -961,3 +961,65 @@ async def test_comment_prompt_names_the_bottle():
     await handler._club_flow().on_callback(say, _context())
     prompt = say.callback_query.message.reply_text.call_args.args[0]
     assert "Sam" in prompt and "Chenin" in prompt
+
+
+# --------------------------------------------------------------------------
+# Round-3 regressions
+
+@pytest.mark.asyncio
+async def test_menu_navigation_drops_a_pending_search():
+    handler = _handler()
+    handler._do_search = AsyncMock()
+    router = MagicMock()
+    router.handle_text = AsyncMock(return_value=True)
+    router.abandon = AsyncMock()
+    router._pending_place = MagicMock(return_value=None)
+    handler._router = router
+    nav = handler._nav()
+    nav.pending.begin("4242", "search", prompt_id=50)
+    context = _context()
+    await handler._handle_callback(_tap(menu_cb("new"), message_id=31), context)
+    await handler._handle_callback(_tap(menu_cb("house"), message_id=55), context)
+    assert nav.pending.peek("4242") is None
+    await handler._unknown_text(_update("who is in my household"), context)
+    handler._do_search.assert_not_awaited()
+    router.handle_text.assert_awaited_once()  # normal chat, not a search
+
+
+@pytest.mark.asyncio
+async def test_expired_prompt_loses_its_cancel():
+    handler = _handler()
+    clock = Clock()
+    nav = handler._nav()
+    nav.pending = PendingInputs(clock=clock)
+    nav.pending.begin("4242", "search", prompt_id=50)
+    clock.t += 121
+    context = _context()
+    assert await nav.on_pending_text(_update("x"), context, "x") is False
+    context.bot.edit_message_reply_markup.assert_awaited_with(
+        chat_id=4242, message_id=50, reply_markup=None,
+    )
+
+
+def test_location_keyboard_forgets_the_bar_so_it_comes_back_later():
+    handler = _handler()
+    handler._bar_rollout = True
+    nav = handler._nav()
+    nav.mark_bar_given("4242")
+    assert not nav.needs_bar("4242")
+    nav.forget_bar("4242")
+    assert nav.needs_bar("4242")
+
+
+@pytest.mark.asyncio
+async def test_stale_list_tap_sends_one_bar_not_two():
+    handler = _handler()
+    handler._bar_rollout = True
+    update = _update(BAR_LIST)
+    context = _context()
+    await handler._unknown_text(update, context)
+    intros = [c for c in context.bot.send_message.await_args_list
+              if isinstance(c.kwargs.get("reply_markup"), ReplyKeyboardMarkup)]
+    assert intros == []
+    assert isinstance(update.message.reply_text.call_args.kwargs["reply_markup"], ReplyKeyboardMarkup)
+    assert not handler._nav().needs_bar("4242")

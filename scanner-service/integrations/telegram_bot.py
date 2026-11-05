@@ -3634,7 +3634,18 @@ class TelegramBotHandler:
             # Bottom-bar labels beat everything typed: never a search, a club
             # comment, a cellar name or the answer to a pending prompt.
             from integrations.chat_router import match_label
-            if self._nav().needs_bar(chat_id):
+            from integrations.chat_router import BAR_LABELS
+            stale_bar_tap = " ".join(text.split()) in BAR_LABELS
+            # A pending "near me" ask restores the bar itself (with the place
+            # search, or when the person moves on), so don't send it twice.
+            place_pending = False
+            router = getattr(self, "_router", None)
+            if router is not None:
+                try:
+                    place_pending = bool(router._pending_place(chat_id))
+                except Exception:
+                    place_pending = False
+            if not stale_bar_tap and not place_pending and self._nav().needs_bar(chat_id):
                 await pacer.wait()  # the intro is the first reply; keep the floor
                 await self._nav().ensure_bar(getattr(context, "bot", None), chat_id)
             label = match_label(

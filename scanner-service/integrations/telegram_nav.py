@@ -365,10 +365,14 @@ class PendingInputs:
             return None
         return entry
 
-    def take(self, chat_id) -> dict | None:
+    def take(self, chat_id, include_expired: bool = False) -> dict | None:
+        """Pop the slot. Expired -> None, or (``include_expired``) the entry
+        marked ``expired`` so its prompt can still be closed."""
         entry = self._slots.pop(str(chat_id), None)
-        if entry is None or self._clock() - entry["at"] > self.ttl:
+        if entry is None:
             return None
+        if self._clock() - entry["at"] > self.ttl:
+            return {**entry, "expired": True} if include_expired else None
         return entry
 
     def cancel(self, chat_id) -> dict | None:
@@ -687,12 +691,14 @@ class NavFlow:
         if action == "list":
             if not self.flags().get("feature_lists"):
                 await update.message.reply_text(FEATURE_OFF, reply_markup=self.bar())
+                self.mark_bar_given(chat_id)
                 return
             await self.handler._cmd_list(update, ArgsContext(context))
             return
         if action == "clubs":
             if not self.flags().get("feature_clubs"):
                 await update.message.reply_text(FEATURE_OFF, reply_markup=self.bar())
+                self.mark_bar_given(chat_id)
                 return
             await self.handler._cmd_club(update, ArgsContext(context))
             return
@@ -724,10 +730,12 @@ class NavFlow:
 
     async def on_pending_text(self, update, context, text: str) -> bool:
         chat_id = str(update.effective_chat.id)
-        entry = self.pending.take(chat_id)
+        entry = self.pending.take(chat_id, include_expired=True)
         if entry is None:
             return False
         await self._close_prompt(context, chat_id, entry.get("prompt_id"))
+        if entry.get("expired"):
+            return False  # too late: handled as a normal message
         if entry["kind"] == "search":
             await self.handler._do_search(update, text)
             return True
@@ -824,6 +832,17 @@ class NavFlow:
         except Exception as e:
             logger.info("[nav] bar intro failed for %s: %s", chat_id, e)
 
+    def forget_bar(self, chat_id) -> None:
+        """Another reply keyboard replaced the bar (e.g. "Send my location");
+        the next typed message re-sends it, however late that is."""
+        self._bar_given.pop(str(chat_id), None)
+        store = getattr(self.handler, "_bar_store", None)
+        if store is not None:
+            try:
+                store.pop(str(chat_id), None)
+            except Exception:
+                pass
+
     def mark_bar_given(self, chat_id) -> None:
         sig = self._bar_signature()
         self._bar_given[str(chat_id)] = sig
@@ -851,6 +870,10 @@ class NavFlow:
                 pass
             return True
         head = parts[0] if parts else "home"
+        if not (head == "x" and len(parts) > 1 and parts[1] == "cancel"):
+            # Navigating away means the person moved on from a search or
+            # comment prompt; only its own Cancel keeps it to act on.
+            await self.drop_pending(chat_id, getattr(context, "bot", None))
         if head == "new":
             try:
                 await query.answer()
