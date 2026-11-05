@@ -8,6 +8,7 @@ so a later admin bot can import the same lists.
 
 # Everyday commands. Pushed as the default menu for every chat.
 PUBLIC_COMMANDS = [
+    ("menu", "Home menu"),
     ("fridge", "What's in the cellar"),
     ("recent", "Recent bottles"),
     ("search", "Find a wine by name"),

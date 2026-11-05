@@ -269,8 +269,8 @@ async def test_near_me_asks_for_location_then_searches_with_it():
 
 
 @pytest.mark.asyncio
-async def test_keyboard_removal_is_its_own_message_so_the_placeholder_stays_editable():
-    from telegram import ReplyKeyboardRemove
+async def test_location_keyboard_swap_is_its_own_message_so_the_placeholder_stays_editable():
+    from telegram import ReplyKeyboardMarkup
 
     handler = _handler(_api([_wine()]), FakeChat())
     handler._router._sleep = _fast
@@ -278,7 +278,10 @@ async def test_keyboard_removal_is_its_own_message_so_the_placeholder_stays_edit
     loc, _sent = _location_update()
     await handler._router.on_location(loc, _context())
     first, second = loc.message.reply_text.await_args_list[:2]
-    assert isinstance(first.kwargs.get("reply_markup"), ReplyKeyboardRemove)
+    # The location keyboard is swapped for the bottom bar, not just removed.
+    bar = first.kwargs.get("reply_markup")
+    assert isinstance(bar, ReplyKeyboardMarkup)
+    assert bar.is_persistent is True
     assert "reply_markup" not in second.kwargs
 
 

@@ -74,7 +74,7 @@ Auth: `Authorization: Token <token>` header. Optional `X-Household: <id>` header
 - `GET /api/lists/<id>/` — Open items (`?limit=5&offset=0`). Another user's list is 404
 - `POST /api/lists/<id>/items/` — Snapshot a bottle onto the list. Duplicate `wine_id` is 200 (idempotent)
 - `DELETE /api/lists/<id>/items/<item_id>/` — Remove. 409 `already_moved`
-- `POST /api/lists/<id>/items/<item_id>/to-cellar/` — Create/find `Wine` in the **current** household and add stock. Sets `moved_at`. Undo of that stock add does not restore the list row
+- `POST /api/lists/<id>/items/<item_id>/to-cellar/` — Create/find `Wine` in the **current** household and add stock. Sets `moved_at` with a conditional claim, so a double tap is `409 already_moved` and adds stock once. Undo of that stock add does not restore the list row
 - `POST /api/clubs/global/` — Staff. Forces `kind=global`, `cellar_visibility=none`, `badges_visible=false`. Flag `feature_global_clubs`
 - `GET /api/clubs/discover/` — List global clubs (`joined`, `frozen`). Flag `feature_global_clubs`; off → 404 `not_enabled`
 - `POST /api/clubs/<id>/join/` — Self-join a global club (403 `invite_only` on private). No household heads-up
@@ -195,9 +195,21 @@ The bot uses `filters.Chat(chat_id=[...])` built from users returned by `/api/sc
 
 **Unfiltered** (work for anyone): `/myid`, `/start`, and the catch-all fallbacks — see *Onboarding* below. Everything else (`/status`, `/stock`, `/fridge`, `/search`, `/help`, …) requires the chat_id to be in the allow list. The unfiltered fallbacks are registered **last** so provisioned users always match their own handlers first (python-telegram-bot stops at the first match within a handler group).
 
+## Telegram Navigation (no commands to remember)
+
+`integrations/telegram_nav.py` owns the bottom bar, the ☰ Menu, follow-up rows, one-shot typed input and double-tap guards. All of it is English; typed chat keeps its language.
+
+- **Bottom bar** — persistent `ReplyKeyboardMarkup` (`is_persistent`, `resize_keyboard`, placeholder "Tap a button below"): `🍷 Cellar` `📸 Scan` `🔎 Search` / `📝 List` `🍇 Clubs` `☰ Menu`. List/Clubs drop out when `feature_lists` / `feature_clubs` are off and the rows reflow. Sent with `/start`, `/help`, the onboarding welcome (typed-name provision, join tap, club compound join) and the `/adduser` welcome. Leaving a naming keyboard gives a provisioned chat its bar back.
+- **Labels** — `LABEL_COMMANDS` / `match_label()` in `chat_router.py` (casefolded, emoji and punctuation stripped; `fridge`, `menu`, `find`, … also work). Checked first in `_unknown_text`, before pending input, invite naming, club text steps and chat, so a label is never a search, a comment or a cellar name. A label clears every "next message" state (`_abandon_pending_states`, same as a command). Plain `list` / `clubs` with the flag off fall through to chat; the emoji label from a stale bar answers "That isn't switched on yet." with a fresh bar.
+- **☰ Menu** (`/menu`, the bar button, or `mn:new` under a result) — one inline message that edits in place (`edit_or_send_menu`: edit, ignore "message is not modified", else send). Screens Home → Cellar (Fridge, Recent, Stock, Status), Find (Search, Browse locations), Lists, Clubs, Household (Members, Invite to household, Switch household when there is more than one), Help, and Staff (staff chats only). Every submenu has ⬅️ Back; the header names the active household (cached 5 min, dropped on switch). Opening a new menu deletes the previous live one. An action leaves the menu as a one-line breadcrumb and posts its result below; a follow-up button under a result never overwrites that result. Callback data: `mn:<screen>`, `mn:new`, `mn:x:<action>`, size-checked by `_fit_callback` (shared with `_cb()`). Flags and staff are re-checked on every tap.
+- **Follow-ups** — `follow_up_rows(kind, ctx)` ends results with a way on, always including ☰ Menu: fridge/browse → Search, Status; status → Search, Fridge; added → View wine, Scan another; removed → Scan another, Cellar; search → Search again; household → Invite to household; club home → Say something (latest opened bottle, `feature_club_comments`), Taste-off (`feature_tasteoffs`).
+- **One-shot input** — `🔎 Search` replies "Type a wine name…" with ✖️ Cancel; only the next text message is the query (straight to `_do_search`), and the slot expires after 2 minutes (`PendingInputs`). A photo, a command or a label drops it. Club **Say something** follows the same rule: next message only, 2 minutes, Cancel, 280 characters; a too-long note uses the prompt up and offers 💬 Try again. One slot per chat — starting either replaces the other.
+- **Double taps** — confirm buttons (club `ly` `za` `dy` `dn` `zc` `ho` `jj` `tc`; list `lc` `ls`; scan `ok`) go through `ConfirmGuard`: the first tap per chat+message+data wins, a repeat is answered "Already done", a failed action releases the claim. The server is idempotent too: dismantle votes resolve with a conditional `status=open` update (one notification, one delete), a repeat ballot is `409 already_voted`, and list Move to cellar claims the row with `moved_at IS NULL` inside a transaction before adding stock (rolled back on any error).
+
 ## Telegram Bot Commands
 
-Available to authorized users via the bot:
+Available to authorized users via the bot (all still work; the bar and ☰ Menu reach the same handlers):
+- `/menu` — The ☰ Menu home screen
 - `/search <name>` — Find a wine by name. Plain text of 3+ characters goes through natural-language chat when a Grok key is configured, and falls through to this search when chat does not claim it (no key, a one-word wine name, or the parser says it is a search)
 - `/status` — Scanner system status
 - `/stock` — View current stock (interactive, per-storage)

@@ -40,6 +40,7 @@ MESSAGES: dict[str, dict[str, str]] = {
             "Photograph a bottle you don't own — then tap To-drink list."
         ),
         "list.moved": "{name} is in the cellar.",
+        "nav.already_done": "Already done.",
         "list.removed": "Removed from To-drink.",
         "list.off": "To-drink lists aren't on yet.",
         "list.err": "Couldn't update that list. Try again.",
@@ -206,7 +207,9 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.named.ok": "OK — here's what joining shares.",
         "club.hh.taken": "That name's taken — pick another",
         "club.comment.btn": "Say something",
-        "club.comment.prompt": "Reply to this message with a short note.",
+        "club.comment.prompt": (
+            "Type a short note (280 characters max). Only your next message counts."
+        ),
         "club.comment.saved": "Noted.",
         "club.comment.too_long": "Keep it under 280 characters.",
         "club.comment.again": "Tap Say something again.",
@@ -532,6 +535,7 @@ MESSAGES: dict[str, dict[str, str]] = {
             "Neem 'n foto van 'n bottel wat jy nie besit nie — dan tik To-drink-lys."
         ),
         "list.moved": "{name} is in die kelder.",
+        "nav.already_done": "Klaar gedoen.",
         "list.removed": "Van To-drink afgehaal.",
         "list.off": "To-drink-lyste is nog nie aan nie.",
         "list.err": "Kon nie die lys bywerk nie. Probeer weer.",
@@ -698,7 +702,9 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.named.ok": "Reg — hier's wat aansluit deel.",
         "club.hh.taken": "Daai naam is al geneem — kies 'n ander",
         "club.comment.btn": "Sê iets",
-        "club.comment.prompt": "Antwoord op hierdie boodskap met 'n kort nota.",
+        "club.comment.prompt": (
+            "Tik 'n kort nota (hoogstens 280 karakters). Net jou volgende boodskap tel."
+        ),
         "club.comment.saved": "Genoteer.",
         "club.comment.too_long": "Hou dit onder 280 karakters.",
         "club.comment.again": "Tik Sê iets weer.",

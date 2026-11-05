@@ -702,3 +702,61 @@ def test_members_include_effective_peek(client, db, django_user_model):
     by_id = {row["user_id"]: row for row in listed.json()["members"]}
     assert by_id[riley.id]["peek"] == "summary"
     assert by_id[lee.id]["peek"] == "summary"
+
+
+def _three_member_vote(client, django_user_model):
+    hillside, riverside, riley, sam, lee = _people(django_user_model)
+    created = _create_club(client, riley).json()
+    club = Club.objects.get(id=created["id"])
+    ClubMembership.objects.create(
+        club=club, user=lee, role="member", household=riverside,
+        accepted_sharing_version=1,
+    )
+    ClubMembership.objects.create(
+        club=club, user=sam, role="member", household=hillside,
+        accepted_sharing_version=1,
+    )
+    started = _auth(client, riley).post(
+        reverse("api-club-dismantle", kwargs={"pk": club.id}),
+        data={}, content_type="application/json",
+    )
+    assert started.status_code == 201, started.content
+    return club, started.json()["id"], riley, sam, lee
+
+
+def _ballot(client, user, club, vote_id, choice):
+    return _auth(client, user).post(
+        reverse(
+            "api-club-dismantle-ballot",
+            kwargs={"pk": club.id, "vote_id": vote_id},
+        ),
+        data={"choice": choice}, content_type="application/json",
+    )
+
+
+def test_ballot_double_tap_is_already_voted(client, db, django_user_model):
+    club, vote_id, _riley, sam, _lee = _three_member_vote(client, django_user_model)
+    first = _ballot(client, sam, club, vote_id, "yes")
+    assert first.status_code == 200, first.content
+    again = _ballot(client, sam, club, vote_id, "yes")
+    assert again.status_code == 409
+    assert again.json()["error"] == "already_voted"
+    assert again.json()["yes"] == 2
+    vote = ClubDismantleVote.objects.get(id=vote_id)
+    assert vote.status == ClubDismantleVote.STATUS_OPEN
+
+
+def test_resolve_dismantle_only_once(client, db, django_user_model):
+    from wine_cellar.apps.club.services import resolve_dismantle
+
+    club, vote_id, _riley, _sam, lee = _three_member_vote(client, django_user_model)
+    stale = ClubDismantleVote.objects.get(id=vote_id)
+    rejected = _ballot(client, lee, club, vote_id, "no")
+    assert rejected.json()["status"] == "rejected"
+    # A second resolver holding a stale copy (the expiry beat, a racing last
+    # yes) must not flip it again, delete the club or notify twice.
+    with patch("wine_cellar.apps.club.tasks.notify_dismantle_resolved.delay") as notify:
+        result = resolve_dismantle(stale, ClubDismantleVote.STATUS_PASSED)
+    assert result.status == ClubDismantleVote.STATUS_REJECTED
+    assert Club.objects.filter(id=club.id).exists()
+    notify.assert_not_called()

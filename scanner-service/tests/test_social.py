@@ -90,13 +90,28 @@ async def test_comment_flow_en_and_too_long():
     update.callback_query = query
     await handler._club_flow().on_callback(update, MagicMock())
     assert t("en", "club.comment.prompt") in query.message.reply_text.call_args.args[0]
+    # The prompt carries a Cancel button.
+    prompt_markup = query.message.reply_text.call_args.kwargs["reply_markup"]
+    assert "\u2716\uFE0F Cancel" in _labels(prompt_markup)
     long = _update(text="x" * 281)
     await handler._club_flow().on_text(long, MagicMock())
     assert long.message.reply_text.call_args.args[0] == t("en", "club.comment.too_long")
+    # Only the next message counts: the too-long one used the prompt up, and
+    # the reply offers a one-tap retry instead of silently waiting.
+    retry = _labels(long.message.reply_text.call_args.kwargs["reply_markup"])
+    assert "\U0001F4AC Try again" in retry
+    stray = _update(text="unrelated message")
+    assert await handler._club_flow().on_text(stray, MagicMock()) is False
+    api.add_club_comment.assert_not_called()
+    # Tap Say something again, then the next message is posted.
+    query2 = _query(club_cb("cm", 88))
+    update.callback_query = query2
+    await handler._club_flow().on_callback(update, MagicMock())
     ok = _update(text="we had that in Stellenbosch")
     await handler._club_flow().on_text(ok, MagicMock())
-    api.add_club_comment.assert_called()
+    api.add_club_comment.assert_called_once()
     assert ok.message.reply_text.call_args.args[0] == t("en", "club.comment.saved")
+    assert "\u2630 Menu" in _labels(ok.message.reply_text.call_args.kwargs["reply_markup"])
 
 
 @pytest.mark.asyncio
@@ -119,7 +134,7 @@ async def test_comment_abandoned_by_command():
 
 
 @pytest.mark.asyncio
-async def test_comment_prompt_lost_says_tap_again():
+async def test_comment_prompt_expires_after_two_minutes():
     api = MagicMock()
     api.list_clubs.return_value = {
         "clubs": [{"id": 3, "is_last_used": True}],
@@ -132,10 +147,15 @@ async def test_comment_prompt_lost_says_tap_again():
     update.callback_query = query
     await flow.on_callback(update, MagicMock())
     state = flow.state_for("4242")
-    state["comment_at"] = state["comment_at"] - 20 * 60
+    # The window is two minutes now, not fifteen.
+    state["comment_at"] = state["comment_at"] - 3 * 60
     later = _update(text="hello")
-    await flow.on_text(later, MagicMock())
-    assert later.message.reply_text.call_args.args[0] == t("en", "club.comment.again")
+    claimed = await flow.on_text(later, MagicMock())
+    # An expired prompt does not swallow the message: it goes on to normal
+    # chat handling, and nothing is posted.
+    assert claimed is False
+    api.add_club_comment.assert_not_called()
+    assert flow.state_for("4242") is None
 
 
 @pytest.mark.asyncio
@@ -258,7 +278,9 @@ async def test_home_gains_list_and_tasteoff_buttons():
     await handler._club_flow()._show_home(update, 3)
     labels = _labels(update.message.reply_text.call_args.kwargs["reply_markup"])
     assert t("en", "club.list.title") in labels
-    assert t("en", "club.home.tasteoff") in labels
+    # Taste-off now lives in the English follow-up row with Say something / Menu.
+    assert "\U0001F3C6 Taste-off" in labels
+    assert "\u2630 Menu" in labels
     for row in update.message.reply_text.call_args.kwargs["reply_markup"].inline_keyboard:
         for button in row:
             assert len(button.callback_data.encode("utf-8")) <= CALLBACK_DATA_MAX

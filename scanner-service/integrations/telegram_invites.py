@@ -78,12 +78,12 @@ KNOWN_START = (
     "Hi <b>{name}</b>.\n\n"
     "You're in <b>{household}</b>.\n\n"
     "Send a photo of a bottle and I'll add it. A wine list works too.\n\n"
-    "/help if you want the rest."
+    "The buttons below are always here \u2014 <b>\u2630 Menu</b> has the rest."
 )
 KNOWN_START_NO_HH = (
     "Hi <b>{name}</b>.\n\n"
     "Send a photo of a bottle and I'll add it. A wine list works too.\n\n"
-    "/help if you want the rest."
+    "The buttons below are always here \u2014 <b>\u2630 Menu</b> has the rest."
 )
 I1_COPY = (
     "You're starting your own cellar, {name}.\n\n"
@@ -1066,13 +1066,13 @@ class InviteFlow:
         code = state.get("code") or ""
         display = state.get("display_name") or self._display_name(update)
         if api is None:
-            await update.message.reply_text(UNREACHABLE, reply_markup=remove_keyboard())
+            await update.message.reply_text(UNREACHABLE, reply_markup=self._bar_if_known(update))
             return False
         try:
             result = api.redeem_invite(code, chat_id, display, household_name=name)
         except Exception:
             logger.exception("[invite] typed-name redeem failed")
-            await update.message.reply_text(UNREACHABLE, reply_markup=remove_keyboard())
+            await update.message.reply_text(UNREACHABLE, reply_markup=self._bar_if_known(update))
             return False
         if result.get("status_code") == 409:
             suggestion = self._suggestion(result, name, display)
@@ -1086,19 +1086,20 @@ class InviteFlow:
         if error:
             if error != UNREACHABLE:
                 self.clear(chat_id)
-            await update.message.reply_text(error, reply_markup=remove_keyboard())
+            await update.message.reply_text(error, reply_markup=self._bar_if_known(update))
             return False
         self.clear(chat_id)
         await self._hot_add(chat_id, result)
         household = result.get("household_name") or name
+        bar = self._bar()
         if photo:
             await update.message.reply_text(
                 f"{household} it is. Reading the label\u2026",
-                reply_markup=remove_keyboard(),
+                reply_markup=bar,
             )
         else:
             await update.message.reply_text(
-                i2_text(household), reply_markup=remove_keyboard(),
+                i2_text(household), reply_markup=bar,
             )
         await self._ping_created(context, result, display)
         if result.get("first_cellar"):
@@ -1114,10 +1115,12 @@ class InviteFlow:
                 f"You're already in {household}. Send a photo of a bottle."
             )
             await self._hot_add(chat_id, result)
+            await self._send_bar(context, chat_id)
             return
         await self._hot_add(chat_id, result)
         bottles = result.get("bottle_count") or 0
         await query.edit_message_text(welcome_join(household, bottles), parse_mode="HTML")
+        await self._send_bar(context, chat_id)
         inviter = result.get("created_by_chat_id")
         display = result.get("display_name") or "Someone"
         if inviter:
@@ -1128,6 +1131,40 @@ class InviteFlow:
                 )
             except Exception as e:
                 logger.info(f"[invite] could not ping inviter {inviter}: {e}")
+
+    def _bar(self):
+        """The bottom bar once provisioned; a plain removal if the handler
+        has none (bare test doubles)."""
+        bar = getattr(self.handler, "bottom_bar", None)
+        if callable(bar):
+            try:
+                return bar()
+            except Exception:
+                logger.exception("[invite] bottom bar failed")
+        return remove_keyboard()
+
+    def _bar_if_known(self, update):
+        """Leaving the naming keyboard: a provisioned chat gets its bottom bar
+        back, a stranger gets a plain keyboard removal."""
+        known = getattr(self.handler, "_is_known", None)
+        if callable(known):
+            try:
+                if known(update):
+                    return self._bar()
+            except Exception:
+                pass
+        return remove_keyboard()
+
+    async def _send_bar(self, context, chat_id: str) -> None:
+        """An edited message cannot carry a reply keyboard, so the bar comes
+        in its own short message right after the welcome."""
+        sender = getattr(self.handler, "_nav", None)
+        if not callable(sender):
+            return
+        try:
+            await sender().send_bar_intro(context.bot, chat_id)
+        except Exception as e:
+            logger.info("[invite] bar intro failed for %s: %s", chat_id, e)
 
     async def _hot_add(self, chat_id: str, result: dict) -> None:
         household_id = result.get("household_id") or (result.get("household") or {}).get("id")

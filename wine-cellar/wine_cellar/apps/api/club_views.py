@@ -637,6 +637,11 @@ class ClubDismantleBallotView(ClubsEnabledMixin, ScannerAPIView):
         vote, err = cast_ballot(vote, request.user, choice)
         if err == "over":
             return Response({"error": "vote_closed"}, status=status.HTTP_409_CONFLICT)
+        if err == "already_voted":
+            return Response(
+                {"error": "already_voted", **serialize_vote(vote)},
+                status=status.HTTP_409_CONFLICT,
+            )
         if err == "no_ballot":
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
         if err == "bad_choice":

@@ -416,9 +416,22 @@ def resolve_dismantle(vote: ClubDismantleVote, status: str, rejector=None):
     club = vote.club
     club_name = club.name
     recipients = _ballot_recipients(vote)
+    now = timezone.now()
+    # Conditional update: only the first resolver (double tap, the last two
+    # members voting at once, the expiry beat) flips it and fans out.
+    won = ClubDismantleVote.objects.filter(
+        id=vote.id, status=ClubDismantleVote.STATUS_OPEN,
+    ).update(status=status, resolved_at=now)
+    if not won:
+        # Lost the race. If the winner passed it, the club (and this vote,
+        # by cascade) is gone already.
+        try:
+            vote.refresh_from_db()
+        except ClubDismantleVote.DoesNotExist:
+            vote.status = ClubDismantleVote.STATUS_PASSED
+        return vote
     vote.status = status
-    vote.resolved_at = timezone.now()
-    vote.save(update_fields=["status", "resolved_at"])
+    vote.resolved_at = now
     from wine_cellar.apps.club.tasks import notify_dismantle_resolved
 
     transaction.on_commit(
@@ -445,9 +458,15 @@ def cast_ballot(vote: ClubDismantleVote, user, choice: str):
         return vote, "no_ballot"
     if choice not in ("yes", "no"):
         return vote, "bad_choice"
-    ballot.choice = choice
-    ballot.decided_at = timezone.now()
-    ballot.save(update_fields=["choice", "decided_at"])
+    if ballot.choice == choice:
+        return vote, "already_voted"
+    # Conditional update on the choice we read: a second tap (same or other
+    # button) racing this one changes nothing and is told it already counted.
+    changed = ClubDismantleBallot.objects.filter(
+        id=ballot.id, choice=ballot.choice,
+    ).update(choice=choice, decided_at=timezone.now())
+    if not changed:
+        return vote, "already_voted"
     if choice == "no":
         resolve_dismantle(vote, ClubDismantleVote.STATUS_REJECTED, rejector=user)
         return _refresh_vote(vote), None
