@@ -17,6 +17,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from wine_cellar.apps.api.views import ScannerAPIView
+from wine_cellar.apps.club.ask import answer_club_ask
 from wine_cellar.apps.club.models import (
     CLUB_INVITE_MAX_USES,
     VISIBILITY_RANK,
@@ -33,7 +34,6 @@ from wine_cellar.apps.club.peek import (
     peek_summary,
     tighter_visibility,
 )
-from wine_cellar.apps.club.ask import answer_club_ask
 from wine_cellar.apps.club.services import (
     add_member,
     apply_policy,
@@ -199,7 +199,11 @@ class ClubDetailView(ClubsEnabledMixin, ScannerAPIView):
     def patch(self, request, pk):
         data = request.data if isinstance(request.data, dict) else {}
         membership = membership_of(request.user, pk)
-        club = membership.club if membership is not None else Club.objects.filter(id=pk).first()
+        club = (
+            membership.club
+            if membership is not None
+            else Club.objects.filter(id=pk).first()
+        )
         if club is None:
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
         if "kind" in data:
@@ -637,6 +641,11 @@ class ClubDismantleBallotView(ClubsEnabledMixin, ScannerAPIView):
         vote, err = cast_ballot(vote, request.user, choice)
         if err == "over":
             return Response({"error": "vote_closed"}, status=status.HTTP_409_CONFLICT)
+        if err == "already_voted":
+            return Response(
+                {"error": "already_voted", **serialize_vote(vote)},
+                status=status.HTTP_409_CONFLICT,
+            )
         if err == "no_ballot":
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
         if err == "bad_choice":
@@ -692,9 +701,13 @@ class ClubInviteRedeemView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
         if not code:
-            return Response({"error": "code is required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "code is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
         if not chat_id:
-            return Response({"error": "chat_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "chat_id is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
         if not display_name:
             return Response(
                 {"error": "display_name is required"},

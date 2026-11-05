@@ -44,7 +44,9 @@ class HouseholdMembership(models.Model):
     role = models.CharField(max_length=10, choices=ROLE_CHOICES, default="member")
     is_default = models.BooleanField(
         default=False,
-        help_text="If true, this is the user's default household for API/bot interactions.",
+        help_text=(
+            "If true, this is the user's default household for API/bot interactions."
+        ),
     )
     created = models.DateTimeField(auto_now_add=True)
 
@@ -57,7 +59,10 @@ class HouseholdMembership(models.Model):
 
     def save(self, *args, **kwargs):
         # If this is the user's first membership, make it default
-        if not self.pk and not HouseholdMembership.objects.filter(user=self.user).exists():
+        if (
+            not self.pk
+            and not HouseholdMembership.objects.filter(user=self.user).exists()
+        ):
             self.is_default = True
         super().save(*args, **kwargs)
 
@@ -115,7 +120,9 @@ def generate_api_key():
     return secrets.token_hex(32)
 
 
-INVITE_CODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+INVITE_CODE_ALPHABET = (
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+)
 INVITE_CODE_LENGTH = 8
 INVITE_TTL = timedelta(days=30)
 

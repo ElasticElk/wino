@@ -192,8 +192,12 @@ class ClubEvent(models.Model):
 
     class Meta:
         indexes = [
-            models.Index(fields=["club", "-created"], name="clubevent_club_created_idx"),
-            models.Index(fields=["club", "item_id", "kind"], name="clubevent_item_kind_idx"),
+            models.Index(
+                fields=["club", "-created"], name="clubevent_club_created_idx"
+            ),
+            models.Index(
+                fields=["club", "item_id", "kind"], name="clubevent_item_kind_idx"
+            ),
         ]
         constraints = [
             models.UniqueConstraint(
@@ -219,7 +223,9 @@ class ClubEventDelivery(models.Model):
 
     class Meta:
         constraints = [
-            models.UniqueConstraint(fields=["event", "chat_id"], name="unique_event_chat"),
+            models.UniqueConstraint(
+                fields=["event", "chat_id"], name="unique_event_chat"
+            ),
         ]
 
 
@@ -270,7 +276,9 @@ class ClubDismantleBallot(models.Model):
 
     class Meta:
         constraints = [
-            models.UniqueConstraint(fields=["vote", "user"], name="unique_dismantle_ballot"),
+            models.UniqueConstraint(
+                fields=["vote", "user"], name="unique_dismantle_ballot"
+            ),
         ]
 
 

@@ -255,7 +255,12 @@ class WineListItemCreateView(ListsEnabledMixin, ScannerAPIView):
             )
         payload = sanitize_payload(data.get("payload") if "payload" in data else data)
         producer = str(data.get("producer") or "").strip()[:100]
-        grape = str(data.get("grape") or payload.get("grape_variety") or payload.get("grape") or "").strip()[:100]
+        grape = str(
+            data.get("grape")
+            or payload.get("grape_variety")
+            or payload.get("grape")
+            or ""
+        ).strip()[:100]
         barcode = str(data.get("barcode") or payload.get("barcode") or "").strip()[:100]
         wine_type = str(data.get("wine_type") or payload.get("wine_type") or "")[:2]
         country = str(data.get("country") or payload.get("country") or "")[:3]
@@ -402,11 +407,35 @@ class WineListItemToCellarView(ListsEnabledMixin, ScannerAPIView):
             )
         if item.moved_at is not None:
             return Response(
-                {"error": "already_moved", "id": item.id},
+                {
+                    "error": "already_moved", "id": item.id,
+                    "wine_name": f"{item.name} {item.vintage or ''}".strip(),
+                },
                 status=status.HTTP_409_CONFLICT,
             )
         household = self.get_household(request)
         data = request.data if isinstance(request.data, dict) else {}
+        with transaction.atomic():
+            # Claim the row first with a conditional update. A double tap (or
+            # two devices) waits on the row lock here and then finds it moved,
+            # so stock is added once. Any failure below rolls the claim back.
+            claimed = WineListItem.objects.filter(
+                id=item.id, moved_at__isnull=True,
+            ).update(moved_at=timezone.now())
+            if not claimed:
+                return Response(
+                    {
+                        "error": "already_moved", "id": item.id,
+                        "wine_name": f"{item.name} {item.vintage or ''}".strip(),
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            response = self._move(request, household, item, data)
+            if response.status_code >= 400:
+                transaction.set_rollback(True)
+            return response
+
+    def _move(self, request, household, item, data):
         ack_duplicate = bool(data.get("ack_duplicate"))
         confirm_duplicate = bool(data.get("confirm_duplicate"))
         wine = _create_or_find_wine(request, household, item)

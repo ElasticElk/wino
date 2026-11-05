@@ -100,7 +100,9 @@ def test_storage_is_shared_across_the_household(client, member, owner, household
     assert list(response.context["storages"]) != []
 
 
-def test_a_user_with_no_household_sees_nothing(client, db, django_user_model, owners_wine):
+def test_a_user_with_no_household_sees_nothing(
+    client, db, django_user_model, owners_wine
+):
     """`filter(household=None)` would match orphaned rows — none() must win."""
     loner = django_user_model.objects.create_user(username="loner", password="pw")
     assert get_user_household(loner) is None
@@ -131,6 +133,8 @@ def test_household_member_ids_falls_back_to_self(db, django_user_model):
     assert household_member_ids(loner) == [loner.pk]
 
 
-def test_requested_household_is_ignored_unless_you_belong(owner, other_household, household):
+def test_requested_household_is_ignored_unless_you_belong(
+    owner, other_household, household
+):
     """Passing someone else's household id must not grant access to it."""
     assert get_user_household(owner, household_id=other_household.pk) == household

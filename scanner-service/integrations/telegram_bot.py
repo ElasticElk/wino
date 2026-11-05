@@ -324,13 +324,31 @@ def _cb(action: str, wine_id: int | None = None, barcode: str = "",
         parts.append(f"i:{item_id}")
     if row is not None:
         parts.append(f"r:{row}")
-    data = ",".join(parts)
+    return _fit_callback(",".join(parts))
+
+
+def _fit_callback(data: str) -> str:
+    """Raise if callback_data is over Telegram's 64-byte limit. Shared by
+    ``_cb()`` and the ``mn:`` menu namespace (telegram_nav.menu_cb)."""
     size = len(data.encode("utf-8"))
     if size > CALLBACK_DATA_MAX:
         raise ValueError(
             f"callback_data is {size} bytes (Telegram limit {CALLBACK_DATA_MAX}): {data!r}"
         )
     return data
+
+
+HOWTO_TEXT = (
+    "\U0001F4F8 <b>Adding a wine</b>\n\n"
+    "1. Take a photo of the <b>front label</b> — straight on, whole "
+    "label in frame, no flash glare.\n"
+    "2. Send it to me here. No caption needed.\n"
+    "3. I'll show you what I read off it — tap <b>Add to cellar</b>.\n"
+    "4. Pick where you're putting the bottle.\n\n"
+    "That's it. Ratings and a price estimate arrive a few seconds later.\n\n"
+    "\U0001F4E6 A photo of a <b>barcode</b> works too — I'll look it up "
+    "and ask for a label photo if I don't recognise it."
+)
 
 
 CARD_FINISHED = (
@@ -657,6 +675,10 @@ def build_stock_update_view(
         lines.append("")
         lines.append(VOTE_PROMPT)
         keyboard.append(vote_keyboard_row(item_id))
+    from integrations.telegram_nav import follow_up_rows
+    keyboard.extend(follow_up_rows(
+        "added" if action == "in" else "removed", {"wine_id": wine_id},
+    ))
     return "\n".join(lines), InlineKeyboardMarkup(keyboard)
 
 
@@ -1083,10 +1105,14 @@ def _wine_url(api, wine_id) -> str:
 
 
 def _wine_followup_rows(wine_id) -> list:
+    from integrations.telegram_nav import follow_up_rows
+    # View wine is already on the first row; without a wine_id the follow-up
+    # row is just Scan another + ☰ Menu.
+    rest = follow_up_rows("added")[0]
     return [[
         InlineKeyboardButton(ADD_PHOTO_INFO, callback_data=_cb("ai", wine_id=wine_id)),
         InlineKeyboardButton(VIEW_WINE, callback_data=_cb("det", wine_id=wine_id)),
-    ]]
+    ], rest]
 
 
 def _append_wine_url(text: str, api, wine_id) -> str:
@@ -2458,6 +2484,13 @@ def _group_wines(wines: list[dict], dim: str) -> list[tuple[str, str, int]]:
 
 
 def _build_browse_view(session: BrowseSession, session_key: str) -> tuple[str, InlineKeyboardMarkup]:
+    """Build the browse view, ending in Search / Status / ☰ Menu."""
+    from integrations.telegram_nav import with_follow_up
+    text, markup = _build_browse_view_body(session, session_key)
+    return text, with_follow_up(markup, "fridge")
+
+
+def _build_browse_view_body(session: BrowseSession, session_key: str) -> tuple[str, InlineKeyboardMarkup]:
     """Build the appropriate view for the current browse state."""
     wines = session.filtered_wines
     total_bottles = sum(w.get("stock_count", 0) for w in wines)
@@ -2968,6 +3001,17 @@ class TelegramBotHandler:
             self._clubs = flow
         return flow
 
+    def _nav(self):
+        flow = getattr(self, "_navflow", None)
+        if flow is None:
+            from integrations.telegram_nav import NavFlow
+            flow = NavFlow(self)
+            self._navflow = flow
+        return flow
+
+    def bottom_bar(self):
+        return self._nav().bar()
+
     def set_flags(self, config: dict | None):
         flags = {}
         config = config or {}
@@ -3187,6 +3231,8 @@ class TelegramBotHandler:
                 application.bot, admin_ids, flags=self.flags,
             )
 
+        # Live bot only: existing chats get the bottom bar on first contact.
+        self._bar_rollout = True
         app = (
             Application.builder()
             .token(self.bot_token)
@@ -3205,6 +3251,7 @@ class TelegramBotHandler:
         app.add_handler(CommandHandler("list", self._cmd_list, filters=user_filter))
         app.add_handler(CommandHandler("club", self._cmd_club, filters=user_filter))
         app.add_handler(CommandHandler("help", self._cmd_help, filters=user_filter))
+        app.add_handler(CommandHandler("menu", self._cmd_menu, filters=user_filter))
         app.add_handler(CommandHandler("pending", self._cmd_pending, filters=user_filter))
         app.add_handler(CommandHandler("flush", self._cmd_flush, filters=user_filter))
         app.add_handler(CommandHandler("storages", self._cmd_storages, filters=user_filter))
@@ -3303,11 +3350,47 @@ class TelegramBotHandler:
         parts = (update.message.text or "").split()
         if parts and parts[0].split("@")[0] == "/start" and len(parts) > 1:
             return
-        flow = self._invite_flow()
         chat_id = str(update.effective_chat.id)
+        bot = getattr(context, "bot", None)
+        command = parts[0].split("@")[0] if parts else ""
+        # /start and /help carry the bar themselves; don't send it twice.
+        brings_bar = command in ("/start", "/help")
+        if await self._abandon_pending_states(chat_id, bot):
+            if not brings_bar:
+                try:
+                    await self._nav().send_bar_intro(bot, chat_id)
+                except Exception as e:
+                    logger.info("[nav] bar after naming failed: %s", e)
+        elif not brings_bar:
+            # Missing or out-of-date bar (a flag changed, an expired
+            # location ask): commands repair it too, not only typed text.
+            await self._nav().ensure_bar(bot, chat_id)
+
+    def _place_pending(self, chat_id: str) -> bool:
+        router = getattr(self, "_router", None)
+        if router is None:
+            return False
+        try:
+            return bool(router._pending_place(chat_id))
+        except Exception:
+            return False
+
+    async def _abandon_pending_states(self, chat_id: str, bot=None) -> bool:
+        """Drop every "your next message is ..." state for a chat.
+
+        A command or a bottom-bar / menu tap means the person moved on, so a
+        half-typed cellar name, club comment, search prompt or place request
+        must not swallow their next message. Returns True when a naming step
+        (which shows its own reply keyboard) was dropped, so the caller can
+        put the bottom bar back.
+        """
+        naming = False
+        flow = self._invite_flow()
         state = flow.state_for(chat_id)
         if state and state.get("step") in ("name", "confirm"):
             flow.clear(chat_id)
+            naming = True
+        await self._nav().drop_pending(chat_id, bot)
         club = self._club_flow()
         club_state = club.state_for(chat_id)
         if club_state and club_state.get("step") in (
@@ -3315,10 +3398,31 @@ class TelegramBotHandler:
             "comment", "tasteoff_title", "tasteoff_label", "club_list_add",
             "tasteoff_setup", "club_post",
         ):
+            naming = naming or club_state.get("step") in ("compound_name", "compound_consent")
             club.clear(chat_id)
         router = getattr(self, "_router", None)
         if router is not None:
+            # A pending "near me" shows its own location keyboard instead of
+            # the bar; dropping it means the bar should come back too.
+            try:
+                naming = naming or bool(router._pending_place(chat_id))
+            except Exception:
+                pass
             await router.abandon(chat_id)
+        return naming
+
+    def _naming_in_progress(self, chat_id: str) -> bool:
+        """A cellar or club name is being typed: only exact bar taps are labels."""
+        # Only the name step: in "confirm" the name is already typed and the
+        # buttons decide, so "menu" there is the menu.
+        state = self._invite_flow().state_for(chat_id)
+        if state and state.get("step") == "name":
+            return True
+        club_state = self._club_flow().state_for(chat_id)
+        return bool(club_state and club_state.get("step") in (
+            "name", "compound_name", "compound_consent", "tasteoff_title",
+            "tasteoff_label", "club_list_add", "club_post",
+        ))
 
     async def _stranger_fallback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Anything at all from an unprovisioned chat gets the onboarding reply."""
@@ -3405,8 +3509,11 @@ class TelegramBotHandler:
             text = KNOWN_START.format(name=name, household=esc(household_name))
         else:
             text = KNOWN_START_NO_HH.format(name=name)
-        await update.message.reply_text(text, parse_mode="HTML")
+        await update.message.reply_text(
+            text, parse_mode="HTML", reply_markup=self.bottom_bar(),
+        )
         cid = str(update.effective_chat.id)
+        self._nav().mark_bar_given(cid)
         if not self._country_for(cid) and cid not in self._country_asked:
             self._country_asked.add(cid)
             await self._invite_flow()._ask_country(context, cid)
@@ -3415,6 +3522,9 @@ class TelegramBotHandler:
         is_staff = str(update.effective_chat.id) in getattr(self, "admin_chat_ids", [])
         text = (
             "🍷 <b>Whiney</b>\n\n"
+            "The buttons at the bottom do the everyday things; "
+            "<b>\u2630 Menu</b> has the rest. Every command still works:\n\n"
+            "/menu \u2014 Home menu\n"
             "/fridge \u2014 What's in the fridge (Catch up walks a drawer)\n"
             "/status \u2014 Inventory summary\n"
             "/search \u2014 Find a wine by name\n"
@@ -3470,7 +3580,14 @@ class TelegramBotHandler:
             "📸 <b>Reply to a wine edit message</b> with a label photo to update details.\n"
             "📷 Send a <b>barcode photo</b> (no reply) to scan without the hardware scanner."
         )
-        await update.message.reply_text(text, parse_mode="HTML")
+        await update.message.reply_text(
+            text, parse_mode="HTML", reply_markup=self.bottom_bar(),
+        )
+        self._nav().mark_bar_given(update.effective_chat.id)
+
+    async def _cmd_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/menu — the ☰ Menu home screen, same as the bottom-bar button."""
+        await self._nav().on_label(update, context, "menu")
 
     async def _unknown_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await self._club_flow().on_text(update, context):
@@ -3530,6 +3647,59 @@ class TelegramBotHandler:
                 typing_task = asyncio.get_running_loop().create_task(_kick_typing())
             except Exception:
                 typing_task = None
+
+            # Bottom-bar labels beat everything typed: never a search, a club
+            # comment, a cellar name or the answer to a pending prompt.
+            from integrations.chat_router import match_label
+            flags_now = getattr(self, "flags", None) or {}
+            label = match_label(
+                text, flags_now, exact_only=self._naming_in_progress(chat_id),
+            )
+            # A stale List/Clubs tap (flag now off) answers with a fresh bar
+            # itself. A pending "near me" ask restores the bar itself (with the
+            # place search, or when the person moves on). Otherwise repair a
+            # missing or out-of-date bar first.
+            from integrations.chat_router import LABEL_FLAGS
+            flag_off_tap = (
+                label in LABEL_FLAGS and not flags_now.get(LABEL_FLAGS[label])
+            )
+            # A label repairs the bar itself (on_label), after any naming
+            # keyboard it drops, so it never sends two.
+            if (
+                label is None and not flag_off_tap
+                and not self._place_pending(chat_id)
+                and self._nav().needs_bar(chat_id)
+            ):
+                await pacer.wait()  # the intro is the first reply; keep the floor
+                await self._nav().ensure_bar(getattr(context, "bot", None), chat_id)
+            if label is not None:
+                handled_by = "label"
+                self._text_meta["intent"] = f"label:{label}"
+                self._text_meta["outcome"] = "answered"
+                await pacer.wait()
+                await self._nav().on_label(update, context, label)
+                return
+
+            # A "near me" ask only survives an area name; anything else (even
+            # a message the router never sees) drops it and the bar returns.
+            if self._place_pending(chat_id):
+                from integrations.chat_router import _looks_like_area
+                # Under 3 characters never reaches the router's area check.
+                if len(text) < 3 or not _looks_like_area(text):
+                    router = getattr(self, "_router", None)
+                    router._drop_place(chat_id)
+                    await pacer.wait()
+                    try:
+                        await self._nav().send_bar_intro(getattr(context, "bot", None), chat_id)
+                    except Exception as e:
+                        logger.info("[nav] bar after place failed: %s", e)
+
+            # "Type a wine name…" — only this one message is the query.
+            if await self._nav().on_pending_text(update, context, text):
+                handled_by = "pending"
+                self._text_meta["intent"] = "search"
+                self._text_meta["outcome"] = "answered"
+                return
 
             if await self._invite_flow().on_text(update, context):
                 handled_by = "invite"
@@ -3692,7 +3862,11 @@ class TelegramBotHandler:
                 text += "\n" + copy_t(loc, "list.status.ready")
             if self.flag_on("feature_clubs"):
                 text += "\n" + copy_t(loc, "club.status.ready")
-            await update.message.reply_text(text, parse_mode="HTML")
+            from integrations.telegram_nav import follow_up_rows
+            await update.message.reply_text(
+                text, parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(follow_up_rows("status")),
+            )
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
 
@@ -3766,10 +3940,12 @@ class TelegramBotHandler:
             return
 
         shown = html.escape(query, quote=False)
+        from integrations.telegram_nav import follow_up_rows
         if not wines:
             await update.message.reply_text(
                 copy_t(locale, "chat.search.none", query=shown),
                 parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(follow_up_rows("search")),
             )
             return
 
@@ -3791,7 +3967,7 @@ class TelegramBotHandler:
 
         await update.message.reply_text(
             "\n".join(lines), parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=InlineKeyboardMarkup(keyboard + follow_up_rows("search")),
         )
 
     async def _cmd_recent(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3894,7 +4070,11 @@ class TelegramBotHandler:
                     text += "  📦 No drawers"
                 text += f" | 🍾 {s.get('bottles', 0)} bottles\n"
 
-            await update.message.reply_text(text, parse_mode="HTML")
+            from integrations.telegram_nav import follow_up_rows
+            await update.message.reply_text(
+                text, parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(follow_up_rows("cellar")),
+            )
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
 
@@ -3950,11 +4130,14 @@ class TelegramBotHandler:
         if new_api:
             self._chat_id_to_api[chat_id] = new_api
             self._catchup_flow().drop(chat_id)
+            self._nav().forget_household(chat_id)
             text = f"\u2705 Switched to <b>{household_name}</b>"
+            from integrations.telegram_nav import MENU, menu_cb
             buttons = InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("\U0001f9ca Fridge", callback_data="cmd:fridge"),
-                    InlineKeyboardButton("\U0001f4ca Status", callback_data="cmd:status"),
+                    InlineKeyboardButton("\U0001f9ca Fridge", callback_data=menu_cb("x", "fridge")),
+                    InlineKeyboardButton("\U0001f4ca Status", callback_data=menu_cb("x", "status")),
+                    InlineKeyboardButton(MENU, callback_data=menu_cb("new")),
                 ],
             ])
         else:
@@ -3990,7 +4173,11 @@ class TelegramBotHandler:
                 if m.get("telegram_chat_id"):
                     text += f" (<code>{m['telegram_chat_id']}</code>)"
                 text += "\n"
-            await update.message.reply_text(text, parse_mode="HTML")
+            from integrations.telegram_nav import follow_up_rows
+            await update.message.reply_text(
+                text, parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(follow_up_rows("household")),
+            )
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
 
@@ -4114,6 +4301,11 @@ class TelegramBotHandler:
         if not self._is_known(update):
             await self._greet_stranger(update)
             return
+        # A photo is the "next message" too: a search or comment prompt
+        # doesn't outlive it.
+        await self._nav().drop_pending(
+            str(update.effective_chat.id), getattr(context, "bot", None),
+        )
         await self._handle_photo(update, context)
 
     async def _cmd_adduser(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4206,7 +4398,11 @@ class TelegramBotHandler:
         from integrations.telegram_invites import welcome_member
         text = welcome_member(display_name, household_name)
         try:
-            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+            await context.bot.send_message(
+                chat_id=chat_id, text=text, parse_mode="HTML",
+                reply_markup=self.bottom_bar(),
+            )
+            self._nav().mark_bar_given(chat_id)
             return True
         except Exception as e:
             logger.info(f"[adduser] could not welcome {chat_id}: {e}")
@@ -4759,6 +4955,12 @@ class TelegramBotHandler:
             return card.get("paid")
         return self._pending_paid.get(wine_id)
 
+    def _added_markup(self, wine_id, *, drank: bool = False) -> InlineKeyboardMarkup:
+        """Follow-ups under a plain "Added" / "Drank" line: never a dead end."""
+        from integrations.telegram_nav import follow_up_rows
+        kind = "removed" if drank else "added"
+        return InlineKeyboardMarkup(follow_up_rows(kind, {"wine_id": wine_id}))
+
     async def _tap_busy(self, query) -> None:
         try:
             await query.answer(BUSY_TAP, show_alert=True)
@@ -4817,6 +5019,7 @@ class TelegramBotHandler:
                 f"📥 <b>Added:</b> {card.get('wine_name') or name}\n"
                 f"📊 In stock: {card.get('stock_count') or 0}",
                 parse_mode="HTML",
+                reply_markup=self._added_markup(wine_id),
             )
             return
         if paid is not None:
@@ -5176,11 +5379,55 @@ class TelegramBotHandler:
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
+        guard_key = await self._claim_confirm(query)
+        if guard_key is False:
+            return
+        data = getattr(query, "data", "") or ""
+        if not data.startswith("mn:") and self._is_known(update):
+            # Any other button means the person moved on: a pending search or
+            # comment must not swallow the text step that button may start.
+            await self._nav().drop_pending(
+                str(update.effective_chat.id), getattr(context, "bot", None),
+            )
+        try:
+            ok = await self._handle_callback_once(update, context)
+        except Exception:
+            ok = False
+            raise
+        finally:
+            if guard_key:
+                # Done: a short cooldown against a queued repeat. Failed
+                # (raised, or the store hiccupped): free for a retry now.
+                if ok is False:
+                    self._nav().guard.release(guard_key)
+                else:
+                    self._nav().guard.done(guard_key)
+        return ok
+
+    async def _claim_confirm(self, query):
+        """Double-tap safety for yes/no buttons. None: not a confirm button.
+        False: a repeat tap, already answered "Already done". Else the claim key."""
+        from integrations.telegram_nav import answer_already_done, is_confirm
+        if not is_confirm(getattr(query, "data", "") or ""):
+            return None
+        if isinstance(getattr(query, "message", None), InaccessibleMessage):
+            return None
+        guard = self._nav().guard
+        key = guard.key(query)
+        if not guard.claim(key):
+            logger.info("[tap] repeat tap on %r", (query.data or "")[:64])
+            await answer_already_done(query)
+            return False
+        return key
+
+    async def _handle_callback_once(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
         try:
             return await self._dispatch_callback(update, context)
         except StoreError:
             logger.exception("[tap] store")
             await self._resend_photo(query)
+            return False
         except BadRequest as e:
             if not _not_modified(e):
                 raise
@@ -5194,6 +5441,9 @@ class TelegramBotHandler:
         query = update.callback_query
 
         if await self._reject_inaccessible(query, context):
+            return
+
+        if await self._nav().on_callback(update, context):
             return
 
         if await self._invite_flow().on_callback(update, context):
@@ -5252,14 +5502,15 @@ class TelegramBotHandler:
             return
 
         if query.data.startswith("cmd:"):
+            # Old "Switched to" buttons. A callback update has no .message, so
+            # the command runs through the same shim the menu uses.
+            from integrations.telegram_nav import ArgsContext, TapUpdate
             cmd = query.data.split(":")[1]
-            api = self._get_api(query)  # re-fetch after potential switch
+            tap = TapUpdate(update, query.message, f"/{cmd}")
             if cmd == "fridge":
-                await _safe_edit(query,"\U0001f9ca Loading fridge...")
-                await self._cmd_fridge(update, context)
+                await self._cmd_fridge(tap, ArgsContext(context))
             elif cmd == "status":
-                await _safe_edit(query,"\U0001f4ca Loading status...")
-                await self._cmd_status(update, context)
+                await self._cmd_status(tap, ArgsContext(context))
             return
 
         if action in ("wl", "wlp", "wli"):
@@ -5285,17 +5536,11 @@ class TelegramBotHandler:
             return
 
         if action == "howto":
+            from integrations.telegram_nav import follow_up_rows
             await _safe_edit(query,
-                "\U0001F4F8 <b>Adding a wine</b>\n\n"
-                "1. Take a photo of the <b>front label</b> — straight on, whole "
-                "label in frame, no flash glare.\n"
-                "2. Send it to me here. No caption needed.\n"
-                "3. I'll show you what I read off it — tap <b>Add to cellar</b>.\n"
-                "4. Pick where you're putting the bottle.\n\n"
-                "That's it. Ratings and a price estimate arrive a few seconds later.\n\n"
-                "\U0001F4E6 A photo of a <b>barcode</b> works too — I'll look it up "
-                "and ask for a label photo if I don't recognise it.",
+                HOWTO_TEXT,
                 parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(follow_up_rows("generic")),
             )
             return
 
@@ -5683,6 +5928,7 @@ class TelegramBotHandler:
                         f"📥 <b>Added:</b> {card.get('wine_name') or 'that wine'}\n"
                         f"📊 In stock: {card.get('stock_count') or 0}",
                         parse_mode="HTML",
+                        reply_markup=self._added_markup(wine_id),
                     )
                 return
             if not self._claim_card(query.message):
@@ -5716,6 +5962,7 @@ class TelegramBotHandler:
                         )
                         if drank else f"📥 <b>Added:</b> {html.escape(str(name), quote=False)}",
                         parse_mode="HTML",
+                        reply_markup=self._added_markup(wine_id, drank=drank),
                     )
                     await self._celebrate(context, query.message.chat_id, result)
                     return
@@ -5732,6 +5979,7 @@ class TelegramBotHandler:
                         f"📥 <b>Added:</b> {name}\n"
                         f"📊 In stock: {result.get('stock_count', 0)}",
                         parse_mode="HTML",
+                        reply_markup=self._added_markup(wine_id),
                     )
                 await self._celebrate(context, query.message.chat_id, result)
             except StoreError:
@@ -5853,6 +6101,7 @@ class TelegramBotHandler:
                         f"📥 <b>Added:</b> {card.get('wine_name') or 'that wine'}\n"
                         f"📊 In stock: {card.get('stock_count') or 0}",
                         parse_mode="HTML",
+                        reply_markup=self._added_markup(wine_id),
                     )
                     return
                 storages = api.list_storages()
@@ -5919,6 +6168,7 @@ class TelegramBotHandler:
                             keyboard = [[InlineKeyboardButton(
                                 "↩️ Undo", callback_data=_cb("ua", wine_id=wine_id),
                             )]]
+                            keyboard.extend(_wine_followup_rows(wine_id))
                             await _safe_edit(query,
                                 f"📥 <b>Added:</b> {result['wine_name']}\n"
                                 f"📍 {storage_name}\n"
@@ -5964,6 +6214,7 @@ class TelegramBotHandler:
                         f"📥 <b>Added:</b> {card.get('wine_name') or 'that wine'}\n"
                         f"📊 In stock: {card.get('stock_count') or 0}",
                         parse_mode="HTML",
+                        reply_markup=self._added_markup(wine_id),
                     )
                     return
                 # Look up storage name from id
@@ -8409,6 +8660,7 @@ class TelegramBotHandler:
                 f"\U0001F4E5 <b>Added:</b> {result.get('wine_name') or wine.get('name')}\n"
                 f"\U0001F4CA In stock: {result.get('stock_count', '?')}",
                 parse_mode="HTML",
+                reply_markup=self._added_markup(wine["id"]),
             )
             return True
         if action == "pick" and wines:
@@ -8492,6 +8744,7 @@ class TelegramBotHandler:
                 f"That's <b>{data.get('name')}</b> {data.get('vintage') or ''} "
                 f"already in the cellar.",
                 parse_mode="HTML",
+                reply_markup=self._added_markup(wine["id"]),
             )
             return True
 

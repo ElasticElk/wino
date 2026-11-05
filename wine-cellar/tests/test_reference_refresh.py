@@ -22,11 +22,15 @@ GOOD = {
     "critic_score_reasoning": "Tim Atkin SA Report 2022 gave the 2020 vintage 92pts",
     "vivino_rating": 4.1,
     "vivino_rating_confidence": "medium",
-    "vivino_rating_reasoning": "Vivino averages 4.1 across ~250 ratings on the wine page",
+    "vivino_rating_reasoning": (
+        "Vivino averages 4.1 across ~250 ratings on the wine page"
+    ),
     "market_price": 240.0,
     "market_price_currency": "ZAR",
     "market_price_confidence": "high",
-    "market_price_reasoning": "Listed R230-R255 across Checkers, Woolworths and Norman Goodfellows",
+    "market_price_reasoning": (
+        "Listed R230-R255 across Checkers, Woolworths and Norman Goodfellows"
+    ),
 }
 
 
@@ -131,7 +135,9 @@ def test_low_confidence_is_not_persisted(wine):
 
 def test_generic_reasoning_is_rejected(wine):
     hand_wavy = dict(GOOD, critic_score_reasoning="based on the grape variety")
-    with patch("wine_cellar.apps.wine.references.fetch_references", return_value=hand_wavy):
+    with patch(
+        "wine_cellar.apps.wine.references.fetch_references", return_value=hand_wavy
+    ):
         perform_reference_refresh(wine.id)
 
     wine.refresh_from_db()

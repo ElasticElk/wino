@@ -16,7 +16,10 @@ from datetime import timedelta
 from django.conf import settings
 from django.utils import timezone
 
-from wine_cellar.apps.wine.grok_references import fetch_references, validate_reference_field
+from wine_cellar.apps.wine.grok_references import (
+    fetch_references,
+    validate_reference_field,
+)
 from wine_cellar.apps.wine.models import Wine
 
 logger = logging.getLogger(__name__)
@@ -79,13 +82,22 @@ def validated_fields(data: dict, fallback_currency: str) -> tuple[dict, list, di
         details["critic_score"] = {"value": int(critic), "confidence": conf}
 
     vivino = data.get("vivino_rating")
-    if validate_reference_field(
-        vivino, data.get("vivino_rating_confidence"), data.get("vivino_rating_reasoning"),
-    ) and isinstance(vivino, (int, float)) and 0 <= vivino <= 5:
+    if (
+        validate_reference_field(
+            vivino,
+            data.get("vivino_rating_confidence"),
+            data.get("vivino_rating_reasoning"),
+        )
+        and isinstance(vivino, (int, float))
+        and 0 <= vivino <= 5
+    ):
         conf = (data.get("vivino_rating_confidence") or "").lower()
         values["vivino_rating"] = round(float(vivino), 1)
         confidences.append(conf)
-        details["vivino_rating"] = {"value": round(float(vivino), 1), "confidence": conf}
+        details["vivino_rating"] = {
+            "value": round(float(vivino), 1),
+            "confidence": conf,
+        }
 
     price = data.get("market_price")
     if validate_reference_field(

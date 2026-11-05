@@ -66,14 +66,18 @@ def test_fifth_sauvignon(playing):
         StorageItem.objects.create(storage=storage, wine=wine, user=user)
         unlocked = award_for_add(wine, user)
     titles = [u["title"] for u in unlocked]
-    assert any("5× Sauvignon Blanc" in t or "5" in t and "Sauvignon" in t for t in titles)
+    assert any(
+        "5× Sauvignon Blanc" in t or "5" in t and "Sauvignon" in t for t in titles
+    )
 
 
 def test_backfill_on_existing_cellar(playing):
     user, household, storage = playing
     household.gamification_enabled = False
     household.save(update_fields=["gamification_enabled"])
-    wine = WineFactory(user=user, household=household, country="FR", producer="Leflaive")
+    wine = WineFactory(
+        user=user, household=household, country="FR", producer="Leflaive"
+    )
     StorageItem.objects.create(storage=storage, wine=wine, user=user)
     assert award_for_add(wine, user) == []
 
@@ -81,7 +85,9 @@ def test_backfill_on_existing_cellar(playing):
     household.save(update_fields=["gamification_enabled"])
     filled = backfill(household, user)
     assert filled >= 1
-    assert CellarAchievement.objects.filter(household=household, slug="country").exists()
+    assert CellarAchievement.objects.filter(
+        household=household, slug="country"
+    ).exists()
 
 
 def test_stock_add_drank_awards_first_bottle(client, playing):

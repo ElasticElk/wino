@@ -53,7 +53,9 @@ def _fridge(household):
     return Storage.objects.get(household=household, name="Fridge")
 
 
-def _create_global(client, staff, name="New World Cab", description="Cabs that drink well now."):
+def _create_global(
+    client, staff, name="New World Cab", description="Cabs that drink well now."
+):
     _enable("feature_clubs", "feature_global_clubs")
     return _auth(client, staff).post(
         reverse("api-clubs-global"),

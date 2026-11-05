@@ -25,7 +25,12 @@ from wine_cellar.apps.wine.achievements import (
     serialize_achievement,
 )
 from wine_cellar.apps.wine.chat_stats import chat_stats
-from wine_cellar.apps.wine.models import CellarAchievement, TasteIntent, Wine, WineListItem
+from wine_cellar.apps.wine.models import (
+    CellarAchievement,
+    TasteIntent,
+    Wine,
+    WineListItem,
+)
 from wine_cellar.apps.wine.taste import record_intent, serialize_snapshot
 
 from .models import (
@@ -295,7 +300,10 @@ def suggest_household_name(taken: str, display_name: str = "") -> str:
 def _name_taken_response(name, display_name=""):
     # Names are global; don't echo the taken one back to a stranger.
     return Response(
-        {"error": NAME_TAKEN, "suggested_name": suggest_household_name(name, display_name)},
+        {
+            "error": NAME_TAKEN,
+            "suggested_name": suggest_household_name(name, display_name),
+        },
         status=status.HTTP_409_CONFLICT,
     )
 
@@ -425,7 +433,9 @@ class ScannerConfigView(APIView):
 
         # Registered scanners
         scanners = []
-        for sc in Scanner.objects.filter(is_active=True).select_related("user", "household"):
+        for sc in Scanner.objects.filter(is_active=True).select_related(
+            "user", "household"
+        ):
             token = Token.objects.filter(user=sc.user).first()
             if token:
                 sc_currency = "EUR"
@@ -501,7 +511,9 @@ class HouseholdView(APIView):
                 ).select_related("household").first()
 
         if not membership:
-            return Response({"error": "No household found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "No household found"}, status=status.HTTP_404_NOT_FOUND
+            )
 
         household = membership.household
         return Response({
@@ -529,11 +541,19 @@ class HouseholdView(APIView):
                     user=request.user, household_id=int(header_id),
                 ).select_related("household").first()
             else:
-                membership = HouseholdMembership.objects.filter(
-                    user=request.user, is_default=True,
-                ).select_related("household").first() or HouseholdMembership.objects.filter(
-                    user=request.user,
-                ).select_related("household").first()
+                membership = (
+                    HouseholdMembership.objects.filter(
+                        user=request.user,
+                        is_default=True,
+                    )
+                    .select_related("household")
+                    .first()
+                    or HouseholdMembership.objects.filter(
+                        user=request.user,
+                    )
+                    .select_related("household")
+                    .first()
+                )
             if not membership:
                 return Response(
                     {"error": "No household found"}, status=status.HTTP_404_NOT_FOUND,
@@ -586,9 +606,14 @@ class HouseholdAddMemberView(APIView):
         display_name = request.data.get("display_name", "").strip()
 
         if not chat_id:
-            return Response({"error": "chat_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "chat_id is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
         if not display_name:
-            return Response({"error": "display_name is required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "display_name is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         household, error = _resolve_member_household(request)
         if error is not None:
@@ -600,7 +625,10 @@ class HouseholdAddMemberView(APIView):
                 user=existing_tu.user, household=household,
             ).first()
             if existing_member:
-                return Response({"error": f"{existing_tu.display_name} is already a member"}, status=status.HTTP_409_CONFLICT)
+                return Response(
+                    {"error": f"{existing_tu.display_name} is already a member"},
+                    status=status.HTTP_409_CONFLICT,
+                )
 
             _attach_to_household(existing_tu, household, "member")
             ensure_user_settings(existing_tu.user, source_user=request.user)
@@ -638,7 +666,9 @@ class HouseholdRemoveMemberView(APIView):
     def post(self, request):
         chat_id = request.data.get("chat_id", "").strip()
         if not chat_id:
-            return Response({"error": "chat_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "chat_id is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
 
         household, error = _resolve_member_household(request)
         if error is not None:
@@ -647,11 +677,15 @@ class HouseholdRemoveMemberView(APIView):
         # Find the telegram user
         tu = TelegramUser.objects.filter(chat_id=chat_id).first()
         if not tu:
-            return Response({"error": "User not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "User not found"}, status=status.HTTP_404_NOT_FOUND
+            )
 
         # Can't remove yourself
         if tu.user == request.user:
-            return Response({"error": "Cannot remove yourself"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "Cannot remove yourself"}, status=status.HTTP_400_BAD_REQUEST
+            )
 
         # Remove from household
         removed = HouseholdMembership.objects.filter(
@@ -659,7 +693,10 @@ class HouseholdRemoveMemberView(APIView):
         ).delete()
 
         if not removed[0]:
-            return Response({"error": "User is not a member of this household"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "User is not a member of this household"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
         # Remove from scanner notifications
         for scanner in Scanner.objects.filter(household=household):
@@ -718,9 +755,13 @@ class HouseholdsListView(APIView):
         chat_id = (request.data.get("chat_id") or "").strip()
         display_name = (request.data.get("display_name") or "").strip()
         if not name:
-            return Response({"error": "name is required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "name is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
         if not chat_id:
-            return Response({"error": "chat_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "chat_id is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
         if not display_name:
             return Response(
                 {"error": "display_name is required"},
@@ -825,7 +866,9 @@ class HouseholdInvitePreviewView(APIView):
     def post(self, request):
         code = (request.data.get("code") or "").strip()
         if not code:
-            return Response({"error": "code is required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "code is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
         invite = (
             HouseholdInvite.objects.select_related("household", "created_by")
             .filter(code=code)
@@ -842,7 +885,9 @@ class HouseholdInvitePreviewView(APIView):
             .first()
         )
         if club_invite is None:
-            return Response({"error": "Invite not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "Invite not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         return Response(serialize_invite(club_invite))
 
 
@@ -864,9 +909,13 @@ class HouseholdInviteRedeemView(APIView):
         household_name = (request.data.get("household_name") or "").strip()
 
         if not code:
-            return Response({"error": "code is required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "code is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
         if not chat_id:
-            return Response({"error": "chat_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "chat_id is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
         if not display_name:
             return Response(
                 {"error": "display_name is required"},
@@ -1076,7 +1125,10 @@ class HouseholdInviteCancelView(APIView):
 
 @method_decorator(login_not_required, name="dispatch")
 class HouseholdAchievementsView(APIView):
-    """List cellar challenge unlocks. Empty and flagged off when the household hasn't opted in."""
+    """List cellar challenge unlocks.
+
+    Empty and flagged off when the household hasn't opted in.
+    """
 
     authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
@@ -1182,7 +1234,15 @@ class HouseholdTasteView(APIView):
         return Response(body, status=status.HTTP_201_CREATED)
 
 
-_ASK_PATCH_KEYS = ("outcome", "shown", "rejected", "place", "model", "latency_ms", "fallback")
+_ASK_PATCH_KEYS = (
+    "outcome",
+    "shown",
+    "rejected",
+    "place",
+    "model",
+    "latency_ms",
+    "fallback",
+)
 _ASK_OUTCOMES = ("pending", "accepted", "rejected", "abandoned")
 
 
@@ -1236,7 +1296,9 @@ class ScannerWhoisView(APIView):
     def get(self, request):
         q = (request.query_params.get("q") or "").strip()
         if not q:
-            return Response({"error": "q is required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "q is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
 
         users = TelegramUser.objects.select_related("user")
         if q.lstrip("-").isdigit():
@@ -1333,11 +1395,15 @@ class ScannerChatStatsView(APIView):
         try:
             days = int(request.query_params.get("days") or 30)
         except ValueError:
-            return Response({"error": "days must be a number"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "days must be a number"}, status=status.HTTP_400_BAD_REQUEST
+            )
         days = max(1, min(days, 365))
         household_id = request.query_params.get("household")
         if household_id is not None and not str(household_id).isdigit():
-            return Response({"error": "household must be an id"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "household must be an id"}, status=status.HTTP_400_BAD_REQUEST
+            )
         return Response(chat_stats(days, int(household_id) if household_id else None))
 
 

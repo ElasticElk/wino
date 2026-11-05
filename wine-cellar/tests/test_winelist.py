@@ -3,7 +3,11 @@
 from django.urls import reverse
 from rest_framework.authtoken.models import Token
 
-from wine_cellar.apps.scanner.models import Household, HouseholdMembership, ServiceConfig
+from wine_cellar.apps.scanner.models import (
+    Household,
+    HouseholdMembership,
+    ServiceConfig,
+)
 from wine_cellar.apps.storage.models import Storage, StorageItem
 from wine_cellar.apps.wine.models import CellarAchievement, Wine, WineList, WineListItem
 
@@ -134,7 +138,9 @@ def test_duplicate_free_text_without_wine_id_is_allowed(client, db, django_user_
     assert first.json()["id"] != second.json()["id"]
 
 
-def test_to_cellar_creates_stock_and_second_call_conflicts(client, db, django_user_model):
+def test_to_cellar_creates_stock_and_second_call_conflicts(
+    client, db, django_user_model
+):
     _enable_lists()
     household, riley, _sam = _pair(django_user_model)
     Storage.objects.create(
@@ -421,3 +427,64 @@ def test_no_household_is_403_on_to_cellar(client, db, django_user_model):
     )
     assert moved.status_code == 403
     assert "household" in moved.json()["error"].lower()
+
+
+def _list_item(auth):
+    list_id = auth.get(reverse("api-lists")).json()["lists"][0]["id"]
+    item = auth.post(
+        reverse("api-list-items", kwargs={"pk": list_id}),
+        data={
+            "name": "Chenin Blanc",
+            "payload": {"name": "Chenin Blanc", "wine_type": "WH", "country": "ZA"},
+        },
+        content_type="application/json",
+    ).json()
+    return list_id, item["id"]
+
+
+def test_to_cellar_racing_second_tap_adds_no_stock(
+    client, db, django_user_model, monkeypatch,
+):
+    """Two taps both pass the moved_at read; only the conditional claim decides."""
+    from django.utils import timezone
+
+    from wine_cellar.apps.api import list_views
+
+    _enable_lists()
+    household, riley, _sam = _pair(django_user_model)
+    auth = _auth(client, riley)
+    list_id, item_id = _list_item(auth)
+    original = list_views.WineListItemToCellarView.get_household
+
+    def first_tap_lands_meanwhile(self, request):
+        WineListItem.objects.filter(id=item_id).update(moved_at=timezone.now())
+        return original(self, request)
+
+    monkeypatch.setattr(
+        list_views.WineListItemToCellarView, "get_household", first_tap_lands_meanwhile,
+    )
+    response = auth.post(
+        reverse("api-list-item-to-cellar", kwargs={"pk": list_id, "item_id": item_id}),
+        data={"storage_name": "Fridge"},
+        content_type="application/json",
+    )
+    assert response.status_code == 409
+    assert response.json()["error"] == "already_moved"
+    assert StorageItem.objects.count() == 0
+    assert Wine.objects.count() == 0
+
+
+def test_to_cellar_failure_releases_the_claim(client, db, django_user_model):
+    _enable_lists()
+    household, riley, _sam = _pair(django_user_model)
+    auth = _auth(client, riley)
+    list_id = auth.get(reverse("api-lists")).json()["lists"][0]["id"]
+    blank = WineListItem.objects.create(list_id=list_id, name="  ", payload={})
+    failed = auth.post(
+        reverse("api-list-item-to-cellar", kwargs={"pk": list_id, "item_id": blank.id}),
+        data={"storage_name": "Fridge"},
+        content_type="application/json",
+    )
+    assert failed.status_code == 400
+    blank.refresh_from_db()
+    assert blank.moved_at is None

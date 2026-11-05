@@ -283,7 +283,12 @@ def test_redeem_already_member_idempotent(client, db, django_user_model):
     ).json()["code"]
     first = _auth(client, riley).post(
         reverse("api-scanner-club-invites-redeem"),
-        data={"code": code, "chat_id": "300", "display_name": "Lee", "household_id": riverside.id},
+        data={
+            "code": code,
+            "chat_id": "300",
+            "display_name": "Lee",
+            "household_id": riverside.id,
+        },
         content_type="application/json",
     )
     assert first.status_code == 200
@@ -443,6 +448,7 @@ def test_join_blocked_while_dismantle_open(client, db, django_user_model):
     assert minted.json()["error"] == "dismantle_in_progress"
 
 
+@pytest.mark.django_db
 def test_lock_club_invite_qs_has_no_join():
     from wine_cellar.apps.api.club_views import lock_club_invite_qs
 
@@ -479,7 +485,7 @@ def test_stock_remove_creates_event_move_does_not(
     )
     storage = _fridge(hillside)
     item = StorageItem.objects.create(storage=storage, wine=wine, user=riley)
-    other = Storage.objects.create(
+    Storage.objects.create(
         name="Rack", household=hillside, user=riley, location="R",
     )
     club = Club.objects.create(name="Thursday reds", created_by=riley)
@@ -540,7 +546,12 @@ def test_share_notice_copy_has_no_names(db, django_user_model):
 @patch("wine_cellar.apps.club.tasks._bot_token", return_value="token")
 @patch("wine_cellar.apps.club.tasks._send")
 def test_founding_notifies_other_household_members(
-    mock_send, _mock_token, client, db, django_user_model, django_capture_on_commit_callbacks,
+    mock_send,
+    _mock_token,
+    client,
+    db,
+    django_user_model,
+    django_capture_on_commit_callbacks,
 ):
     mock_send.return_value = 11
     _people(django_user_model)
@@ -621,7 +632,9 @@ def test_expire_dismantle_noop_when_flag_off(db, django_user_model):
 
 @patch("wine_cellar.apps.club.tasks._bot_token", return_value="token")
 @patch("wine_cellar.apps.club.tasks._send")
-def test_share_notice_sent_once_not_to_joiner(mock_send, _mock_token, db, django_user_model):
+def test_share_notice_sent_once_not_to_joiner(
+    mock_send, _mock_token, db, django_user_model
+):
     mock_send.return_value = 11
     _enable_clubs()
     hillside, _riverside, riley, sam, lee = _people(django_user_model)
@@ -629,7 +642,10 @@ def test_share_notice_sent_once_not_to_joiner(mock_send, _mock_token, db, django
         name="Thursday reds", created_by=lee, cellar_visibility="full",
     )
     ClubMembership.objects.create(
-        club=club, user=lee, role="owner", household=Household.objects.get(name="Riverside"),
+        club=club,
+        user=lee,
+        role="owner",
+        household=Household.objects.get(name="Riverside"),
     )
     ClubMembership.objects.create(
         club=club, user=riley, role="member", household=hillside,
@@ -702,3 +718,74 @@ def test_members_include_effective_peek(client, db, django_user_model):
     by_id = {row["user_id"]: row for row in listed.json()["members"]}
     assert by_id[riley.id]["peek"] == "summary"
     assert by_id[lee.id]["peek"] == "summary"
+
+
+def _three_member_vote(client, django_user_model):
+    hillside, riverside, riley, sam, lee = _people(django_user_model)
+    created = _create_club(client, riley).json()
+    club = Club.objects.get(id=created["id"])
+    ClubMembership.objects.create(
+        club=club, user=lee, role="member", household=riverside,
+        accepted_sharing_version=1,
+    )
+    ClubMembership.objects.create(
+        club=club, user=sam, role="member", household=hillside,
+        accepted_sharing_version=1,
+    )
+    started = _auth(client, riley).post(
+        reverse("api-club-dismantle", kwargs={"pk": club.id}),
+        data={}, content_type="application/json",
+    )
+    assert started.status_code == 201, started.content
+    return club, started.json()["id"], riley, sam, lee
+
+
+def _ballot(client, user, club, vote_id, choice):
+    return _auth(client, user).post(
+        reverse(
+            "api-club-dismantle-ballot",
+            kwargs={"pk": club.id, "vote_id": vote_id},
+        ),
+        data={"choice": choice}, content_type="application/json",
+    )
+
+
+def test_ballot_double_tap_is_already_voted(client, db, django_user_model):
+    club, vote_id, _riley, sam, _lee = _three_member_vote(client, django_user_model)
+    first = _ballot(client, sam, club, vote_id, "yes")
+    assert first.status_code == 200, first.content
+    again = _ballot(client, sam, club, vote_id, "yes")
+    assert again.status_code == 409
+    assert again.json()["error"] == "already_voted"
+    assert again.json()["yes"] == 2
+    vote = ClubDismantleVote.objects.get(id=vote_id)
+    assert vote.status == ClubDismantleVote.STATUS_OPEN
+
+
+def test_resolve_dismantle_only_once(client, db, django_user_model):
+    from wine_cellar.apps.club.services import resolve_dismantle
+
+    club, vote_id, _riley, _sam, lee = _three_member_vote(client, django_user_model)
+    stale = ClubDismantleVote.objects.get(id=vote_id)
+    rejected = _ballot(client, lee, club, vote_id, "no")
+    assert rejected.json()["status"] == "rejected"
+    # A second resolver holding a stale copy (the expiry beat, a racing last
+    # yes) must not flip it again, delete the club or notify twice.
+    with patch("wine_cellar.apps.club.tasks.notify_dismantle_resolved.delay") as notify:
+        result = resolve_dismantle(stale, ClubDismantleVote.STATUS_PASSED)
+    assert result.status == ClubDismantleVote.STATUS_REJECTED
+    assert Club.objects.filter(id=club.id).exists()
+    notify.assert_not_called()
+
+
+def test_cancel_after_vote_passed_is_over_not_error(client, db, django_user_model):
+    from wine_cellar.apps.club.services import cancel_dismantle
+
+    club, vote_id, _riley, sam, lee = _three_member_vote(client, django_user_model)
+    stale = ClubDismantleVote.objects.get(id=vote_id)
+    assert _ballot(client, sam, club, vote_id, "yes").status_code == 200
+    passed = _ballot(client, lee, club, vote_id, "yes")
+    assert passed.json()["status"] == "passed"
+    vote, err = cancel_dismantle(stale)
+    assert err == "over"
+    assert vote.status == ClubDismantleVote.STATUS_PASSED

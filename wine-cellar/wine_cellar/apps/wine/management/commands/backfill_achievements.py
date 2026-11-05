@@ -36,7 +36,9 @@ class Command(BaseCommand):
                     .first()
                 )
             if owner is None:
-                self.stdout.write(f"hh {household.id} {household.name}: no members, skip")
+                self.stdout.write(
+                    f"hh {household.id} {household.name}: no members, skip"
+                )
                 continue
             if dry:
                 self.stdout.write(f"would backfill hh {household.id} {household.name}")

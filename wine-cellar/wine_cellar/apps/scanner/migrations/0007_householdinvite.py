@@ -1,7 +1,8 @@
 import django.db.models.deletion
-import wine_cellar.apps.scanner.models
 from django.conf import settings
 from django.db import migrations, models
+
+import wine_cellar.apps.scanner.models
 
 
 class Migration(migrations.Migration):

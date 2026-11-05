@@ -102,7 +102,16 @@ class TasteOffScoreInline(admin.TabularInline):
 
 @admin.register(TasteOff)
 class TasteOffAdmin(admin.ModelAdmin):
-    list_display = ("id", "club", "title", "status", "host", "created", "opened_at", "closed_at")
+    list_display = (
+        "id",
+        "club",
+        "title",
+        "status",
+        "host",
+        "created",
+        "opened_at",
+        "closed_at",
+    )
     list_filter = ("status",)
     inlines = [TasteOffBottleInline, TasteOffScoreInline]
 

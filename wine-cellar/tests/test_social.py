@@ -93,7 +93,9 @@ def test_comments_flag_off_404(client, db, django_user_model):
     club = _club_with_member(client, riley, lee, riverside)
     event = _opened_event(club, riley)
     response = _auth(client, lee).post(
-        reverse("api-club-event-comments", kwargs={"pk": club.id, "event_id": event.id}),
+        reverse(
+            "api-club-event-comments", kwargs={"pk": club.id, "event_id": event.id}
+        ),
         data={"text": "nice"},
         content_type="application/json",
     )
@@ -106,7 +108,9 @@ def test_comment_cap_blank_and_non_member(client, db, django_user_model):
     club = _club_with_member(client, riley, lee, riverside)
     _enable("feature_club_comments")
     event = _opened_event(club, riley)
-    url = reverse("api-club-event-comments", kwargs={"pk": club.id, "event_id": event.id})
+    url = reverse(
+        "api-club-event-comments", kwargs={"pk": club.id, "event_id": event.id}
+    )
     too_long = _auth(client, lee).post(
         url, data={"text": "x" * 281}, content_type="application/json",
     )
@@ -122,7 +126,9 @@ def test_comment_cap_blank_and_non_member(client, db, django_user_model):
     )
     assert outsider.status_code == 404
     ok = _auth(client, lee).post(
-        url, data={"text": "we had that in Stellenbosch"}, content_type="application/json",
+        url,
+        data={"text": "we had that in Stellenbosch"},
+        content_type="application/json",
     )
     assert ok.status_code == 201, ok.content
     assert ok.json()["display_name"] == "Lee"
@@ -139,7 +145,9 @@ def test_comment_on_retracted_is_409(client, db, django_user_model):
     event.retracted_at = timezone.now()
     event.save(update_fields=["retracted_at"])
     response = _auth(client, lee).post(
-        reverse("api-club-event-comments", kwargs={"pk": club.id, "event_id": event.id}),
+        reverse(
+            "api-club-event-comments", kwargs={"pk": club.id, "event_id": event.id}
+        ),
         data={"text": "too late"},
         content_type="application/json",
     )
@@ -157,12 +165,16 @@ def test_comment_card_escapes_html():
     assert "&lt;script&gt;x&lt;/script&gt;" in text
 
 
-def test_to_list_writes_caller_personal_not_stock_or_partner(client, db, django_user_model):
+def test_to_list_writes_caller_personal_not_stock_or_partner(
+    client, db, django_user_model
+):
     hillside, riverside, riley, sam, lee = _people(django_user_model)
     club = _club_with_member(client, riley, lee, riverside)
     _enable("feature_lists")
     event = _opened_event(club, riley)
-    url = reverse("api-club-event-to-list", kwargs={"pk": club.id, "event_id": event.id})
+    url = reverse(
+        "api-club-event-to-list", kwargs={"pk": club.id, "event_id": event.id}
+    )
     added = _auth(client, lee).post(url, data={}, content_type="application/json")
     assert added.status_code == 201, added.content
     assert added.json()["source"] == "club_feed"
@@ -174,7 +186,9 @@ def test_to_list_writes_caller_personal_not_stock_or_partner(client, db, django_
     assert StorageItem.objects.filter(deleted=False).count() == 0
     again = _auth(client, lee).post(url, data={}, content_type="application/json")
     assert again.status_code == 200
-    assert WineListItem.objects.filter(list__owner=lee, moved_at__isnull=True).count() == 1
+    assert (
+        WineListItem.objects.filter(list__owner=lee, moved_at__isnull=True).count() == 1
+    )
 
 
 def test_to_list_404_if_lists_flag_off(client, db, django_user_model):
@@ -222,7 +236,9 @@ def test_club_list_names_only_and_remove_rules(client, db, django_user_model):
     lst = WineList.objects.get(kind="club", club=club)
     assert lst.owner_id is None
     forbidden = _auth(client, lee).delete(
-        reverse("api-club-list-item-delete", kwargs={"pk": club.id, "item_id": item_id}),
+        reverse(
+            "api-club-list-item-delete", kwargs={"pk": club.id, "item_id": item_id}
+        ),
     )
     # adder may delete
     assert forbidden.status_code == 200
@@ -233,11 +249,15 @@ def test_club_list_names_only_and_remove_rules(client, db, django_user_model):
     )
     other_id = other.json()["id"]
     blocked = _auth(client, lee).delete(
-        reverse("api-club-list-item-delete", kwargs={"pk": club.id, "item_id": other_id}),
+        reverse(
+            "api-club-list-item-delete", kwargs={"pk": club.id, "item_id": other_id}
+        ),
     )
     assert blocked.status_code == 403
     owner_del = _auth(client, riley).delete(
-        reverse("api-club-list-item-delete", kwargs={"pk": club.id, "item_id": other_id}),
+        reverse(
+            "api-club-list-item-delete", kwargs={"pk": club.id, "item_id": other_id}
+        ),
     )
     assert owner_del.status_code == 200
 
@@ -363,7 +383,9 @@ def test_tasteoff_score_constraint(db, django_user_model):
         accepted_sharing_version=1,
     )
     tasteoff = TasteOff.objects.create(club=club, host=riley, title="Flight")
-    bottle = TasteOffBottle.objects.create(tasteoff=tasteoff, label="Chenin", sort_order=0)
+    bottle = TasteOffBottle.objects.create(
+        tasteoff=tasteoff, label="Chenin", sort_order=0
+    )
     with pytest.raises(IntegrityError):
         TasteOffScore.objects.create(
             tasteoff=tasteoff, bottle=bottle, user=riley, score=6,
@@ -426,7 +448,9 @@ def test_close_stale_tasteoffs_noop_when_flag_off(db, django_user_model):
     close_stale_tasteoffs()
     tasteoff.refresh_from_db()
     assert tasteoff.status == TasteOff.STATUS_SCORING
-    assert not ClubEvent.objects.filter(club=club, kind=ClubEvent.KIND_TASTEOFF).exists()
+    assert not ClubEvent.objects.filter(
+        club=club, kind=ClubEvent.KIND_TASTEOFF
+    ).exists()
 
 
 def test_non_host_cannot_add_bottle(client, db, django_user_model):
@@ -458,8 +482,12 @@ def test_owner_can_close_after_host(client, db, django_user_model):
     )
     tid = created.json()["id"]
     bottles = reverse("api-club-tasteoff-bottles", kwargs={"pk": club.id, "tid": tid})
-    _auth(client, lee).post(bottles, data={"label": "A 2022"}, content_type="application/json")
-    _auth(client, lee).post(bottles, data={"label": "B 2019"}, content_type="application/json")
+    _auth(client, lee).post(
+        bottles, data={"label": "A 2022"}, content_type="application/json"
+    )
+    _auth(client, lee).post(
+        bottles, data={"label": "B 2019"}, content_type="application/json"
+    )
     _auth(client, lee).post(
         reverse("api-club-tasteoff-open", kwargs={"pk": club.id, "tid": tid}),
         data={}, content_type="application/json",
@@ -487,4 +515,6 @@ def test_close_tasteoff_helper_idempotent(db, django_user_model):
     second = close_tasteoff(first)
     assert first.status == TasteOff.STATUS_CLOSED
     assert second.status == TasteOff.STATUS_CLOSED
-    assert ClubEvent.objects.filter(club=club, kind=ClubEvent.KIND_TASTEOFF).count() == 1
+    assert (
+        ClubEvent.objects.filter(club=club, kind=ClubEvent.KIND_TASTEOFF).count() == 1
+    )

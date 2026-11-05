@@ -2,8 +2,8 @@ from django import forms
 from django.conf import settings
 from django.utils.translation import gettext_lazy as _
 
-from wine_cellar.apps.storage.models import Storage
 from wine_cellar.apps.scanner.households import get_user_household, scope
+from wine_cellar.apps.storage.models import Storage
 from wine_cellar.apps.user.views import get_user_settings
 
 

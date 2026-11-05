@@ -21,7 +21,9 @@ WORST_LIMIT = 5
 
 
 def _ask_rows(since, household_id=None):
-    asks = TasteIntent.objects.filter(kind=TasteIntent.ASK, created__gte=since).select_related(
+    asks = TasteIntent.objects.filter(
+        kind=TasteIntent.ASK, created__gte=since
+    ).select_related(
         "household",
     )
     if household_id is not None:
@@ -71,7 +73,9 @@ def chat_stats(days: int = 30, household_id: int | None = None, now=None) -> dic
     now = now or timezone.now()
     since = now - timedelta(days=days)
     asks = _ask_rows(since, household_id)
-    opened = _opened_by_household({a.household_id for a in asks}, since, now + OPENED_WITHIN)
+    opened = _opened_by_household(
+        {a.household_id for a in asks}, since, now + OPENED_WITHIN
+    )
 
     outcomes = Counter()
     models = Counter()
@@ -130,20 +134,23 @@ def chat_stats(days: int = 30, household_id: int | None = None, now=None) -> dic
         "shown": shown_count,
         "questions": questions,
         "outcomes": {
-            key: outcomes.get(key, 0) for key in ("accepted", "rejected", "abandoned", "pending")
+            key: outcomes.get(key, 0)
+            for key in ("accepted", "rejected", "abandoned", "pending")
         },
         "something_else_taps": something_else,
         "opened_pick": picked_opened,
         "opened_pick_pct": _percent(picked_opened, shown_count),
         "opened_other": other_opened,
-        "pick_votes": {
-            key: votes.get(key, 0) for key in ("up", "meh", "down", "none")
-        },
+        "pick_votes": {key: votes.get(key, 0) for key in ("up", "meh", "down", "none")},
         "fallback": fallback,
         "models": dict(models),
         "latency_ms": {
             "p50": round(median(latencies)) if latencies else None,
-            "p90": round(sorted(latencies)[int(0.9 * (len(latencies) - 1))]) if latencies else None,
+            "p90": (
+                round(sorted(latencies)[int(0.9 * (len(latencies) - 1))])
+                if latencies
+                else None
+            ),
         },
         "worst": [
             {

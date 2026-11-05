@@ -77,7 +77,9 @@ def household_currency(household) -> str:
         .select_related("user__user_settings")
         .order_by("created")
         .first()
-    ) or household.memberships.select_related("user__user_settings").order_by("created").first()
+    ) or household.memberships.select_related("user__user_settings").order_by(
+        "created"
+    ).first()
     return (_user_currency(membership.user) if membership else None) or DEFAULT_CURRENCY
 
 
@@ -235,7 +237,9 @@ def _summary_from_counts(household, counts: dict) -> str:
     return "\n".join(lines)
 
 
-def record_intent(household, user, kind: str, payload: dict | None) -> TasteIntent | None:
+def record_intent(
+    household, user, kind: str, payload: dict | None
+) -> TasteIntent | None:
     allowed = (TasteIntent.LOOK, TasteIntent.WINELIST, TasteIntent.ASK)
     if household is None or kind not in allowed:
         return None

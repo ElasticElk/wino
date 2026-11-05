@@ -491,8 +491,12 @@ class ListFlow:
         if result.get("error") and result.get("status_code", 200) >= 400:
             err = result.get("error")
             if err == "already_moved":
+                from integrations.telegram_nav import follow_up_rows
                 await _safe_edit(
-                    query, t(loc, "list.moved", name=result.get("wine_name") or "that wine"),
+                    query,
+                    t(loc, "nav.already_done") + " "
+                    + t(loc, "list.moved", name=result.get("wine_name") or "that wine"),
+                    reply_markup=InlineKeyboardMarkup(follow_up_rows("generic")),
                 )
             elif result.get("status_code") == 404:
                 await _safe_edit(query, t(loc, "list.off"))

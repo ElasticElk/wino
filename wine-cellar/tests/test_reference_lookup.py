@@ -21,11 +21,15 @@ GOOD = {
     "critic_score_reasoning": "Tim Atkin SA Report 2022 gave the 2020 vintage 92pts",
     "vivino_rating": 4.1,
     "vivino_rating_confidence": "medium",
-    "vivino_rating_reasoning": "Vivino averages 4.1 across ~250 ratings on the wine page",
+    "vivino_rating_reasoning": (
+        "Vivino averages 4.1 across ~250 ratings on the wine page"
+    ),
     "market_price": 240.0,
     "market_price_currency": "ZAR",
     "market_price_confidence": "high",
-    "market_price_reasoning": "Listed R230-R255 across Checkers, Woolworths and Norman Goodfellows",
+    "market_price_reasoning": (
+        "Listed R230-R255 across Checkers, Woolworths and Norman Goodfellows"
+    ),
 }
 
 URL = "api-reference-lookup"

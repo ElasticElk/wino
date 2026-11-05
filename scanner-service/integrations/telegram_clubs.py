@@ -21,7 +21,6 @@ from integrations.telegram_invites import (
     format_until,
     invite_link,
     name_keyboard,
-    remove_keyboard,
     reverse_geocode,
     share_keyboard,
     validate_typed_name,
@@ -30,7 +29,10 @@ from integrations.telegram_invites import (
 logger = logging.getLogger(__name__)
 
 STATE_TTL_SECONDS = 30 * 60
-COMMENT_TTL_SECONDS = 15 * 60
+# "Say something" takes only the next message, and only within two minutes —
+# the same rule as the menu's search prompt (telegram_nav.PENDING_TTL_SECONDS).
+COMMENT_TTL_SECONDS = 2 * 60
+COMMENT_MAX = 280
 VOTE_GLYPH = {"down": "\U0001F44E", "up": "\U0001F44D", "meh": ""}
 _MONTHS = (
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -130,6 +132,20 @@ def _event_action_row(event: dict, loc: str, flags=None) -> list:
     return row
 
 
+def _cancel_markup() -> InlineKeyboardMarkup:
+    from integrations.telegram_nav import CANCEL, menu_cb
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(CANCEL, callback_data=menu_cb("x", "cancel")),
+    ]])
+
+
+def _menu_markup() -> InlineKeyboardMarkup:
+    from integrations.telegram_nav import MENU, menu_cb
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(MENU, callback_data=menu_cb("new")),
+    ]])
+
+
 def _wine_line(event: dict, loc: str) -> str:
     kind = event.get("kind")
     name = event.get("actor_name") or "Someone"
@@ -206,17 +222,10 @@ def build_home(payload: dict, loc: str, flags=None) -> tuple[str, InlineKeyboard
             ),
         ],
     ]
-    extra = []
     if flags.get("feature_lists"):
-        extra.append(InlineKeyboardButton(
+        keyboard.append([InlineKeyboardButton(
             t(loc, "club.list.title"), callback_data=club_cb("li", payload["id"]),
-        ))
-    if flags.get("feature_tasteoffs"):
-        extra.append(InlineKeyboardButton(
-            t(loc, "club.home.tasteoff"), callback_data=club_cb("to", payload["id"]),
-        ))
-    if extra:
-        keyboard.append(extra)
+        )])
     last = []
     if payload.get("role") == "owner" and not is_global:
         last.append(InlineKeyboardButton(
@@ -229,6 +238,17 @@ def build_home(payload: dict, loc: str, flags=None) -> tuple[str, InlineKeyboard
     discover = _discover_row(loc, flags)
     if discover:
         keyboard.append(discover)
+    # Follow-ups: say something on the newest bottle opened, taste-off, menu.
+    from integrations.telegram_nav import follow_up_rows
+    latest = next(
+        (e for e in events if (e.get("kind") or "opened") == "opened" and e.get("id")),
+        None,
+    )
+    keyboard.extend(follow_up_rows("club", {
+        "flags": flags,
+        "club_id": payload["id"],
+        "event_id": (latest or {}).get("id"),
+    }))
     return "\n".join(lines), InlineKeyboardMarkup(keyboard)
 
 
@@ -236,6 +256,8 @@ class ClubFlow:
     def __init__(self, handler):
         self.handler = handler
         self._states: dict[str, dict] = {}
+        # event_id -> feed event, from the last lookup (names the comment prompt).
+        self._events_seen: dict[int, dict] = {}
 
     def locale(self, update=None, chat_id=None) -> str:
         return locale_for(self.handler, update=update, chat_id=chat_id)
@@ -432,7 +454,7 @@ class ClubFlow:
                 chat_id, step="join", household_name=text.strip()[:NAME_MAX],
             )
             await update.message.reply_text(
-                t(loc, "club.named.ok"), reply_markup=remove_keyboard(),
+                t(loc, "club.named.ok"), reply_markup=self.handler._invite_flow()._bar_if_known(update),
             )
             await self._join_card(update, query=None)
             return True
@@ -467,7 +489,7 @@ class ClubFlow:
             return True
         self.remember(chat_id, step="join", household_name=suburb[:NAME_MAX])
         await update.message.reply_text(
-            t(self.locale(update), "club.named.ok"), reply_markup=remove_keyboard(),
+            t(self.locale(update), "club.named.ok"), reply_markup=self.handler._invite_flow()._bar_if_known(update),
         )
         await self._join_card(update, query=None)
         return True
@@ -1069,6 +1091,14 @@ class ClubFlow:
                 await self.handler._invite_flow()._hot_add(chat_id, result)
             except Exception:
                 logger.exception("[club] hot-add failed")
+            context = getattr(query, "get_bot", None)
+            bot = context() if callable(context) else None
+            nav = getattr(self.handler, "_nav", None)
+            if bot is not None and callable(nav):
+                try:
+                    await nav().send_bar_intro(bot, chat_id)
+                except Exception as e:
+                    logger.info("[club] bar intro failed: %s", e)
         club = result.get("club") or {}
         club_id = club.get("id")
         if club_id:
@@ -1547,9 +1577,14 @@ class ClubFlow:
         if user is not None:
             voter = user.first_name or user.full_name or ""
         result = api.cast_dismantle_ballot(club_id, vote_id, choice)
-        if result.get("error") in ("vote_closed",) or result.get("status_code") == 409:
+        # A repeat tap the server already counted: show where the vote stands.
+        already = result.get("error") == "already_voted"
+        if not already and (
+            result.get("error") in ("vote_closed",) or result.get("status_code") == 409
+        ):
             await _safe_edit(query, t(loc, "club.end.over"))
             return
+        prefix = f"\u2705 {t(loc, 'nav.already_done')}\n\n" if already else ""
         if result.get("status") == "passed":
             await _safe_edit(query, t(loc, "club.end.passed", club=esc(club_name)))
             return
@@ -1560,7 +1595,7 @@ class ClubFlow:
                 club=esc(club_name),
             ))
             return
-        await _safe_edit(query, t(loc, "club.end.status",
+        await _safe_edit(query, prefix + t(loc, "club.end.status",
             club=esc(next((c.get("name") for c in clubs if c["id"] == club_id), "club")),
             n=result.get("pending") or 0,
             yes_n=result.get("yes") or 0,
@@ -1614,7 +1649,11 @@ class ClubFlow:
             except Exception:
                 continue
             events = payload.get("events") or []
-            if any(e.get("id") == event_id for e in events):
+            match = next((e for e in events if e.get("id") == event_id), None)
+            if match is not None:
+                if len(self._events_seen) > 200:
+                    self._events_seen.clear()
+                self._events_seen[event_id] = match
                 return club["id"]
         return last["id"] if last else None
 
@@ -1652,40 +1691,93 @@ class ClubFlow:
             await _safe_edit(query, t(loc, "club.err"))
             return
         chat_id = str(update.effective_chat.id)
+        nav = getattr(self.handler, "_nav", None)
+        if callable(nav):
+            nav().pending.cancel(chat_id)  # one "next message" slot per chat
+        # Say what the note goes under: a home-card shortcut is not obviously
+        # tied to one bottle.
+        prompt = t(loc, "club.comment.prompt")
+        event = self._events_seen.pop(event_id, None)
+        if event and (event.get("kind") or "opened") == "opened":
+            prompt = f"\U0001F4AC {_wine_line(event, loc)}\n\n{prompt}"
+        sent = await query.message.reply_text(
+            prompt, parse_mode="HTML", reply_markup=_cancel_markup(),
+        )
         self.remember(
             chat_id,
             step="comment",
             event_id=event_id,
             club_id=club_id,
             comment_at=time.monotonic(),
+            prompt_id=getattr(sent, "message_id", None),
         )
-        await query.message.reply_text(t(loc, "club.comment.prompt"))
 
     async def _submit_comment(self, update, text: str) -> bool:
+        """Only the next message is the comment. It is taken (and the prompt
+        closed) whether or not it can be posted; a retry is one tap away."""
         loc = self.locale(update)
         chat_id = str(update.effective_chat.id)
         state = self.state_for(chat_id) or {}
+        self.clear(chat_id)
+        await self._close_comment_prompt(update, chat_id, state.get("prompt_id"))
+        event_id = state.get("event_id")
+        club_id = state.get("club_id")
         started = state.get("comment_at") or 0
         if time.monotonic() - started > COMMENT_TTL_SECONDS:
-            self.clear(chat_id)
-            await update.message.reply_text(t(loc, "club.comment.again"))
-            return True
+            # Expired: this message was never meant as the comment.
+            return False
         note = (text or "").strip()
-        if not note or len(note) > 280:
-            await update.message.reply_text(t(loc, "club.comment.too_long"))
+        if not note or len(note) > COMMENT_MAX:
+            await update.message.reply_text(
+                t(loc, "club.comment.too_long"),
+                reply_markup=self._comment_again_markup(event_id),
+            )
             return True
         api = self._api(update)
-        result = api.add_club_comment(state.get("club_id"), state.get("event_id"), note)
+        result = api.add_club_comment(club_id, event_id, note)
         if result.get("error") == "retracted" or result.get("status_code") == 409:
-            self.clear(chat_id)
-            await update.message.reply_text(t(loc, "club.err"))
+            await update.message.reply_text(t(loc, "club.err"), reply_markup=_menu_markup())
             return True
         if result.get("error"):
-            await update.message.reply_text(t(loc, "club.err"))
+            await update.message.reply_text(
+                t(loc, "club.err"), reply_markup=self._comment_again_markup(event_id),
+            )
             return True
-        self.clear(chat_id)
-        await update.message.reply_text(t(loc, "club.comment.saved"))
+        from integrations.telegram_nav import follow_up_rows
+        await update.message.reply_text(
+            t(loc, "club.comment.saved"),
+            reply_markup=InlineKeyboardMarkup(follow_up_rows("club", {
+                "flags": self._flags(), "club_id": club_id,
+            })),
+        )
         return True
+
+    def _comment_again_markup(self, event_id):
+        from integrations.telegram_nav import MENU, menu_cb
+        row = []
+        if event_id:
+            row.append(InlineKeyboardButton(
+                "\U0001F4AC Try again", callback_data=club_cb("cm", event_id),
+            ))
+        row.append(InlineKeyboardButton(MENU, callback_data=menu_cb("new")))
+        return InlineKeyboardMarkup([row])
+
+    async def _close_comment_prompt(self, update, chat_id, prompt_id) -> None:
+        if not prompt_id:
+            return
+        bot = getattr(getattr(update, "message", None), "get_bot", None)
+        try:
+            bot = bot() if callable(bot) else None
+        except Exception:
+            bot = None
+        if bot is None:
+            return
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=int(chat_id), message_id=prompt_id, reply_markup=None,
+            )
+        except Exception:
+            pass
 
     async def _event_to_list(self, update, event_id, query):
         loc = self.locale(update)

@@ -62,6 +62,71 @@ PLACES_DOWN = copy_t("en", "chat.place.down")
 PLACES_NONE = copy_t("en", "chat.place.none")
 HELP_COMMANDS = copy_t("en", "chat.help.commands")
 
+# Bottom-bar labels (and the plain words people type instead) map straight to a
+# navigation action. Checked before natural-language routing, pending input and
+# club comments, so "🍷 Cellar" is never a search, an answer or a note.
+# Keys are normalized: emoji and punctuation stripped, casefolded.
+LABEL_COMMANDS = {
+    "cellar": "cellar",
+    "my cellar": "cellar",
+    "fridge": "cellar",
+    "scan": "scan",
+    "search": "search",
+    "find": "search",
+    "list": "list",
+    "my list": "list",
+    "to drink list": "list",
+    "clubs": "clubs",
+    "club": "clubs",
+    "menu": "menu",
+    "home": "menu",
+    "help": "help",
+}
+# Labels that only exist while their feature is on. Typed as a plain word with
+# the flag off, they fall through to chat (which answers flag-off honestly).
+# The exact texts the bottom bar sends (telegram_nav.BAR_*).
+BAR_LABELS = frozenset({
+    "\U0001F377 Cellar", "\U0001F4F8 Scan", "\U0001F50E Search",
+    "\U0001F4DD List", "\U0001F347 Clubs", "\u2630 Menu",
+})
+LABEL_FLAGS = {
+    "list": "feature_lists",
+    "clubs": "feature_clubs",
+}
+
+
+def normalize_label(text: str) -> str:
+    """'☰  Menu' -> 'menu', '🍷 CELLAR!' -> 'cellar'. Letters, digits, spaces only."""
+    cleaned = "".join(
+        ch if (ch.isalnum() or ch.isspace()) else " " for ch in (text or "")
+    )
+    return " ".join(cleaned.casefold().split())
+
+
+def match_label(text: str, flags: dict | None = None, *, exact_only: bool = False) -> str | None:
+    """Navigation action for a bottom-bar label or its plain word, else None.
+
+    ``exact_only`` (while someone is naming a cellar or club) accepts only the
+    exact bar button text, so a name like "Home" or "My cellar" stays a name.
+    A label for a feature that is off matches only as the exact bar button (a
+    stale bar from before the flag changed), so the tap gets an honest "not on
+    yet"; the bare word, with or without punctuation, goes on to chat.
+    """
+    raw = (text or "").strip()
+    if not raw or len(raw) > 32 or raw.startswith("/"):
+        return None
+    exact = " ".join(raw.split()) in BAR_LABELS
+    if exact_only and not exact:
+        return None
+    action = LABEL_COMMANDS.get(normalize_label(raw))
+    if action is None:
+        return None
+    flag = LABEL_FLAGS.get(action)
+    if flag and not (flags or {}).get(flag) and not exact:
+        return None
+    return action
+
+
 PROGRESS_STEPS = (
     (1.5, "matching"),
     (4.0, "narrowing"),
@@ -324,6 +389,18 @@ class ChatRouter:
                 )
                 box["handled"] = True
                 return
+            # Moved on: the location keyboard goes, the bottom bar comes back
+            # (after the typing floor, like any first reply).
+            nav = getattr(self.handler, "_nav", None)
+            bot = getattr(context, "bot", None)
+            if callable(nav) and bot is not None:
+                try:
+                    pacer = getattr(self.handler, "_text_pacer", None)
+                    if pacer is not None:
+                        await pacer.wait()
+                    await nav().send_bar_intro(bot, chat_id)
+                except Exception:
+                    logger.info("[chat] bar after place failed chat=%s", chat_id)
         if _whole_word_in_names(text, wines):
             box["handled"] = False
             return
@@ -462,6 +539,14 @@ class ChatRouter:
         await update.message.reply_text(
             self._c(locale, "chat.place.ask_location"), reply_markup=keyboard,
         )
+        # The location keyboard replaced the bar. Forget the chat's bar, so
+        # its next message brings it back even after the ask has expired.
+        nav = getattr(self.handler, "_nav", None)
+        if callable(nav):
+            try:
+                nav().forget_bar(chat_id)
+            except Exception:
+                pass
 
     async def _search_places(self, update, context, api, chat_id, query, *, area="", lat=None, lon=None,
                              clear_keyboard=False):
@@ -471,13 +556,27 @@ class ChatRouter:
         if clear_keyboard:
             # Telegram won't edit a message that carries a reply-keyboard removal,
             # so it goes on its own message and the placeholder stays editable.
+            # Swap the location keyboard for the bottom bar, not for nothing.
             from telegram import ReplyKeyboardRemove
             got = (
                 self._c(locale, "chat.place.got_location")
                 if lat is not None
                 else self._c(locale, "chat.place.got_area", area=area)
             )
-            await update.message.reply_text(got, reply_markup=ReplyKeyboardRemove())
+            bar = getattr(self.handler, "bottom_bar", None)
+            markup = ReplyKeyboardRemove()
+            if callable(bar):
+                try:
+                    markup = bar()
+                except Exception:
+                    markup = ReplyKeyboardRemove()
+            await update.message.reply_text(got, reply_markup=markup)
+            nav = getattr(self.handler, "_nav", None)
+            if callable(nav) and not isinstance(markup, ReplyKeyboardRemove):
+                try:
+                    nav().mark_bar_given(chat_id)
+                except Exception:
+                    pass
         placeholder = await update.message.reply_text(lines[0])
         try:
             taste = await loop.run_in_executor(None, api.get_taste)

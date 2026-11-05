@@ -550,6 +550,10 @@ async def lifespan(app: FastAPI):
         bot_handler._catchup_store = CardStore.from_url(
             redis_url, ttl=1800, prefix="whiney:catchup:",
         )
+        # Which bottom bar (flag signature) each chat has, across restarts.
+        bot_handler._bar_store = CardStore.from_url(
+            redis_url, ttl=180 * 24 * 3600, prefix="whiney:bar:",
+        )
         bot_handler.set_local_barcode_reader(read_barcode_local)
         bot_handler.set_flags(svc)
         for cid, ccy in chat_id_to_currency.items():

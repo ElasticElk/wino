@@ -309,13 +309,16 @@ def _member_choice(row: ClubMembership, club: dict) -> dict:
 
 def _needs_member(kind: str, data: dict) -> bool:
     if kind in {"avg_rating", "badges"} and not (
-        data.get("member_id") not in (None, "") or str(data.get("member_name") or "").strip()
+        data.get("member_id") not in (None, "")
+        or str(data.get("member_name") or "").strip()
     ):
         return True
     return False
 
 
-def _resolve_member(user, club: dict, members: list[ClubMembership], data: dict, kind: str):
+def _resolve_member(
+    user, club: dict, members: list[ClubMembership], data: dict, kind: str
+):
     raw_id = data.get("member_id")
     if raw_id not in (None, ""):
         try:
@@ -360,7 +363,9 @@ def _resolve_member(user, club: dict, members: list[ClubMembership], data: dict,
         username = fold(row.user.get_username())
         q = fold(name)
         if username and (username == q or username.startswith(q)):
-            extra.append({"id": row.user_id, "name": display_name(row.user), "membership": row})
+            extra.append(
+                {"id": row.user_id, "name": display_name(row.user), "membership": row}
+            )
     seen = {h["id"] for h in hits}
     for row in extra:
         if row["id"] not in seen:
@@ -400,7 +405,9 @@ def _name_hits(query: str, candidates: list[dict]) -> list[dict]:
             tokens.extend(fold(n).split())
         if q in folded:
             exact.append(row)
-        elif any(n.startswith(q) for n in folded) or any(t.startswith(q) for t in tokens):
+        elif any(n.startswith(q) for n in folded) or any(
+            t.startswith(q) for t in tokens
+        ):
             prefix.append(row)
         elif any(q in n for n in folded):
             contains.append(row)
@@ -456,7 +463,9 @@ def _answer_cellar(user, club: dict, members, member, kind: str, data: dict) -> 
             "kind": kind,
             "club": _club_meta(club),
             "reason": "global",
-            "choices": [_club_choice(m) for m in _other_private_clubs(user, club["id"])],
+            "choices": [
+                _club_choice(m) for m in _other_private_clubs(user, club["id"])
+            ],
         }
 
     targets = [member] if member is not None else [
@@ -573,7 +582,9 @@ def _summary_grape_count(wines: list[dict], grape: str) -> int:
     return total
 
 
-def _answer_member_cellar(club: dict, member: ClubMembership, vis_map: dict, data: dict) -> dict:
+def _answer_member_cellar(
+    club: dict, member: ClubMembership, vis_map: dict, data: dict
+) -> dict:
     vis = vis_map.get(member.user_id, "none")
     query = _wine_query(data)
     if vis == "none" or member.household_id is None:
@@ -587,7 +598,11 @@ def _answer_member_cellar(club: dict, member: ClubMembership, vis_map: dict, dat
     _items, wines = _load_stock([member.household_id])
     if vis == "summary":
         grape = query["grape"] or query["wine_text"]
-        count = _summary_grape_count(wines, grape) if grape else sum(w["stock_count"] for w in wines)
+        count = (
+            _summary_grape_count(wines, grape)
+            if grape
+            else sum(w["stock_count"] for w in wines)
+        )
         types = Counter()
         grapes = Counter()
         for wine in wines:
@@ -606,7 +621,11 @@ def _answer_member_cellar(club: dict, member: ClubMembership, vis_map: dict, dat
             "counts_by_type": dict(types),
             "counts_by_grape": dict(grapes),
         }
-    matched = [w for w in wines if _wine_matches(w, query)] if (query["grape"] or query["wine_text"] or query["vintage"]) else wines
+    matched = (
+        [w for w in wines if _wine_matches(w, query)]
+        if (query["grape"] or query["wine_text"] or query["vintage"])
+        else wines
+    )
     return {
         "status": "ok",
         "kind": "cellar",
@@ -622,7 +641,11 @@ def _answer_member_cellar(club: dict, member: ClubMembership, vis_map: dict, dat
 
 def _answer_who_has(club, members, targets, vis_map, data) -> dict:
     query = _wine_query(data)
-    household_ids = [m.household_id for m in targets if m.household_id and vis_map.get(m.user_id) != "none"]
+    household_ids = [
+        m.household_id
+        for m in targets
+        if m.household_id and vis_map.get(m.user_id) != "none"
+    ]
     _items, wines = _load_stock(household_ids)
     by_hh = defaultdict(list)
     for wine in wines:
@@ -842,7 +865,16 @@ def _answer_feed(user, club, members, member, kind, data) -> dict:
             "tasteoff_average": taste_avg,
         }
     # top_rated: opened/voted bottles with the strongest club votes.
-    by_wine = defaultdict(lambda: {"up": 0, "meh": 0, "down": 0, "name": "", "vintage": None, "producer": ""})
+    by_wine = defaultdict(
+        lambda: {
+            "up": 0,
+            "meh": 0,
+            "down": 0,
+            "name": "",
+            "vintage": None,
+            "producer": "",
+        }
+    )
     for event in voted:
         key = (fold(event.wine_name), event.vintage, fold(event.producer or ""))
         bucket = by_wine[key]
@@ -886,7 +918,9 @@ def _answer_tasteoff(club, members, data) -> dict:
         TasteOff.objects.filter(club=club["club"])
         .select_related("host")
         .prefetch_related(
-            Prefetch("bottles", queryset=TasteOffBottle.objects.order_by("sort_order", "id")),
+            Prefetch(
+                "bottles", queryset=TasteOffBottle.objects.order_by("sort_order", "id")
+            ),
             Prefetch(
                 "scores",
                 queryset=TasteOffScore.objects.select_related("user", "bottle"),
@@ -920,7 +954,11 @@ def _answer_tasteoff(club, members, data) -> dict:
         if titled:
             picked = titled
     if when in {"next", "upcoming", "volgende"} or (not when and not named):
-        open_ones = [t for t in rows if t.status in (TasteOff.STATUS_SETUP, TasteOff.STATUS_SCORING)]
+        open_ones = [
+            t
+            for t in rows
+            if t.status in (TasteOff.STATUS_SETUP, TasteOff.STATUS_SCORING)
+        ]
         if open_ones and when in {"next", "upcoming", "volgende"}:
             return {
                 "status": "ok",
@@ -930,7 +968,11 @@ def _answer_tasteoff(club, members, data) -> dict:
                 "tasteoff": _serialize_tasteoff(open_ones[0], include_scores=False),
             }
         if not when and not named:
-            open_ones = [t for t in rows if t.status in (TasteOff.STATUS_SETUP, TasteOff.STATUS_SCORING)]
+            open_ones = [
+                t
+                for t in rows
+                if t.status in (TasteOff.STATUS_SETUP, TasteOff.STATUS_SCORING)
+            ]
             if open_ones:
                 return {
                     "status": "ok",
@@ -956,7 +998,11 @@ def _answer_tasteoff(club, members, data) -> dict:
             "status": "ok",
             "kind": "tasteoff",
             "club": _club_meta(club),
-            "mode": "last" if when in {"last", "won", "winner", "laas", "gewen"} else "scores",
+            "mode": (
+                "last"
+                if when in {"last", "won", "winner", "laas", "gewen"}
+                else "scores"
+            ),
             "tasteoff": _serialize_tasteoff(target, include_scores=True),
         }
     target = picked[0]

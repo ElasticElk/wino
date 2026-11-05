@@ -4,10 +4,11 @@ It is not taste evidence: recording one must not rebuild the cellar profile.
 Later taps (accepted, rejected, a place) merge into that same payload.
 """
 
+from unittest.mock import patch
+
 import pytest
 from django.urls import reverse
 from rest_framework.authtoken.models import Token
-from unittest.mock import patch
 
 from wine_cellar.apps.scanner.households import get_user_household
 from wine_cellar.apps.scanner.models import Household

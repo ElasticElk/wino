@@ -257,7 +257,9 @@ def apply_policy(club: Club, cellar_visibility=None, badges_visible=None):
 
 
 def leave_club(membership: ClubMembership):
-    """Return ('left', None) | ('deleted', None) | ('handover', None) | ('passed', club_id)."""
+    """Return one of ('left', None), ('deleted', None), ('handover', None)
+    or ('passed', club_id)."""
+
     club = membership.club
     household = membership.household
     others = club.memberships.exclude(pk=membership.pk).count()
@@ -413,22 +415,40 @@ def _refresh_vote(vote: ClubDismantleVote) -> ClubDismantleVote:
 def resolve_dismantle(vote: ClubDismantleVote, status: str, rejector=None):
     if vote.status != ClubDismantleVote.STATUS_OPEN:
         return vote
+    # Read what the fan-out needs before flipping (ballots and club stay).
+    recipients = _ballot_recipients(vote)
+    now = timezone.now()
+    # Conditional update: only the first resolver (double tap, the last two
+    # members voting at once, the expiry beat) flips it and fans out.
+    won = ClubDismantleVote.objects.filter(
+        id=vote.id, status=ClubDismantleVote.STATUS_OPEN,
+    ).update(status=status, resolved_at=now)
+    if not won:
+        # Lost the race. If the winner passed it, the club (and this vote,
+        # by cascade) is gone already — don't touch vote.club.
+        try:
+            vote.refresh_from_db()
+        except ClubDismantleVote.DoesNotExist:
+            vote.status = ClubDismantleVote.STATUS_PASSED
+        return vote
     club = vote.club
     club_name = club.name
-    recipients = _ballot_recipients(vote)
     vote.status = status
-    vote.resolved_at = timezone.now()
-    vote.save(update_fields=["status", "resolved_at"])
+    vote.resolved_at = now
     from wine_cellar.apps.club.tasks import notify_dismantle_resolved
 
     transaction.on_commit(
-        lambda vid=vote.id, st=status, nm=club_name, rid=(rejector.id if rejector else None), rec=recipients: (
-            notify_dismantle_resolved.delay(vid, st, nm, rid, rec)
-        )
+        lambda vid=vote.id, st=status, nm=club_name, rid=(
+            rejector.id if rejector else None
+        ), rec=recipients: (notify_dismantle_resolved.delay(vid, st, nm, rid, rec))
     )
     if status == ClubDismantleVote.STATUS_PASSED:
         households = list(
-            {m.household for m in club.memberships.select_related("household") if m.household}
+            {
+                m.household
+                for m in club.memberships.select_related("household")
+                if m.household
+            }
         )
         club.delete()
         for household in households:
@@ -445,9 +465,15 @@ def cast_ballot(vote: ClubDismantleVote, user, choice: str):
         return vote, "no_ballot"
     if choice not in ("yes", "no"):
         return vote, "bad_choice"
-    ballot.choice = choice
-    ballot.decided_at = timezone.now()
-    ballot.save(update_fields=["choice", "decided_at"])
+    if ballot.choice == choice:
+        return vote, "already_voted"
+    # Conditional update on the choice we read: a second tap (same or other
+    # button) racing this one changes nothing and is told it already counted.
+    changed = ClubDismantleBallot.objects.filter(
+        id=ballot.id, choice=ballot.choice,
+    ).update(choice=choice, decided_at=timezone.now())
+    if not changed:
+        return vote, "already_voted"
     if choice == "no":
         resolve_dismantle(vote, ClubDismantleVote.STATUS_REJECTED, rejector=user)
         return _refresh_vote(vote), None
@@ -467,8 +493,12 @@ def cancel_dismantle(vote: ClubDismantleVote):
     vote = expire_if_needed(vote)
     if vote.status != ClubDismantleVote.STATUS_OPEN:
         return vote, "over"
-    resolve_dismantle(vote, ClubDismantleVote.STATUS_CANCELLED)
-    vote.refresh_from_db()
+    vote = resolve_dismantle(vote, ClubDismantleVote.STATUS_CANCELLED)
+    if vote.status not in (
+        ClubDismantleVote.STATUS_CANCELLED, ClubDismantleVote.STATUS_OPEN,
+    ):
+        # Lost to the last yes (passed, club gone) or a no: not cancelled.
+        return vote, "over"
     return vote, None
 
 

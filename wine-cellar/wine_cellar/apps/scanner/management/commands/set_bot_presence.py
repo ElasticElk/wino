@@ -31,6 +31,7 @@ SHORT_DESCRIPTION = (
 # by typing; they'd just be noise in the menu for people who never use them.
 # Keep in sync with scanner-service/integrations/telegram_commands.py
 COMMANDS = [
+    ("menu", "Home menu"),
     ("fridge", "What's in the cellar"),
     ("recent", "Recent bottles"),
     ("search", "Find a wine by name"),
