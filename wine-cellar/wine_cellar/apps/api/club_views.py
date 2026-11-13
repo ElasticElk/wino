@@ -735,20 +735,28 @@ class ClubInviteRedeemView(APIView):
                     {"error": "dismantle_in_progress"},
                     status=status.HTTP_409_CONFLICT,
                 )
-            if invite.is_expired or invite.revoked_at is not None:
-                return Response(
-                    {"error": "This invite was already used or has expired"},
-                    status=status.HTTP_410_GONE,
-                )
-            if invite.use_count >= invite.max_uses:
-                return Response(
-                    {"error": "This invite was already used or has expired"},
-                    status=status.HTTP_410_GONE,
-                )
-
             from wine_cellar.apps.scanner.models import TelegramUser
 
             existing_tu = TelegramUser.objects.filter(chat_id=chat_id).first()
+            # Someone already in the club (a double-tapped Join, or a retry
+            # after a timeout that did land) gets `already_member`, not 410:
+            # their own first redeem may be what used the invite up.
+            already_in = (
+                existing_tu is not None
+                and ClubMembership.objects.filter(
+                    club=club, user=existing_tu.user,
+                ).exists()
+            )
+            if not already_in and (
+                invite.is_expired
+                or invite.revoked_at is not None
+                or invite.use_count >= invite.max_uses
+            ):
+                return Response(
+                    {"error": "This invite was already used or has expired"},
+                    status=status.HTTP_410_GONE,
+                )
+
             if existing_tu is None and not household_name:
                 return Response(
                     {"error": "household_name is required"},
@@ -789,6 +797,13 @@ class ClubInviteRedeemView(APIView):
                         id=household_id,
                         memberships__user=tu.user,
                     ).first()
+                    if household is None and not already_in:
+                        # Never share a cellar they didn't pick (e.g. one
+                        # they left since the Join button was made).
+                        return Response(
+                            {"error": "household_not_yours"},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
                 if household is None:
                     household = get_user_household(tu.user)
                 if household is None:

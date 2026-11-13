@@ -65,10 +65,12 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.forbidden": "Only the owner can change that.",
         "club.name_taken": "You already have a club with that name.",
         "club.fresh": (
-            "That invite has expired or was already used. Ask them for a fresh link."
+            "That invite has expired or was already used. "
+            "Ask whoever sent it for a fresh link."
         ),
         "club.unreachable": (
-            "Couldn't reach the cellar just now — tap the link again in a minute."
+            "Couldn't reach the club just now — tap the invite link again in a minute. "
+            "It's safe to retry."
         ),
         "club.pitch": (
             "Wine clubs are for drinking with people who have their own cellars.\n\n"
@@ -112,6 +114,15 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.join.not_now": "Not now",
         "club.join.pick_hh": "Which cellar should {club} see?",
         "club.not_now.ok": "No problem. That link still works until {date}.",
+        "club.join.already": "You're already in {club}.",
+        "club.join.failed": (
+            "Something went wrong, so you haven't joined yet. "
+            "Try the invite link again in a few minutes."
+        ),
+        "club.join.lost_place": (
+            "Lost track of where we were, so you haven't joined yet. "
+            "Tap the invite link again to carry on."
+        ),
         "club.feed.opened": "{name} opened a {vintage} {wine}",
         "club.feed.put_back": "{name} put the {vintage} {wine} back.",
         "club.feed.joined": "{name} joined",
@@ -205,7 +216,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.type.FO": "Fortified",
         "club.type.OR": "Orange",
         "club.named.ok": "OK — here's what joining shares.",
-        "club.hh.taken": "That name's taken — pick another",
+        "club.hh.taken": "That name's taken — tap the suggestion or type another.",
         "club.comment.btn": "Say something",
         "club.comment.prompt": (
             "Type a short note (280 characters max). Only your next message counts."
@@ -560,10 +571,12 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.forbidden": "Net die eienaar kan dit verander.",
         "club.name_taken": "Jy het al 'n klub met daai naam.",
         "club.fresh": (
-            "Daai uitnodiging het verval of is al gebruik. Vra vir 'n nuwe skakel."
+            "Daai uitnodiging het verval of is al gebruik. "
+            "Vra wie dit gestuur het vir 'n nuwe skakel."
         ),
         "club.unreachable": (
-            "Kon nie die kelder nou bereik nie — tik die skakel oor 'n minuut weer."
+            "Kon nie die klub nou bereik nie — tik oor 'n minuut weer op die "
+            "uitnodigingskakel. Dis veilig om weer te probeer."
         ),
         "club.pitch": (
             "Wynklubs is om te drink met mense wat hul eie kelders het.\n\n"
@@ -607,6 +620,15 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.join.not_now": "Nou nie",
         "club.join.pick_hh": "Watter kelder moet {club} sien?",
         "club.not_now.ok": "Geen probleem. Daai skakel werk tot {date}.",
+        "club.join.already": "Jy is al in {club}.",
+        "club.join.failed": (
+            "Iets het skeefgeloop, so jy het nog nie aangesluit nie. "
+            "Probeer oor 'n paar minute weer die uitnodigingskakel."
+        ),
+        "club.join.lost_place": (
+            "Ek het vergeet waar ons was, so jy het nog nie aangesluit nie. "
+            "Tik weer op die uitnodigingskakel om aan te gaan."
+        ),
         "club.feed.opened": "{name} het 'n {vintage} {wine} oopgemaak",
         "club.feed.put_back": "{name} het die {vintage} {wine} teruggesit.",
         "club.feed.joined": "{name} het aangesluit",
@@ -699,8 +721,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.type.DE": "Nagereg",
         "club.type.FO": "Versterk",
         "club.type.OR": "Oranje",
-        "club.named.ok": "Reg — hier's wat aansluit deel.",
-        "club.hh.taken": "Daai naam is al geneem — kies 'n ander",
+        "club.named.ok": "Reg — dít deel jy as jy aansluit.",
+        "club.hh.taken": "Daai naam is al geneem — tik op die voorstel of skryf 'n ander naam.",
         "club.comment.btn": "Sê iets",
         "club.comment.prompt": (
             "Tik 'n kort nota (hoogstens 280 karakters). Net jou volgende boodskap tel."

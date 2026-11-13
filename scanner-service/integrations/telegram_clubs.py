@@ -266,6 +266,13 @@ class ClubFlow:
         return self.handler._get_api(update)
 
     def _staff_api(self):
+        """Club redeem is staff-only (it returns the joiner's token). The
+        default client is a member's token and gets a 403, so use the staff
+        client server.py builds for invite preview and redeem."""
+        api = getattr(self.handler, "admin_api", None)
+        if api is not None:
+            return api
+        logger.warning("club staff client missing; falling back to handler.api")
         return getattr(self.handler, "api", None)
 
     def bot_username(self) -> str:
@@ -962,12 +969,20 @@ class ClubFlow:
         if preview.get("dismantle_in_progress"):
             await update.message.reply_text(t(loc, "club.end.in_progress"))
             return
+        club = preview.get("club") or {}
         if preview.get("expired") or preview.get("used"):
+            # Their own join may be what used it up: say so, not "expired".
+            if club.get("id") and self._already_in_club(update, club["id"]):
+                await update.message.reply_text(
+                    t(loc, "club.join.already", club=esc(club.get("name") or "club")),
+                    parse_mode="HTML",
+                )
+                await self._show_home(update, club["id"])
+                return
             await update.message.reply_text(t(loc, "club.fresh"))
             return
         chat_id = str(update.effective_chat.id)
         code = preview.get("code")
-        club = preview.get("club") or {}
         self.remember(
             chat_id,
             step="join",
@@ -1012,6 +1027,19 @@ class ClubFlow:
             self.remember(chat_id, household_id=households[0]["id"], household_name=households[0].get("name"))
         await self._join_card(update)
 
+    def _already_in_club(self, update, club_id) -> bool:
+        if not self.handler._is_known(update):
+            return False
+        try:
+            payload = self._api(update).list_clubs() or {}
+        except Exception as e:
+            logger.info("[club] membership check failed: %s", e)
+            return False
+        clubs = payload.get("clubs") if isinstance(payload, dict) else payload
+        return any(
+            isinstance(c, dict) and c.get("id") == club_id for c in (clubs or [])
+        )
+
     async def _join_card(self, update, query=None):
         loc = self.locale(update)
         chat_id = str(update.effective_chat.id)
@@ -1027,8 +1055,12 @@ class ClubFlow:
         )
         code = state.get("code") or ""
         join_label = t(loc, "club.join.btn", name=state.get("club_name") or "club")
+        # The button carries the chosen cellar, so a tap after a restart (state
+        # gone) still shares the cellar this card named, not the default one.
+        hh_id = state.get("household_id")
+        join_cb = club_cb("j", code, hh_id) if hh_id else club_cb("j", code)
         keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton(join_label, callback_data=club_cb("j", code)),
+            InlineKeyboardButton(join_label, callback_data=join_cb),
             InlineKeyboardButton(t(loc, "club.join.not_now"), callback_data=club_cb("nn", code)),
         ]])
         if query is not None:
@@ -1037,7 +1069,52 @@ class ClubFlow:
         else:
             await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
 
-    async def _do_join(self, update, query, code: str):
+    async def _ask_which_cellar(self, update, query, code, households):
+        """Re-ask the cellar from a Join tap. State may be gone (restart), so
+        re-read the invite: the next card must name the club and its policy."""
+        from integrations.telegram_bot import _safe_edit
+        loc = self.locale(update)
+        chat_id = str(update.effective_chat.id)
+        state = self.state_for(chat_id) or {}
+        if not state.get("club_name") or state.get("code") != code:
+            if state.get("code") != code:
+                # Another invite's details must never label this one.
+                for stale in ("club_name", "cellar_visibility", "badges_visible", "inviter", "expires_at"):
+                    state.pop(stale, None)
+            try:
+                preview = self._staff_api().preview_invite(code) or {}
+            except Exception:
+                preview = {}
+            if preview.get("expired") or preview.get("used"):
+                self.clear(chat_id)
+                club_id = (preview.get("club") or {}).get("id")
+                if club_id and self._already_in_club(update, club_id):
+                    await self._show_home(update, club_id, query=query)
+                else:
+                    await _safe_edit(query, t(loc, "club.fresh"))
+                return
+            if preview.get("kind") == "club":
+                self.remember(
+                    chat_id,
+                    club_name=(preview.get("club") or {}).get("name") or "club",
+                    cellar_visibility=preview.get("cellar_visibility") or "full",
+                    badges_visible=preview.get("badges_visible", True),
+                    inviter=preview.get("inviter_display_name") or "",
+                    expires_at=preview.get("expires_at"),
+                )
+                state = self.state_for(chat_id) or {}
+        self.remember(chat_id, step="pick_hh", code=code, household_id=None)
+        await _safe_edit(
+            query,
+            t(loc, "club.join.pick_hh", club=esc(state.get("club_name") or "the club")),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                h.get("name") or "Cellar",
+                callback_data=club_cb("ph", code, h["id"]),
+            )] for h in households]),
+        )
+
+    async def _do_join(self, update, query, code: str, household_id=None):
         loc = self.locale(update)
         chat_id = str(update.effective_chat.id)
         state = self.state_for(chat_id) or {}
@@ -1046,6 +1123,21 @@ class ClubFlow:
         if api is None:
             await _safe_edit(query, t(loc, "club.unreachable"))
             return
+        known = self.handler._is_known(update)
+        # The button names the cellar its card showed; it beats older state.
+        household_id = household_id or state.get("household_id")
+        if known and household_id is None:
+            # No cellar on the tap (old button, state lost): never let the
+            # server fall back to a default cellar the person didn't pick.
+            try:
+                households = self._api(update).list_households() or []
+            except Exception:
+                households = []
+            if len(households) > 1:
+                await self._ask_which_cellar(update, query, code, households)
+                return
+            if households:
+                household_id = households[0].get("id")
         display = ""
         user = getattr(update, "effective_user", None)
         if user is not None:
@@ -1054,13 +1146,24 @@ class ClubFlow:
             result = api.redeem_club_invite(
                 code, chat_id, display,
                 household_name=state.get("household_name"),
-                household_id=state.get("household_id"),
+                household_id=household_id,
             )
         except Exception:
             logger.exception("[club] redeem failed")
             await _safe_edit(query, t(loc, "club.unreachable"))
             return
         status = result.get("status_code")
+        if status == 400 and result.get("error") == "household_not_yours" and known:
+            try:
+                households = self._api(update).list_households() or []
+            except Exception:
+                households = []
+            if households:
+                await self._ask_which_cellar(update, query, code, households)
+                return
+        if status == 404 and result.get("error") == "not_enabled":
+            await _safe_edit(query, t(loc, "club.off"))
+            return
         if status in (404, 410) or result.get("expired") or result.get("used") and not result.get("token"):
             await _safe_edit(query, t(loc, "club.fresh"))
             return
@@ -1082,11 +1185,23 @@ class ClubFlow:
         if isinstance(status, int) and status >= 500:
             await _safe_edit(query, t(loc, "club.unreachable"))
             return
+        if (
+            status == 400 and not known
+            and "household_name" in str(result.get("error") or "")
+        ):
+            # A stranger whose typed cellar name was lost (bot restart): the
+            # link re-runs the naming step.
+            await _safe_edit(query, t(loc, "club.join.lost_place"))
+            return
         if result.get("error") and not result.get("token"):
-            await _safe_edit(query, t(loc, "club.err"))
+            log = logger.error if status in (401, 403) else logger.warning
+            log("[club] redeem refused status=%s error=%s", status, result.get("error"))
+            await _safe_edit(query, t(loc, "club.join.failed"))
             return
         self.clear(chat_id)
-        if result.get("token"):
+        # Only a newcomer is wired up here. A known chat keeps its client,
+        # active cellar and currency: joining a club must not switch them.
+        if result.get("token") and not known:
             try:
                 await self.handler._invite_flow()._hot_add(chat_id, result)
             except Exception:
@@ -1195,7 +1310,8 @@ class ClubFlow:
         elif action == "zc":
             await self._dismantle_cancel(update, int(rest[0]), query)
         elif action == "j":
-            await self._do_join(update, query, rest[0] if rest else "")
+            hh = int(rest[1]) if len(rest) > 1 and rest[1].isdigit() else None
+            await self._do_join(update, query, rest[0] if rest else "", household_id=hh)
         elif action == "nn":
             chat_id = str(query.message.chat_id)
             state = self.state_for(chat_id) or {}

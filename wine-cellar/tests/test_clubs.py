@@ -789,3 +789,124 @@ def test_cancel_after_vote_passed_is_over_not_error(client, db, django_user_mode
     vote, err = cancel_dismantle(stale)
     assert err == "over"
     assert vote.status == ClubDismantleVote.STATUS_PASSED
+
+
+# --- Join through an invite (redeem) -----------------------------------------
+
+
+def _mint_club_invite(client, owner, **invite_fields):
+    club_id = _create_club(client, owner).json()["id"]
+    code = _auth(client, owner).post(
+        reverse("api-club-invites", kwargs={"pk": club_id}),
+        data={}, content_type="application/json",
+    ).json()["code"]
+    if invite_fields:
+        ClubInvite.objects.filter(code=code).update(**invite_fields)
+    return club_id, code
+
+
+def _redeem(client, staff, code, chat_id, display_name, **extra):
+    return _auth(client, staff).post(
+        reverse("api-scanner-club-invites-redeem"),
+        data={"code": code, "chat_id": chat_id, "display_name": display_name, **extra},
+        content_type="application/json",
+    )
+
+
+def test_redeem_refuses_non_staff_token(client, db, django_user_model):
+    # The bot must call this with its staff client: a member token is a 403.
+    _people(django_user_model)
+    riley = django_user_model.objects.get(username="riley")
+    _club_id, code = _mint_club_invite(client, riley)
+    refused = _redeem(
+        client, riley, code, "900", "Pat", household_name="Pat's cellar",
+    )
+    assert refused.status_code == 403
+    assert not Household.objects.filter(name="Pat's cellar").exists()
+    assert ClubInvite.objects.get(code=code).use_count == 0
+
+
+def test_redeem_double_tap_new_user_last_use(client, db, django_user_model):
+    # A repeat redeem after the joiner took the last use is already_member,
+    # not 410, and leaves one cellar, one membership and one counted use.
+    _people(django_user_model, staff=True)
+    riley = django_user_model.objects.get(username="riley")
+    club_id, code = _mint_club_invite(client, riley, max_uses=1)
+    body = {"household_name": "Pat's cellar"}
+    first = _redeem(client, riley, code, "900", "Pat", **body)
+    second = _redeem(client, riley, code, "900", "Pat", **body)
+    assert first.status_code == 201, first.content
+    assert second.status_code == 200, second.content
+    assert second.json()["status"] == "already_member"
+    assert second.json()["club"]["id"] == club_id
+    assert second.json()["token"] == first.json()["token"]
+    pat = TelegramUser.objects.get(chat_id="900").user
+    assert Household.objects.filter(name="Pat's cellar").count() == 1
+    assert HouseholdMembership.objects.filter(user=pat).count() == 1
+    assert ClubMembership.objects.filter(club_id=club_id, user=pat).count() == 1
+    assert ClubInvite.objects.get(code=code).use_count == 1
+
+
+def test_redeem_existing_user_joins_chosen_cellar(client, db, django_user_model):
+    hillside, riverside, riley, _sam, lee = _people(django_user_model, staff=True)
+    # Lee's default cellar is Hillside, so landing on Riverside proves the
+    # posted household_id is honoured rather than the default.
+    HouseholdMembership.objects.filter(user=lee).update(is_default=False)
+    HouseholdMembership.objects.create(
+        user=lee, household=hillside, role="member", is_default=True,
+    )
+    club_id, code = _mint_club_invite(client, riley, max_uses=1)
+    households_before = Household.objects.count()
+    first = _redeem(
+        client, riley, code, "300", "Lee", household_id=riverside.id,
+    )
+    again = _redeem(
+        client, riley, code, "300", "Lee", household_id=riverside.id,
+    )
+    assert first.status_code == 201, first.content
+    assert first.json()["first_cellar"] is False
+    assert again.status_code == 200
+    assert again.json()["status"] == "already_member"
+    membership = ClubMembership.objects.get(club_id=club_id, user=lee)
+    assert membership.household_id == riverside.id
+    assert Household.objects.count() == households_before
+    assert ClubInvite.objects.get(code=code).use_count == 1
+
+
+def test_redeem_used_up_by_someone_else_is_410(client, db, django_user_model):
+    _hillside, riverside, riley, _sam, _lee = _people(django_user_model, staff=True)
+    club_id, code = _mint_club_invite(client, riley, max_uses=1)
+    assert _redeem(
+        client, riley, code, "300", "Lee", household_id=riverside.id,
+    ).status_code == 201
+    late = _redeem(client, riley, code, "900", "Pat", household_name="Pat's cellar")
+    assert late.status_code == 410
+    assert not Household.objects.filter(name="Pat's cellar").exists()
+    assert not TelegramUser.objects.filter(chat_id="900").exists()
+    assert ClubInvite.objects.get(code=code).use_count == 1
+
+
+def test_redeem_expired_is_410(client, db, django_user_model):
+    _people(django_user_model, staff=True)
+    riley = django_user_model.objects.get(username="riley")
+    club_id, code = _mint_club_invite(
+        client, riley, expires_at=timezone.now() - timedelta(minutes=1),
+    )
+    late = _redeem(client, riley, code, "900", "Pat", household_name="Pat's cellar")
+    assert late.status_code == 410
+    assert not Household.objects.filter(name="Pat's cellar").exists()
+    assert ClubMembership.objects.filter(club_id=club_id).count() == 1
+    assert ClubInvite.objects.get(code=code).use_count == 0
+
+
+def test_redeem_cellar_not_theirs_is_400(client, db, django_user_model):
+    # A Join button naming a cellar they've since left must not fall back
+    # to sharing their default cellar.
+    hillside, _riverside, riley, _sam, _lee = _people(django_user_model, staff=True)
+    club_id, code = _mint_club_invite(client, riley)
+    refused = _redeem(client, riley, code, "300", "Lee", household_id=hillside.id)
+    assert refused.status_code == 400
+    assert refused.json()["error"] == "household_not_yours"
+    lee = TelegramUser.objects.get(chat_id="300").user
+    assert not ClubMembership.objects.filter(club_id=club_id, user=lee).exists()
+    assert ClubInvite.objects.get(code=code).use_count == 0
