@@ -299,6 +299,14 @@ def serialize_bottle(
         avg = (sum(s.score for s in scores) / n) if n else None
         body["average"] = round(avg, 1) if avg is not None else None
         body["n"] = n
+        # Closed tastings only: how each member scored this wine.
+        body["votes"] = sorted(
+            (
+                {"name": display_name(s.user) if s.user_id else "", "score": s.score}
+                for s in scores
+            ),
+            key=lambda v: (-v["score"], v["name"].casefold()),
+        )
     return body
 
 
@@ -345,13 +353,14 @@ def serialize_tasteoff(tasteoff: TasteOff, *, user=None, include_scores=False):
     bottles = list(tasteoff.bottles.all())
     score_map = {}
     if include_scores or tasteoff.status == TasteOff.STATUS_CLOSED:
-        for score in tasteoff.scores.select_related("bottle"):
+        for score in tasteoff.scores.select_related("bottle", "user"):
             score_map.setdefault(score.bottle_id, []).append(score)
     hide = tasteoff.status != TasteOff.STATUS_CLOSED
     return {
         "id": tasteoff.id,
         "title": tasteoff.title,
         "status": tasteoff.status,
+        "closed_at": tasteoff.closed_at.isoformat() if tasteoff.closed_at else None,
         "host_id": tasteoff.host_id,
         # The bot can't tell who's asking; only the host may set up or open.
         "is_host": bool(user is not None and tasteoff.host_id == user.id),
@@ -376,7 +385,7 @@ class TasteOffCollectionView(TasteoffsEnabledMixin, ScannerAPIView):
         if error:
             return error
         rows = list(
-            TasteOff.objects.filter(club=membership.club).order_by("-created")[:8]
+            TasteOff.objects.filter(club=membership.club).order_by("-created")[:20]
         )
         return Response(
             {

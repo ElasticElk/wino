@@ -699,3 +699,33 @@ def test_tasteoff_messages_host_scores_and_reopen(db, django_user_model, monkeyp
     (chat, _text, kw), = sent
     reopen = kw["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
     assert reopen == f"cl:tr:{tasteoff.id}"
+
+
+def test_tasteoff_votes_hidden_until_closed(client, db, django_user_model):
+    _hillside, riverside, riley, _sam, lee = _people(django_user_model)
+    club, tasteoff = _scoring_tasteoff(client, riley, lee, riverside)
+    first, second = tasteoff.bottles.order_by("id")
+    for user, bottle, score in ((riley, first, 4), (lee, first, 2), (riley, second, 5)):
+        _auth(client, user).patch(
+            _url("api-club-tasteoff-scores", club, tasteoff),
+            data={"bottle_id": bottle.id, "score": score},
+            content_type="application/json",
+        )
+    detail = _url("api-club-tasteoff-detail", club, tasteoff)
+    open_body = _auth(client, riley).get(detail).json()
+    assert all("votes" not in b and "average" not in b for b in open_body["bottles"])
+    _auth(client, lee).post(
+        _url("api-club-tasteoff-close", club, tasteoff), data={},
+        content_type="application/json",
+    )
+    closed = _auth(client, riley).get(detail).json()
+    assert closed["closed_at"]
+    by_label = {b["label"]: b for b in closed["bottles"]}
+    votes = by_label["Chenin 2022"]["votes"]
+    assert [v["score"] for v in votes] == [4, 2]
+    assert len({v["name"] for v in votes}) == 2
+    assert by_label["Merlot 2019"]["votes"] == [{"name": votes[0]["name"], "score": 5}]
+    listed = _auth(client, riley).get(
+        reverse("api-club-tasteoffs", kwargs={"pk": club.id}),
+    ).json()["tasteoffs"][0]
+    assert listed["bottles"][0]["votes"]

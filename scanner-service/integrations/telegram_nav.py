@@ -325,6 +325,8 @@ def follow_up_rows(kind: str, ctx: dict | None = None) -> list[list[InlineKeyboa
             row.append(_btn("\U0001F4AC Say something", club_cb("cm", ctx["event_id"])))
         if flags.get("feature_tasteoffs") and ctx.get("club_id"):
             row.append(_btn("\U0001F3C6 Taste-off", club_cb("to", ctx["club_id"])))
+            row.append(menu)
+            return [row, [_btn("\U0001F4DC Past tastings", club_cb("th", ctx["club_id"]))]]
     row.append(menu)
     return [row]
 

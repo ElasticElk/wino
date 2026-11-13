@@ -269,6 +269,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.to.reopen_busy": "Another tasting is already running in this club.",
         "club.to.reopen_or_new": "{title} closed. Reopen it (scores so far are kept) or start a new one?",
         "club.to.start_new": "Start a new one",
+        "club.to.history": "Past tastings",
+        "club.to.history_empty": "No finished tastings in this club yet.",
+        "club.to.hosted_by": "Hosted by {host}",
+        "club.to.no_votes": "no scores",
         "club.to.name_tap": "{label} — tap a number below it to score.",
         "club.to.hosting": (
             "{host} is setting up {title}. You'll get a ping when scoring opens."
@@ -793,6 +797,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.to.reopen_busy": "Daar is al 'n ander proe aan die gang in hierdie klub.",
         "club.to.reopen_or_new": "{title} is gesluit. Heropen dit (tellings tot dusver bly) of begin 'n nuwe een?",
         "club.to.start_new": "Begin 'n nuwe een",
+        "club.to.history": "Vorige proeë",
+        "club.to.history_empty": "Nog geen afgehandelde proeë in hierdie klub nie.",
+        "club.to.hosted_by": "Aangebied deur {host}",
+        "club.to.no_votes": "geen tellings",
         "club.to.name_tap": "{label} — tik 'n nommer daaronder om te tel.",
         "club.to.hosting": (
             "{host} berei {title} voor. Jy kry 'n boodskap sodra die telling begin."

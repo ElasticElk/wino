@@ -333,3 +333,75 @@ def test_reopen_copy_has_afrikaans():
                 "club.to.reopen_late", "club.to.reopen_busy", "club.to.reopen_or_new",
                 "club.to.start_new"):
         assert t("af", key) != t("en", key), key
+
+
+# --- Past tastings ------------------------------------------------------------
+
+CLOSED = {
+    "id": 2, "title": "Nat piele", "status": "closed",
+    "closed_at": "2026-11-13T22:30:03+00:00", "host_name": "Riley",
+    "can_reopen": False,
+    "bottles": [
+        {"id": 3, "label": "Lilian 2012", "average": 3.5, "n": 2, "votes": [
+            {"name": "Sam", "score": 4}, {"name": "Riley", "score": 3},
+        ]},
+        {"id": 4, "label": "Lilian 2018", "average": 4.5, "n": 2, "votes": [
+            {"name": "Riley", "score": 5}, {"name": "Sam", "score": 4},
+        ]},
+    ],
+}
+
+
+@pytest.mark.asyncio
+async def test_past_tastings_lists_closed_ones_with_the_winner():
+    handler, api = _handler(is_host=False)
+    api.list_tasteoffs.return_value = {"tasteoffs": [dict(SETUP), dict(CLOSED)]}
+    text, datas = await _run(handler, club_cb("th", 1))
+    assert "Nat piele" in text and "13 Nov" in text
+    assert "Lilian 2018 (4.5)" in text
+    assert "Friday flight" not in text  # still in setup
+    assert datas == [club_cb("tv", 1, 2), club_cb("h", 1)]
+
+
+@pytest.mark.asyncio
+async def test_past_tasting_shows_ranking_and_how_everyone_scored():
+    handler, api = _handler(is_host=False)
+    api.get_tasteoff.return_value = dict(CLOSED)
+    text, datas = await _run(handler, club_cb("tv", 1, 2))
+    first, second = text.index("Lilian 2018"), text.index("Lilian 2012")
+    assert first < second  # ranked by average
+    assert "Riley 5 · Sam 4" in text and "Sam 4 · Riley 3" in text
+    assert "Hosted by Riley" in text
+    assert datas == [club_cb("th", 1)]
+
+
+@pytest.mark.asyncio
+async def test_past_tasting_offers_reopen_to_the_host_in_the_window():
+    handler, api = _handler(is_host=True)
+    api.get_tasteoff.return_value = dict(CLOSED, can_reopen=True)
+    _text, datas = await _run(handler, club_cb("tv", 1, 2))
+    assert datas == [club_cb("tr", 2), club_cb("th", 1)]
+
+
+@pytest.mark.asyncio
+async def test_no_past_tastings_says_so():
+    handler, api = _handler(is_host=False)
+    api.list_tasteoffs.return_value = {"tasteoffs": [dict(SETUP)]}
+    text, datas = await _run(handler, club_cb("th", 1))
+    assert text == t("en", "club.to.history_empty")
+    assert datas == [club_cb("h", 1)]
+
+
+def test_club_home_has_past_tastings_when_tasteoffs_on():
+    from integrations.telegram_nav import follow_up_rows
+    rows = follow_up_rows("club", {"club_id": 1, "flags": {"feature_tasteoffs": True}})
+    datas = [b.callback_data for row in rows for b in row]
+    assert club_cb("th", 1) in datas and club_cb("to", 1) in datas
+    off = follow_up_rows("club", {"club_id": 1, "flags": {}})
+    assert club_cb("th", 1) not in [b.callback_data for row in off for b in row]
+
+
+def test_history_copy_has_afrikaans():
+    for key in ("club.to.history", "club.to.history_empty", "club.to.hosted_by",
+                "club.to.no_votes"):
+        assert t("af", key) != t("en", key), key

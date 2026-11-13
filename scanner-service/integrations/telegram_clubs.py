@@ -176,6 +176,23 @@ def _discover_row(loc, flags) -> list:
     )]
 
 
+def _short_date(iso) -> str:
+    """'2026-11-13T22:30:03+00:00' -> '13 Nov'."""
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(str(iso)).strftime("%-d %b")
+    except (TypeError, ValueError):
+        return ""
+
+
+def _winner(row: dict) -> str:
+    scored = [b for b in row.get("bottles") or [] if b.get("average") is not None]
+    if not scored:
+        return ""
+    best = max(scored, key=lambda b: b["average"])
+    return f"{best.get('label') or ''} ({best['average']:.1f})"
+
+
 def build_scoring(body: dict, loc: str, *, host: bool = False):
     """The scoring card: every wine's full name in the text, then per wine a
     name button (tapping it only shows the name) and a 1-5 row with a tick on
@@ -1426,6 +1443,10 @@ class ClubFlow:
             await self._tasteoff_add_wine(
                 update, int(rest[0]), int(rest[1]) if len(rest) > 1 else 0, query,
             )
+        elif action == "th":
+            await self._show_history(update, int(rest[0]), query)
+        elif action == "tv":
+            await self._show_past(update, int(rest[0]), int(rest[1]), query)
         elif action == "tq":
             await self._start_tasteoff(
                 update, club_id=int(rest[0]) if rest else None, query=query, force_new=True,
@@ -2456,6 +2477,85 @@ class ClubFlow:
         except Exception as e:
             logger.info("[club] answer() failed: %s", e)
         return True
+
+    async def _show_history(self, update, club_id, query):
+        """Finished tastings in this club, newest first, with the winner."""
+        loc = self.locale(update)
+        from integrations.telegram_bot import _safe_edit
+        try:
+            rows = (self._api(update).list_tasteoffs(club_id) or {}).get("tasteoffs") or []
+        except Exception as e:
+            logger.warning("[club] tasting history failed: %s", e)
+            await _safe_edit(query, t(loc, "club.err"))
+            return
+        closed = [r for r in rows if r.get("status") == "closed"]
+        back = [InlineKeyboardButton(t(loc, "club.back"), callback_data=club_cb("h", club_id))]
+        if not closed:
+            await _safe_edit(
+                query, t(loc, "club.to.history_empty"),
+                reply_markup=InlineKeyboardMarkup([back]),
+            )
+            return
+        lines = [f"<b>{t(loc, 'club.to.history')}</b>", ""]
+        buttons = []
+        for row in closed[:10]:
+            when = _short_date(row.get("closed_at"))
+            winner = _winner(row)
+            title = row.get("title") or "Tasting"
+            lines.append(
+                f"\U0001F3C6 <b>{esc(title)}</b>" + (f" · {when}" if when else "")
+                + (f"\n   {esc(winner)}" if winner else "")
+            )
+            buttons.append([InlineKeyboardButton(
+                f"{title[:32]}" + (f" · {when}" if when else ""),
+                callback_data=club_cb("tv", club_id, row["id"]),
+            )])
+        buttons.append(back)
+        await _safe_edit(
+            query, "\n".join(lines), parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _show_past(self, update, club_id, tid, query):
+        """One finished tasting: the ranking and how each person scored."""
+        loc = self.locale(update)
+        from integrations.telegram_bot import _safe_edit
+        body = self._api(update).get_tasteoff(club_id, tid) or {}
+        if body.get("error") or body.get("status") != "closed":
+            await _safe_edit(query, t(loc, "club.err"))
+            return
+        when = _short_date(body.get("closed_at"))
+        lines = [
+            f"\U0001F3C6 <b>{esc(body.get('title') or '')}</b>"
+            + (f" · {when}" if when else ""),
+        ]
+        if body.get("host_name"):
+            lines.append(t(loc, "club.to.hosted_by", host=esc(body["host_name"])))
+        lines.append("")
+        bottles = sorted(
+            body.get("bottles") or [],
+            key=lambda b: (b.get("average") is None, -(b.get("average") or 0),
+                           (b.get("label") or "").casefold()),
+        )
+        for n, bottle in enumerate(bottles, start=1):
+            avg = bottle.get("average")
+            avg_s = f"{avg:.1f}" if isinstance(avg, (int, float)) else "\u2014"
+            lines.append(f"{n}. <b>{esc(bottle.get('label') or '')}</b> — {avg_s}")
+            votes = bottle.get("votes") or []
+            if votes:
+                lines.append("   " + " · ".join(
+                    f"{esc(v.get('name') or '?')} {v.get('score')}" for v in votes
+                ))
+            else:
+                lines.append("   " + t(loc, "club.to.no_votes"))
+        rows = []
+        if body.get("can_reopen"):
+            rows.append([InlineKeyboardButton(t(loc, "club.to.reopen"), callback_data=club_cb("tr", tid))])
+        rows.append([InlineKeyboardButton(t(loc, "club.back"), callback_data=club_cb("th", club_id))])
+        await _safe_edit(
+            query, "\n".join(lines), parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
 
     async def _close_confirm(self, update, tid, query):
         """Close at once when everyone has scored; otherwise say who we're
