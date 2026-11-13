@@ -17,12 +17,18 @@ from wine_cellar.apps.api.views import ScannerAPIView
 from wine_cellar.apps.club.models import (
     ClubComment,
     ClubEvent,
+    ClubMembership,
     TasteOff,
     TasteOffBottle,
     TasteOffScore,
 )
 from wine_cellar.apps.club.peek import effective_visibility, tighter_visibility
-from wine_cellar.apps.club.services import close_tasteoff, display_name
+from wine_cellar.apps.club.services import (
+    TASTEOFF_REOPEN_WINDOW,
+    close_tasteoff,
+    display_name,
+    reopen_tasteoff,
+)
 from wine_cellar.apps.scanner.flags import flag_on
 from wine_cellar.apps.wine.models import (
     Wine,
@@ -296,6 +302,45 @@ def serialize_bottle(
     return body
 
 
+def _tasteoff_scorers(tasteoff: TasteOff, n_bottles: int) -> list:
+    """Who has scored so far (names only, never their scores), so the host
+    knows whether to wait before closing."""
+    counts = {}
+    for user_id in tasteoff.scores.values_list("user_id", flat=True):
+        counts[user_id] = counts.get(user_id, 0) + 1
+    rows = []
+    memberships = (
+        ClubMembership.objects.filter(club_id=tasteoff.club_id)
+        .select_related("user")
+        .order_by("created", "id")
+    )
+    for membership in memberships:
+        n = counts.get(membership.user_id, 0)
+        rows.append({
+            "name": display_name(membership.user),
+            "scored": n,
+            "done": n_bottles > 0 and n >= n_bottles,
+        })
+    return rows
+
+
+def _can_reopen(tasteoff: TasteOff, user) -> bool:
+    if user is None or tasteoff.status != TasteOff.STATUS_CLOSED:
+        return False
+    if tasteoff.closed_at is None:
+        return False
+    if timezone.now() - tasteoff.closed_at > TASTEOFF_REOPEN_WINDOW:
+        return False
+    if tasteoff.host_id != user.id and not ClubMembership.objects.filter(
+        club_id=tasteoff.club_id, user=user, role=ClubMembership.ROLE_OWNER,
+    ).exists():
+        return False
+    return not TasteOff.objects.filter(
+        club_id=tasteoff.club_id,
+        status__in=(TasteOff.STATUS_SETUP, TasteOff.STATUS_SCORING),
+    ).exists()
+
+
 def serialize_tasteoff(tasteoff: TasteOff, *, user=None, include_scores=False):
     bottles = list(tasteoff.bottles.all())
     score_map = {}
@@ -311,6 +356,8 @@ def serialize_tasteoff(tasteoff: TasteOff, *, user=None, include_scores=False):
         # The bot can't tell who's asking; only the host may set up or open.
         "is_host": bool(user is not None and tasteoff.host_id == user.id),
         "host_name": display_name(tasteoff.host) if tasteoff.host_id else "",
+        "scorers": _tasteoff_scorers(tasteoff, len(bottles)),
+        "can_reopen": _can_reopen(tasteoff, user),
         "bottles": [
             serialize_bottle(
                 b,
@@ -510,6 +557,31 @@ class TasteOffCloseView(TasteoffsEnabledMixin, ScannerAPIView):
             )
         close_tasteoff(tasteoff)
         tasteoff.refresh_from_db()
+        return Response(
+            serialize_tasteoff(tasteoff, user=request.user, include_scores=True)
+        )
+
+
+class TasteOffReopenView(TasteoffsEnabledMixin, ScannerAPIView):
+    """Host or club owner: put a closed taste-off back into scoring (24h)."""
+
+    def post(self, request, pk, tid):
+        membership, error = _member_or_404(request, pk)
+        if error:
+            return error
+        tasteoff = TasteOff.objects.filter(club=membership.club, id=tid).first()
+        if tasteoff is None:
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        if (
+            tasteoff.host_id != request.user.id
+            and membership.role != membership.ROLE_OWNER
+        ):
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        tasteoff, err = reopen_tasteoff(tasteoff)
+        if err == "not_found":
+            return Response({"error": err}, status=status.HTTP_404_NOT_FOUND)
+        if err:
+            return Response({"error": err}, status=status.HTTP_409_CONFLICT)
         return Response(
             serialize_tasteoff(tasteoff, user=request.user, include_scores=True)
         )

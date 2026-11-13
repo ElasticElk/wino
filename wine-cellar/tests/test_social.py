@@ -566,3 +566,136 @@ def test_tasteoff_score_buttons_never_carry_the_wine_name(db, django_user_model)
         assert [b["text"] for b in score_row] == ["1", "2", "3", "4", "5"]
     assert "Chenin <Blanc> & co" in rows[0][0]["text"]
     assert _score_lines(tasteoff) == "1. Chenin &lt;Blanc&gt; &amp; co\n2. Merlot 2019"
+
+
+def _scoring_tasteoff(client, riley, lee, riverside):
+    club = _club_with_member(client, riley, lee, riverside)
+    _enable("feature_tasteoffs")
+    tid = _auth(client, lee).post(
+        reverse("api-club-tasteoffs", kwargs={"pk": club.id}),
+        data={"title": "Flight"}, content_type="application/json",
+    ).json()["id"]
+    bottles = reverse("api-club-tasteoff-bottles", kwargs={"pk": club.id, "tid": tid})
+    for label in ("Chenin 2022", "Merlot 2019"):
+        _auth(client, lee).post(
+            bottles, data={"label": label}, content_type="application/json",
+        )
+    assert _auth(client, lee).post(
+        reverse("api-club-tasteoff-open", kwargs={"pk": club.id, "tid": tid}),
+        data={}, content_type="application/json",
+    ).status_code == 200
+    return club, TasteOff.objects.get(id=tid)
+
+
+def _url(name, club, tasteoff):
+    return reverse(name, kwargs={"pk": club.id, "tid": tasteoff.id})
+
+
+def _results_cards(club):
+    return ClubEvent.objects.filter(club=club, kind=ClubEvent.KIND_TASTEOFF)
+
+
+def test_tasteoff_reopen_keeps_scores_and_results_go(client, db, django_user_model):
+    _hillside, riverside, riley, _sam, lee = _people(django_user_model)
+    club, tasteoff = _scoring_tasteoff(client, riley, lee, riverside)
+    bottle = tasteoff.bottles.first()
+    _auth(client, riley).patch(
+        _url("api-club-tasteoff-scores", club, tasteoff),
+        data={"bottle_id": bottle.id, "score": 4}, content_type="application/json",
+    )
+    closed = _auth(client, lee).post(
+        _url("api-club-tasteoff-close", club, tasteoff), data={},
+        content_type="application/json",
+    )
+    assert closed.json()["can_reopen"] is True
+    assert _results_cards(club).count() == 1
+    reopened = _auth(client, lee).post(
+        _url("api-club-tasteoff-reopen", club, tasteoff), data={},
+        content_type="application/json",
+    )
+    assert reopened.status_code == 200, reopened.content
+    tasteoff.refresh_from_db()
+    assert tasteoff.status == TasteOff.STATUS_SCORING and tasteoff.closed_at is None
+    assert TasteOffScore.objects.filter(tasteoff=tasteoff).count() == 1
+    assert not _results_cards(club).exists()
+    # Riley can keep scoring; closing again posts one fresh results card.
+    _auth(client, lee).post(
+        _url("api-club-tasteoff-close", club, tasteoff), data={},
+        content_type="application/json",
+    )
+    assert _results_cards(club).count() == 1
+
+
+def test_tasteoff_reopen_rules(client, db, django_user_model):
+    hillside, riverside, riley, sam, lee = _people(django_user_model)
+    club, tasteoff = _scoring_tasteoff(client, riley, lee, riverside)
+    reopen = _url("api-club-tasteoff-reopen", club, tasteoff)
+    post = dict(data={}, content_type="application/json")
+    assert _auth(client, lee).post(reopen, **post).json()["error"] == "not_closed"
+    _auth(client, lee).post(_url("api-club-tasteoff-close", club, tasteoff), **post)
+    # Riley is a plain member here, not the host or owner.
+    ClubMembership.objects.filter(club=club, user=riley).update(role="member")
+    ClubMembership.objects.filter(club=club, user=lee).update(role="owner")
+    assert _auth(client, riley).post(reopen, **post).status_code == 403
+    assert _auth(client, riley).get(
+        _url("api-club-tasteoff-detail", club, tasteoff),
+    ).json()["can_reopen"] is False
+    TasteOff.objects.filter(id=tasteoff.id).update(
+        closed_at=timezone.now() - timedelta(hours=25),
+    )
+    assert _auth(client, lee).post(reopen, **post).json()["error"] == "too_late"
+    TasteOff.objects.filter(id=tasteoff.id).update(closed_at=timezone.now())
+    other = TasteOff.objects.create(club=club, host=riley, title="Second")
+    assert _auth(client, lee).post(reopen, **post).json()["error"] == "another_open"
+    other.delete()
+    assert _auth(client, lee).post(reopen, **post).status_code == 200
+
+
+def test_tasteoff_payload_lists_who_scored_not_scores(client, db, django_user_model):
+    _hillside, riverside, riley, _sam, lee = _people(django_user_model)
+    club, tasteoff = _scoring_tasteoff(client, riley, lee, riverside)
+    for bottle in tasteoff.bottles.all():
+        _auth(client, riley).patch(
+            _url("api-club-tasteoff-scores", club, tasteoff),
+            data={"bottle_id": bottle.id, "score": 5}, content_type="application/json",
+        )
+    detail = _url("api-club-tasteoff-detail", club, tasteoff)
+    body = _auth(client, lee).get(detail).json()
+    by_name = {row["name"]: row for row in body["scorers"]}
+    assert len(by_name) == 2
+    assert [r["done"] for r in body["scorers"]].count(True) == 1
+    assert all(set(r) == {"name", "scored", "done"} for r in body["scorers"])
+    assert all("average" not in b for b in body["bottles"])
+
+
+def test_tasteoff_messages_host_scores_and_reopen(db, django_user_model, monkeypatch):
+    from wine_cellar.apps.club import tasks
+
+    _hillside, riverside, riley, _sam, lee = _people(django_user_model)
+    _enable("feature_tasteoffs")
+    club = Club.objects.create(name="Thursday reds")
+    ClubMembership.objects.create(
+        club=club, user=lee, role="owner", household=riverside,
+    )
+    tasteoff = TasteOff.objects.create(
+        club=club, host=lee, title="Flight", status=TasteOff.STATUS_SCORING,
+    )
+    TasteOffBottle.objects.create(tasteoff=tasteoff, label="Chenin 2022")
+    sent = []
+    monkeypatch.setattr(tasks, "_bot_token", lambda: "t")
+    monkeypatch.setattr(
+        tasks, "_send",
+        lambda token, chat_id, text, **kw: sent.append((chat_id, text, kw)),
+    )
+    tasks.deliver_tasteoff_open(tasteoff.id)
+    (chat, _text, kw), = sent
+    keyboard = kw["reply_markup"]["inline_keyboard"]
+    datas = [b["callback_data"] for row in keyboard for b in row]
+    assert f"cl:ts:{tasteoff.id}:" in " ".join(datas)
+    assert datas[-1] == f"cl:tc:{tasteoff.id}"
+    sent.clear()
+    close_tasteoff(tasteoff)
+    tasks.deliver_tasteoff_closed(tasteoff.id)
+    (chat, _text, kw), = sent
+    reopen = kw["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+    assert reopen == f"cl:tr:{tasteoff.id}"

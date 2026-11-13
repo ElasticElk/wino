@@ -259,6 +259,16 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.to.from_cellar": "From a cellar",
         "club.to.off": "Taste-offs aren't on yet.",
         "club.to.scoring_hint": "Tap a number under each wine. Tap again to change it.",
+        "club.to.scored_by": "Scored: {names}",
+        "club.to.close_ask": "Still waiting on {names}. Close anyway?",
+        "club.to.close_anyway": "Close anyway",
+        "club.to.keep_open": "Keep it open",
+        "club.to.reopen": "Reopen scoring",
+        "club.to.reopened": "Scoring is open again. Everyone's been sent the score buttons.",
+        "club.to.reopen_late": "That tasting closed over a day ago, so it can't be reopened. Start a new one.",
+        "club.to.reopen_busy": "Another tasting is already running in this club.",
+        "club.to.reopen_or_new": "{title} closed. Reopen it (scores so far are kept) or start a new one?",
+        "club.to.start_new": "Start a new one",
         "club.to.name_tap": "{label} — tap a number below it to score.",
         "club.to.hosting": (
             "{host} is setting up {title}. You'll get a ping when scoring opens."
@@ -773,6 +783,16 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.to.from_cellar": "Uit 'n kelder",
         "club.to.off": "Proeë is nog nie aan nie.",
         "club.to.scoring_hint": "Tik 'n nommer onder elke wyn. Tik weer om dit te verander.",
+        "club.to.scored_by": "Getel: {names}",
+        "club.to.close_ask": "Wag nog op {names}. Sluit in elk geval?",
+        "club.to.close_anyway": "Sluit in elk geval",
+        "club.to.keep_open": "Hou dit oop",
+        "club.to.reopen": "Heropen telling",
+        "club.to.reopened": "Telling is weer oop. Almal het die tel-knoppies gekry.",
+        "club.to.reopen_late": "Daai proe is meer as 'n dag gelede gesluit en kan nie heropen word nie. Begin 'n nuwe een.",
+        "club.to.reopen_busy": "Daar is al 'n ander proe aan die gang in hierdie klub.",
+        "club.to.reopen_or_new": "{title} is gesluit. Heropen dit (tellings tot dusver bly) of begin 'n nuwe een?",
+        "club.to.start_new": "Begin 'n nuwe een",
         "club.to.name_tap": "{label} — tik 'n nommer daaronder om te tel.",
         "club.to.hosting": (
             "{host} berei {title} voor. Jy kry 'n boodskap sodra die telling begin."

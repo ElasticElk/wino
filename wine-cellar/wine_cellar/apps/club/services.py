@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
@@ -551,6 +553,50 @@ def close_tasteoff(tasteoff):
 
     transaction.on_commit(lambda i=locked.id: deliver_tasteoff_closed.delay(i))
     return locked
+
+
+TASTEOFF_REOPEN_WINDOW = timedelta(hours=24)
+
+
+def reopen_tasteoff(tasteoff):
+    """Put a closed taste-off back into scoring. Scores are kept; the results
+    card it posted is withdrawn (closing again posts a fresh one) and everyone
+    gets the score buttons again. Returns (tasteoff, error)."""
+    from wine_cellar.apps.club.models import TasteOff
+
+    with transaction.atomic():
+        locked = TasteOff.objects.select_for_update().filter(id=tasteoff.id).first()
+        if locked is None:
+            return tasteoff, "not_found"
+        if locked.status != TasteOff.STATUS_CLOSED:
+            return locked, "not_closed"
+        if (
+            locked.closed_at is None
+            or timezone.now() - locked.closed_at > TASTEOFF_REOPEN_WINDOW
+        ):
+            return locked, "too_late"
+        if (
+            TasteOff.objects.filter(
+                club_id=locked.club_id,
+                status__in=(TasteOff.STATUS_SETUP, TasteOff.STATUS_SCORING),
+            )
+            .exclude(id=locked.id)
+            .exists()
+        ):
+            return locked, "another_open"
+        ClubEvent.objects.filter(
+            club_id=locked.club_id,
+            kind=ClubEvent.KIND_TASTEOFF,
+            wine_name=locked.title,
+            created__gte=locked.closed_at,
+        ).delete()
+        locked.status = TasteOff.STATUS_SCORING
+        locked.closed_at = None
+        locked.save(update_fields=["status", "closed_at"])
+    from wine_cellar.apps.club.tasks import deliver_tasteoff_open
+
+    transaction.on_commit(lambda i=locked.id: deliver_tasteoff_open.delay(i))
+    return locked, None
 
 
 def serialize_invite(invite: ClubInvite) -> dict:

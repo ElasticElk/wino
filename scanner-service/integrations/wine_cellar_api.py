@@ -1065,6 +1065,18 @@ class WineCellarAPI:
             body["status_code"] = resp.status_code
         return body
 
+    def reopen_tasteoff(self, club_id: int, tid: int) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/{club_id}/tasteoffs/{tid}/reopen/",
+            json={}, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json()
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
     def close_tasteoff(self, club_id: int, tid: int) -> dict:
         resp = self.session.post(
             f"{self.base_url}/api/clubs/{club_id}/tasteoffs/{tid}/close/",

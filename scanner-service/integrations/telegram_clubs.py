@@ -204,6 +204,13 @@ def build_scoring(body: dict, loc: str, *, host: bool = False):
             )
             for score in range(1, 6)
         ])
+    scorers = body.get("scorers") or []
+    if scorers:
+        names = ", ".join(
+            f"{esc(s.get('name') or '?')} " + ("\u2713" if s.get("done") else "\u2026")
+            for s in scorers
+        )
+        lines += ["", t(loc, "club.to.scored_by", names=names)]
     if host:
         rows.append([InlineKeyboardButton(t(loc, "club.to.close"), callback_data=club_cb("tc", tid))])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
@@ -1419,6 +1426,14 @@ class ClubFlow:
             await self._tasteoff_add_wine(
                 update, int(rest[0]), int(rest[1]) if len(rest) > 1 else 0, query,
             )
+        elif action == "tq":
+            await self._start_tasteoff(
+                update, club_id=int(rest[0]) if rest else None, query=query, force_new=True,
+            )
+        elif action == "tz":
+            await self._close_tasteoff(update, int(rest[0]), query)
+        elif action == "tr":
+            await self._reopen_tasteoff(update, int(rest[0]), query)
         elif action == "op":
             await self._open_tasteoff(update, int(rest[0]), query)
         elif action == "ts":
@@ -1430,7 +1445,7 @@ class ClubFlow:
                 query,
             )
         elif action == "tc":
-            await self._close_tasteoff(update, int(rest[0]), query)
+            await self._close_confirm(update, int(rest[0]), query)
         elif action == "tx":
             await self._cancel_tasteoff_setup(update, int(rest[0]), query)
         elif action == "dc":
@@ -2052,7 +2067,7 @@ class ClubFlow:
             return
         await self._show_club_list(update, club_id=club_id, query=query)
 
-    async def _start_tasteoff(self, update, club_id=None, query=None):
+    async def _start_tasteoff(self, update, club_id=None, query=None, force_new=False):
         loc = self.locale(update)
         if not self.handler.flag_on("feature_tasteoffs"):
             await self._reply(update, t(loc, "club.to.off"), query=query)
@@ -2064,6 +2079,7 @@ class ClubFlow:
         api = self._api(update)
         home = api.get_club(club_id) if club_id else {}
         existing = None
+        rows = []
         try:
             rows = (api.list_tasteoffs(club_id) or {}).get("tasteoffs") or []
             existing = next(
@@ -2075,6 +2091,23 @@ class ClubFlow:
         if existing and existing.get("status") == "scoring":
             await self._show_scoring(update, club_id, existing["id"], query=query)
             return
+        if existing is None and not force_new:
+            reopenable = next(
+                (r for r in rows if r.get("status") == "closed" and r.get("can_reopen")),
+                None,
+            ) if rows else None
+            if reopenable is not None:
+                text = t(loc, "club.to.reopen_or_new", title=esc(reopenable.get("title") or ""))
+                markup = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(t(loc, "club.to.reopen"), callback_data=club_cb("tr", reopenable["id"]))],
+                    [InlineKeyboardButton(t(loc, "club.to.start_new"), callback_data=club_cb("tq", club_id))],
+                ])
+                if query is not None:
+                    from integrations.telegram_bot import _safe_edit
+                    await _safe_edit(query, text, parse_mode="HTML", reply_markup=markup)
+                else:
+                    await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+                return
         if existing and existing.get("status") == "setup":
             chat_id = str(update.effective_chat.id)
             self.remember(
@@ -2375,9 +2408,8 @@ class ClubFlow:
             return
         chat_id = str(update.effective_chat.id)
         self.clear(chat_id)
-        await _safe_edit(query, t(loc, "club.to.host_open"), reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(t(loc, "club.to.close"), callback_data=club_cb("tc", tid)),
-        ]]))
+        # The host tastes too: their card has the score rows, plus Close.
+        await self._show_scoring(update, club_id, tid, query=query)
 
     async def _score_tasteoff(self, update, tid, bottle_id, score, query):
         loc = self.locale(update)
@@ -2425,12 +2457,61 @@ class ClubFlow:
             logger.info("[club] answer() failed: %s", e)
         return True
 
+    async def _close_confirm(self, update, tid, query):
+        """Close at once when everyone has scored; otherwise say who we're
+        still waiting on and ask first (closing sends the results)."""
+        loc = self.locale(update)
+        club_id = await self._club_id_for_tasteoff(update, tid)
+        try:
+            body = self._api(update).get_tasteoff(club_id, tid) or {}
+        except Exception:
+            body = {}
+        waiting = [s.get("name") or "?" for s in body.get("scorers") or [] if not s.get("done")]
+        if not waiting or body.get("status") != "scoring":
+            await self._close_tasteoff(update, tid, query)
+            return
+        from integrations.telegram_bot import _safe_edit
+        await _safe_edit(
+            query,
+            t(loc, "club.to.close_ask", names=esc(", ".join(waiting))),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(t(loc, "club.to.close_anyway"), callback_data=club_cb("tz", tid))],
+                [InlineKeyboardButton(t(loc, "club.to.keep_open"), callback_data=club_cb("to", club_id))],
+            ]),
+        )
+
+    async def _reopen_tasteoff(self, update, tid, query):
+        loc = self.locale(update)
+        club_id = await self._club_id_for_tasteoff(update, tid)
+        result = self._api(update).reopen_tasteoff(club_id, tid)
+        from integrations.telegram_bot import _safe_edit
+        error = result.get("error")
+        if error == "too_late":
+            await _safe_edit(query, t(loc, "club.to.reopen_late"))
+            return
+        if error == "another_open":
+            await _safe_edit(query, t(loc, "club.to.reopen_busy"))
+            return
+        if error == "not_closed":
+            await self._show_scoring(update, club_id, tid, query=query)
+            return
+        if error:
+            await _safe_edit(query, t(loc, "club.err"))
+            return
+        # Everyone (the host included) gets fresh score buttons from the
+        # server; this message just says so.
+        await _safe_edit(query, t(loc, "club.to.reopened"))
+
     async def _close_tasteoff(self, update, tid, query):
         loc = self.locale(update)
         club_id = await self._club_id_for_tasteoff(update, tid)
         api = self._api(update)
         result = api.close_tasteoff(club_id, tid)
         from integrations.telegram_bot import _safe_edit
+        if result.get("error") == "already_closed":
+            await _safe_edit(query, t(loc, "club.to.closed"))
+            return
         if result.get("error"):
             await _safe_edit(query, t(loc, "club.err"))
             return
@@ -2452,7 +2533,12 @@ class ClubFlow:
         title = result.get("title") or ""
         if title:
             lines[0] = f"\U0001F3C6 {esc(title)}"
-        await _safe_edit(query, "\n".join(lines), parse_mode="HTML")
+        markup = None
+        if result.get("can_reopen"):
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+                t(loc, "club.to.reopen"), callback_data=club_cb("tr", tid),
+            )]])
+        await _safe_edit(query, "\n".join(lines), parse_mode="HTML", reply_markup=markup)
 
     async def _cancel_tasteoff_setup(self, update, tid, query):
         loc = self.locale(update)

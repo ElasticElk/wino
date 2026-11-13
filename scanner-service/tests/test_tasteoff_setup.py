@@ -233,3 +233,103 @@ async def test_score_after_close_says_closed():
 def test_scoring_copy_has_afrikaans():
     for key in ("club.to.scoring_hint", "club.to.name_tap"):
         assert t("af", key) != t("en", key)
+
+
+# --- Host scores too, who has scored, close confirm, reopen -------------------
+
+SCORERS_WAITING = [
+    {"name": "Riley", "scored": 2, "done": True},
+    {"name": "Sam", "scored": 0, "done": False},
+]
+
+
+@pytest.mark.asyncio
+async def test_host_open_shows_the_scoring_card_not_just_close():
+    # Regression: the host's "Scoring is open" had only Close, no scores.
+    handler, api = _scoring_handler(is_host=True)
+    api.open_tasteoff.return_value = {"id": 9, "status": "scoring", "status_code": 200}
+    _text, datas = await _run(handler, club_cb("op", 9))
+    assert club_cb("ts", 9, 1, 3) in datas and club_cb("ts", 9, 2, 5) in datas
+    assert club_cb("tc", 9) in datas
+
+
+@pytest.mark.asyncio
+async def test_scoring_card_says_who_has_scored():
+    handler, _api = _scoring_handler(scorers=SCORERS_WAITING)
+    text, _datas = await _run(handler, club_cb("to", 1))
+    assert t("en", "club.to.scored_by", names="Riley ✓, Sam …") in text
+
+
+@pytest.mark.asyncio
+async def test_close_asks_first_when_someone_has_not_scored():
+    handler, api = _scoring_handler(is_host=True, scorers=SCORERS_WAITING)
+    text, datas = await _run(handler, club_cb("tc", 9))
+    api.close_tasteoff.assert_not_called()
+    assert text == t("en", "club.to.close_ask", names="Sam")
+    assert datas == [club_cb("tz", 9), club_cb("to", 1)]
+
+
+@pytest.mark.asyncio
+async def test_close_anyway_closes_and_host_can_reopen():
+    handler, api = _scoring_handler(is_host=True, scorers=SCORERS_WAITING)
+    api.close_tasteoff.return_value = {
+        "id": 9, "title": "Friday flight", "status": "closed", "can_reopen": True,
+        "bottles": [{"id": 1, "label": "Chataue", "average": 4.0, "n": 1}],
+    }
+    text, datas = await _run(handler, club_cb("tz", 9))
+    api.close_tasteoff.assert_called_once_with(1, 9)
+    assert "Friday flight" in text
+    assert datas == [club_cb("tr", 9)]
+
+
+@pytest.mark.asyncio
+async def test_close_when_everyone_scored_closes_straight_away():
+    done = [dict(s, done=True) for s in SCORERS_WAITING]
+    handler, api = _scoring_handler(is_host=True, scorers=done)
+    api.close_tasteoff.return_value = {"id": 9, "title": "Friday flight", "bottles": []}
+    await _run(handler, club_cb("tc", 9))
+    api.close_tasteoff.assert_called_once_with(1, 9)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error,key", [
+    (None, "club.to.reopened"),
+    ("too_late", "club.to.reopen_late"),
+    ("another_open", "club.to.reopen_busy"),
+])
+async def test_reopen(error, key):
+    handler, api = _scoring_handler(is_host=True)
+    api.reopen_tasteoff.return_value = (
+        {"error": error, "status_code": 409} if error else {"id": 9, "status": "scoring"}
+    )
+    text, _datas = await _run(handler, club_cb("tr", 9))
+    api.reopen_tasteoff.assert_called_once_with(1, 9)
+    assert text == t("en", key)
+
+
+@pytest.mark.asyncio
+async def test_taste_off_offers_reopen_of_a_just_closed_tasting():
+    handler, api = _handler(is_host=True)
+    closed = dict(SETUP, status="closed", can_reopen=True)
+    api.list_tasteoffs.return_value = {"tasteoffs": [closed]}
+    text, datas = await _run(handler, club_cb("to", 1))
+    assert text == t("en", "club.to.reopen_or_new", title="Friday flight")
+    assert datas == [club_cb("tr", 9), club_cb("tq", 1)]
+    text, _datas = await _run(handler, club_cb("tq", 1))
+    assert text.startswith(t("en", "club.to.title"))
+
+
+@pytest.mark.asyncio
+async def test_old_closed_tasting_goes_straight_to_a_new_one():
+    handler, api = _handler(is_host=True)
+    api.list_tasteoffs.return_value = {"tasteoffs": [dict(SETUP, status="closed", can_reopen=False)]}
+    text, _datas = await _run(handler, club_cb("to", 1))
+    assert text.startswith(t("en", "club.to.title"))
+
+
+def test_reopen_copy_has_afrikaans():
+    for key in ("club.to.scored_by", "club.to.close_ask", "club.to.close_anyway",
+                "club.to.keep_open", "club.to.reopen", "club.to.reopened",
+                "club.to.reopen_late", "club.to.reopen_busy", "club.to.reopen_or_new",
+                "club.to.start_new"):
+        assert t("af", key) != t("en", key), key

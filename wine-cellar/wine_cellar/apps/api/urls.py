@@ -266,4 +266,9 @@ urlpatterns = [
         social_views.TasteOffCloseView.as_view(),
         name="api-club-tasteoff-close",
     ),
+    path(
+        "clubs/<int:pk>/tasteoffs/<int:tid>/reopen/",
+        social_views.TasteOffReopenView.as_view(),
+        name="api-club-tasteoff-reopen",
+    ),
 ]

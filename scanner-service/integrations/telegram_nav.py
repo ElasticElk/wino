@@ -422,7 +422,7 @@ class ConfirmGuard:
 
 # Confirm-style buttons (yes/no, commit-once). Club actions are `cl:<a>:...`;
 # bot actions are the `a:` field of `_cb()` data.
-CLUB_CONFIRMS = {"j", "ly", "za", "dy", "dn", "zc", "ho", "jj", "tc"}
+CLUB_CONFIRMS = {"j", "ly", "za", "dy", "dn", "zc", "ho", "jj", "tc", "tz", "tr"}
 BOT_CONFIRMS = {"lc", "ls", "ok"}
 
 

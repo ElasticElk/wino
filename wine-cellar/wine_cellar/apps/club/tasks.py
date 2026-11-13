@@ -640,16 +640,15 @@ def deliver_tasteoff_open(tasteoff_id):
             seen.add(tu.chat_id)
             loc = locale_for_user(membership.user)
             if tu.chat_id in host_chats:
-                markup = {
-                    "inline_keyboard": [[
-                        {
-                            "text": t(loc, "club.to.close"),
-                            "callback_data": f"cl:tc:{tasteoff.id}",
-                        },
-                    ]],
-                }
+                # The host tastes too: same score rows, plus Close.
+                markup = _score_markup(tasteoff, loc) or {"inline_keyboard": []}
+                markup["inline_keyboard"].append([{
+                    "text": t(loc, "club.to.close"),
+                    "callback_data": f"cl:tc:{tasteoff.id}",
+                }])
                 _send(
-                    token, tu.chat_id, t(loc, "club.to.host_open"),
+                    token, tu.chat_id,
+                    t(loc, "club.to.host_open") + "\n\n" + _score_lines(tasteoff),
                     purpose="tasteoff_host",
                     reply_markup=markup,
                 )
@@ -699,7 +698,17 @@ def deliver_tasteoff_closed(tasteoff_id):
             seen.add(tu.chat_id)
             loc = locale_for_user(membership.user)
             text = trophy_text(loc, tasteoff.title, rankings)
-            _send(token, tu.chat_id, text, purpose="tasteoff_closed")
+            markup = None
+            if tasteoff.host_id and membership.user_id == tasteoff.host_id:
+                # Closed by mistake? The host can reopen it for 24h.
+                markup = {"inline_keyboard": [[{
+                    "text": t(loc, "club.to.reopen"),
+                    "callback_data": f"cl:tr:{tasteoff.id}",
+                }]]}
+            _send(
+                token, tu.chat_id, text, purpose="tasteoff_closed",
+                reply_markup=markup,
+            )
 
 
 @shared_task(name="notify_kicked")

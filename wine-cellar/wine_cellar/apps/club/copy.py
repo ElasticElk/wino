@@ -55,7 +55,10 @@ MESSAGES = {
         "club.to.score": "How was it? 1 (low) – 5 (high)",
         "club.to.n_scores": "{n} scores",
         "club.to.close": "Close tasting",
-        "club.to.host_open": "Scoring is open. Close when you're done.",
+        "club.to.host_open": (
+            "Scoring is open — score your own too. Close once everyone's scored."
+        ),
+        "club.to.reopen": "Reopen scoring",
         "club.global.kicked": "You've been removed from {name}.",
         "club.global.frozen": "This club is paused.",
     },
@@ -107,7 +110,10 @@ MESSAGES = {
         "club.to.score": "Hoe was dit? 1 (swak) – 5 (sterk)",
         "club.to.n_scores": "{n} tellings",
         "club.to.close": "Sluit die proe",
-        "club.to.host_open": "Telling is oop. Sluit as julle klaar is.",
+        "club.to.host_open": (
+            "Telling is oop — tel self ook. Sluit sodra almal getel het."
+        ),
+        "club.to.reopen": "Heropen telling",
         "club.global.kicked": "Jy is uit {name} verwyder.",
         "club.global.frozen": "Hierdie klub is gepouseer.",
     },
