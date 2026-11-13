@@ -9,6 +9,7 @@ from celery import shared_task
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from django.utils import timezone
+from django.utils.html import escape
 
 from wine_cellar.apps.club.copy import (
     comment_card_text,
@@ -581,21 +582,30 @@ def refresh_event_comment_card(event_id):
 
 
 def _score_markup(tasteoff, loc):
+    """One row naming each wine (tapping it only shows the full name), then
+    its 1-5 row. The name must never sit on a score button: people tap a
+    name to read it."""
     keyboard = []
-    for bottle in tasteoff.bottles.all():
-        row = []
-        for score in range(1, 6):
-            label = str(score)
-            if score == 1:
-                label = f"1 · {(bottle.label or 'wine')[:28]}"
-            row.append(
-                {
-                    "text": label,
-                    "callback_data": f"cl:ts:{tasteoff.id}:{bottle.id}:{score}",
-                }
-            )
-        keyboard.append(row)
+    for n, bottle in enumerate(tasteoff.bottles.all(), start=1):
+        keyboard.append([{
+            "text": f"🍷 {n}. {(bottle.label or 'wine')[:40]}",
+            "callback_data": f"cl:tn:{tasteoff.id}:{bottle.id}",
+        }])
+        keyboard.append([
+            {
+                "text": str(score),
+                "callback_data": f"cl:ts:{tasteoff.id}:{bottle.id}:{score}",
+            }
+            for score in range(1, 6)
+        ])
     return {"inline_keyboard": keyboard} if keyboard else None
+
+
+def _score_lines(tasteoff):
+    return "\n".join(
+        f"{n}. {escape(bottle.label or 'wine')}"
+        for n, bottle in enumerate(tasteoff.bottles.all(), start=1)
+    )
 
 
 @shared_task(name="deliver_tasteoff_open")
@@ -646,8 +656,8 @@ def deliver_tasteoff_open(tasteoff_id):
                 continue
             text = t(
                 loc, "club.to.running",
-                host=host_name, title=tasteoff.title,
-            )
+                host=escape(host_name), title=escape(tasteoff.title),
+            ) + "\n\n" + _score_lines(tasteoff)
             _send(
                 token, tu.chat_id, text,
                 purpose="tasteoff_open",

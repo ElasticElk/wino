@@ -176,6 +176,39 @@ def _discover_row(loc, flags) -> list:
     )]
 
 
+def build_scoring(body: dict, loc: str, *, host: bool = False):
+    """The scoring card: every wine's full name in the text, then per wine a
+    name button (tapping it only shows the name) and a 1-5 row with a tick on
+    your current score. It stays up after each tap so every wine can be
+    scored, and re-scored."""
+    tid = body.get("id")
+    bottles = body.get("bottles") or []
+    lines = [
+        f"<b>{esc(body.get('title') or '')}</b>",
+        t(loc, "club.to.scoring_hint"),
+        "",
+    ]
+    rows = []
+    for n, bottle in enumerate(bottles, start=1):
+        label = bottle.get("label") or "wine"
+        mine = bottle.get("your_score")
+        lines.append(f"{n}. {esc(label)}" + (f" — {mine}" if mine else ""))
+        rows.append([InlineKeyboardButton(
+            f"\U0001F377 {n}. {label[:40]}",
+            callback_data=club_cb("tn", tid, bottle["id"]),
+        )])
+        rows.append([
+            InlineKeyboardButton(
+                f"\u2705{score}" if mine == score else str(score),
+                callback_data=club_cb("ts", tid, bottle["id"], score),
+            )
+            for score in range(1, 6)
+        ])
+    if host:
+        rows.append([InlineKeyboardButton(t(loc, "club.to.close"), callback_data=club_cb("tc", tid))])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
 def build_home(payload: dict, loc: str, flags=None) -> tuple[str, InlineKeyboardMarkup]:
     name = payload.get("name") or "Club"
     members = payload.get("member_count") or 1
@@ -1227,6 +1260,8 @@ class ClubFlow:
         if parsed is None:
             return False
         action, rest = parsed
+        if action == "tn":
+            return await self._tasteoff_name_tap(update, rest)
         try:
             await query.answer()
         except Exception as e:
@@ -2038,7 +2073,7 @@ class ClubFlow:
         except Exception:
             existing = None
         if existing and existing.get("status") == "scoring":
-            await self._reply(update, t(loc, "club.to.already"), query=query)
+            await self._show_scoring(update, club_id, existing["id"], query=query)
             return
         if existing and existing.get("status") == "setup":
             chat_id = str(update.effective_chat.id)
@@ -2350,16 +2385,45 @@ class ClubFlow:
         api = self._api(update)
         result = api.score_tasteoff(club_id, tid, bottle_id, score)
         from integrations.telegram_bot import _safe_edit
+        if result.get("error") == "not_scoring":
+            await _safe_edit(query, t(loc, "club.to.closed"))
+            return
         if result.get("error"):
             await _safe_edit(query, t(loc, "club.err"))
             return
-        body = api.get_tasteoff(club_id, tid)
-        bottle = next(
-            (b for b in (body.get("bottles") or []) if b.get("id") == bottle_id),
-            None,
-        )
-        label = (bottle or {}).get("label") or "wine"
-        await _safe_edit(query, t(loc, "club.to.scored", label=esc(label), n=score))
+        await self._show_scoring(update, club_id, tid, query=query)
+
+    async def _show_scoring(self, update, club_id, tid, query=None):
+        loc = self.locale(update)
+        body = self._api(update).get_tasteoff(club_id, tid)
+        if body.get("error"):
+            await self._reply(update, t(loc, "club.err"), query=query)
+            return
+        text, markup = build_scoring(body, loc, host=body.get("is_host") is True)
+        if query is not None:
+            from integrations.telegram_bot import _safe_edit
+            await _safe_edit(query, text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _tasteoff_name_tap(self, update, rest) -> bool:
+        """A wine's name button: show its full name, never score it."""
+        query = update.callback_query
+        label = ""
+        try:
+            tid, bid = int(rest[0]), int(rest[1])
+            club_id = await self._club_id_for_tasteoff(update, tid)
+            body = self._api(update).get_tasteoff(club_id, tid)
+            bottle = next((b for b in body.get("bottles") or [] if b.get("id") == bid), None)
+            label = (bottle or {}).get("label") or ""
+        except Exception as e:
+            logger.info("[club] name tap lookup failed: %s", e)
+        text = t(self.locale(update), "club.to.name_tap", label=label or "this wine")
+        try:
+            await query.answer(text[:190], show_alert=len(label) > 40)
+        except Exception as e:
+            logger.info("[club] answer() failed: %s", e)
+        return True
 
     async def _close_tasteoff(self, update, tid, query):
         loc = self.locale(update)

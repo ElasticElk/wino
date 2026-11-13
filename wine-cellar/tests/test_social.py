@@ -546,3 +546,23 @@ def test_tasteoff_payload_says_who_hosts(client, db, django_user_model):
     )
     assert refused.status_code == 403
     assert refused.json()["error"] == "forbidden"
+
+
+def test_tasteoff_score_buttons_never_carry_the_wine_name(db, django_user_model):
+    # Regression: the name sat on each wine's score-1 button, so tapping a
+    # name to read it scored it 1.
+    from wine_cellar.apps.club.tasks import _score_lines, _score_markup
+
+    _hillside, riverside, riley, _sam, lee = _people(django_user_model)
+    club = Club.objects.create(name="Thursday reds")
+    tasteoff = TasteOff.objects.create(club=club, host=lee, title="Flight")
+    TasteOffBottle.objects.create(tasteoff=tasteoff, label="Chenin <Blanc> & co")
+    TasteOffBottle.objects.create(tasteoff=tasteoff, label="Merlot 2019")
+    rows = _score_markup(tasteoff, "en")["inline_keyboard"]
+    assert len(rows) == 4
+    for name_row, score_row in (rows[0:2], rows[2:4]):
+        assert len(name_row) == 1
+        assert name_row[0]["callback_data"].startswith(f"cl:tn:{tasteoff.id}:")
+        assert [b["text"] for b in score_row] == ["1", "2", "3", "4", "5"]
+    assert "Chenin <Blanc> & co" in rows[0][0]["text"]
+    assert _score_lines(tasteoff) == "1. Chenin &lt;Blanc&gt; &amp; co\n2. Merlot 2019"

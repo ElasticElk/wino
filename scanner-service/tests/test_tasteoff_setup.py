@@ -129,3 +129,107 @@ async def test_summary_only_club_still_offers_a_way_on():
 def test_new_copy_has_afrikaans():
     for key in ("club.to.hosting", "club.to.cellar_empty"):
         assert t("af", key) != t("en", key)
+
+
+# --- Scoring card -------------------------------------------------------------
+
+SCORING = {
+    "id": 9, "title": "Friday flight", "status": "scoring", "host_id": 5,
+    "host_name": "Riley", "is_host": False,
+    "bottles": [
+        {"id": 1, "label": "Chataue", "your_score": None},
+        {"id": 2, "label": "Château Lilian Ladouys 2018 Saint-Estèphe", "your_score": None},
+    ],
+}
+
+
+def _scoring_handler(**over):
+    handler, api = _handler(is_host=False)
+    body = dict(SCORING, **over)
+    api.list_tasteoffs.return_value = {"tasteoffs": [body]}
+    api.get_tasteoff.return_value = body
+    api.score_tasteoff.return_value = {"bottle_id": 1, "score": 4}
+    return handler, api
+
+
+def _rows(markup):
+    return [[(b.text, b.callback_data) for b in row] for row in markup.inline_keyboard]
+
+
+@pytest.mark.asyncio
+async def test_name_button_never_scores():
+    # Regression: the wine's name sat on its score-1 button, so tapping the
+    # name to read it scored it 1.
+    handler, api = _scoring_handler()
+    tap = _tap(club_cb("tn", 9, 2))
+    await handler._club_flow().on_callback(tap, MagicMock())
+    api.score_tasteoff.assert_not_called()
+    toast = tap.callback_query.answer.call_args
+    assert "Château Lilian Ladouys 2018 Saint-Estèphe" in toast.args[0]
+    tap.callback_query.edit_message_text.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_scoring_card_lists_full_names_and_separates_name_from_scores():
+    handler, _api = _scoring_handler()
+    text, _datas = await _run(handler, club_cb("to", 1))
+    assert "1. Chataue" in text
+    assert "2. Château Lilian Ladouys 2018 Saint-Estèphe" in text
+    tap = _tap(club_cb("to", 1))
+    await handler._club_flow().on_callback(tap, MagicMock())
+    rows = _rows(tap.callback_query.edit_message_text.call_args.kwargs["reply_markup"])
+    assert rows[0] == [("\U0001F377 1. Chataue", club_cb("tn", 9, 1))]
+    assert rows[1] == [(str(n), club_cb("ts", 9, 1, n)) for n in range(1, 6)]
+    assert rows[2][0][1] == club_cb("tn", 9, 2)
+    assert [d for _t, d in rows[3]] == [club_cb("ts", 9, 2, n) for n in range(1, 6)]
+    # No score button carries a wine name.
+    for row in (rows[1], rows[3]):
+        assert all(text in {"1", "2", "3", "4", "5"} for text, _d in row)
+
+
+@pytest.mark.asyncio
+async def test_scoring_one_wine_keeps_the_other_scorable():
+    # Regression: the first score replaced the card and dropped every button.
+    handler, api = _scoring_handler()
+    scored = dict(SCORING, bottles=[
+        dict(SCORING["bottles"][0], your_score=4), dict(SCORING["bottles"][1]),
+    ])
+    api.get_tasteoff.return_value = scored
+    tap = _tap(club_cb("ts", 9, 1, 4))
+    await handler._club_flow().on_callback(tap, MagicMock())
+    api.score_tasteoff.assert_called_once_with(1, 9, 1, 4)
+    call = tap.callback_query.edit_message_text.call_args
+    assert "1. Chataue — 4" in call.args[0]
+    rows = _rows(call.kwargs["reply_markup"])
+    assert ("✅4", club_cb("ts", 9, 1, 4)) in rows[1]
+    assert [d for _t, d in rows[3]] == [club_cb("ts", 9, 2, n) for n in range(1, 6)]
+
+
+@pytest.mark.asyncio
+async def test_taste_off_button_during_scoring_opens_the_card():
+    # Before: "There's already a tasting open." with no way back to score.
+    handler, _api = _scoring_handler()
+    text, datas = await _run(handler, club_cb("to", 1))
+    assert text != t("en", "club.to.already")
+    assert club_cb("ts", 9, 2, 5) in datas
+    assert club_cb("tc", 9) not in datas
+
+
+@pytest.mark.asyncio
+async def test_host_scoring_card_has_close():
+    handler, _api = _scoring_handler(is_host=True)
+    _text, datas = await _run(handler, club_cb("to", 1))
+    assert club_cb("tc", 9) in datas
+
+
+@pytest.mark.asyncio
+async def test_score_after_close_says_closed():
+    handler, api = _scoring_handler()
+    api.score_tasteoff.return_value = {"error": "not_scoring", "status_code": 409}
+    text, _datas = await _run(handler, club_cb("ts", 9, 1, 3))
+    assert text == t("en", "club.to.closed")
+
+
+def test_scoring_copy_has_afrikaans():
+    for key in ("club.to.scoring_hint", "club.to.name_tap"):
+        assert t("af", key) != t("en", key)

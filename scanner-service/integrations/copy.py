@@ -258,6 +258,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.home.tasteoff": "Taste-off",
         "club.to.from_cellar": "From a cellar",
         "club.to.off": "Taste-offs aren't on yet.",
+        "club.to.scoring_hint": "Tap a number under each wine. Tap again to change it.",
+        "club.to.name_tap": "{label} — tap a number below it to score.",
         "club.to.hosting": (
             "{host} is setting up {title}. You'll get a ping when scoring opens."
         ),
@@ -770,6 +772,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.home.tasteoff": "Proe",
         "club.to.from_cellar": "Uit 'n kelder",
         "club.to.off": "Proeë is nog nie aan nie.",
+        "club.to.scoring_hint": "Tik 'n nommer onder elke wyn. Tik weer om dit te verander.",
+        "club.to.name_tap": "{label} — tik 'n nommer daaronder om te tel.",
         "club.to.hosting": (
             "{host} berei {title} voor. Jy kry 'n boodskap sodra die telling begin."
         ),
