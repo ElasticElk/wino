@@ -308,6 +308,9 @@ def serialize_tasteoff(tasteoff: TasteOff, *, user=None, include_scores=False):
         "title": tasteoff.title,
         "status": tasteoff.status,
         "host_id": tasteoff.host_id,
+        # The bot can't tell who's asking; only the host may set up or open.
+        "is_host": bool(user is not None and tasteoff.host_id == user.id),
+        "host_name": display_name(tasteoff.host) if tasteoff.host_id else "",
         "bottles": [
             serialize_bottle(
                 b,

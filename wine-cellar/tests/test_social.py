@@ -518,3 +518,31 @@ def test_close_tasteoff_helper_idempotent(db, django_user_model):
     assert (
         ClubEvent.objects.filter(club=club, kind=ClubEvent.KIND_TASTEOFF).count() == 1
     )
+
+
+def test_tasteoff_payload_says_who_hosts(client, db, django_user_model):
+    # The bot shows host-only setup buttons only when is_host is true.
+    _hillside, riverside, riley, _sam, lee = _people(django_user_model)
+    club = _club_with_member(client, riley, lee, riverside)
+    _enable("feature_tasteoffs")
+    tid = _auth(client, lee).post(
+        reverse("api-club-tasteoffs", kwargs={"pk": club.id}),
+        data={"title": "Thursday reds"},
+        content_type="application/json",
+    ).json()["id"]
+    detail = reverse("api-club-tasteoff-detail", kwargs={"pk": club.id, "tid": tid})
+    as_host = _auth(client, lee).get(detail).json()
+    as_member = _auth(client, riley).get(detail).json()
+    assert as_host["is_host"] is True
+    assert as_member["is_host"] is False
+    assert as_member["host_name"] == as_host["host_name"] != ""
+    listed = _auth(client, riley).get(
+        reverse("api-club-tasteoffs", kwargs={"pk": club.id}),
+    ).json()["tasteoffs"][0]
+    assert listed["is_host"] is False
+    refused = _auth(client, riley).post(
+        reverse("api-club-tasteoff-open", kwargs={"pk": club.id, "tid": tid}),
+        data={}, content_type="application/json",
+    )
+    assert refused.status_code == 403
+    assert refused.json()["error"] == "forbidden"

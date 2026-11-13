@@ -2104,6 +2104,23 @@ class ClubFlow:
         if body.get("error"):
             await self._reply(update, t(loc, "club.err"), query=query)
             return
+        if body.get("is_host") is False:
+            # Only the host sets up and opens; everyone else just waits.
+            self.clear(str(update.effective_chat.id))
+            text = t(
+                loc, "club.to.hosting",
+                host=esc(body.get("host_name") or "Someone"),
+                title=esc(body.get("title") or ""),
+            )
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+                t(loc, "club.back"), callback_data=club_cb("h", club_id),
+            )]])
+            if query is not None:
+                from integrations.telegram_bot import _safe_edit
+                await _safe_edit(query, text, parse_mode="HTML", reply_markup=markup)
+            else:
+                await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+            return
         bottles = body.get("bottles") or []
         lines = [
             f"<b>{esc(body.get('title') or '')}</b>",
@@ -2148,6 +2165,9 @@ class ClubFlow:
             return True
         api = self._api(update)
         result = api.add_tasteoff_bottle(state.get("club_id"), state.get("tasteoff_id"), label)
+        if result.get("error") == "forbidden":
+            await self._show_tasteoff_setup(update, state.get("club_id"), state.get("tasteoff_id"))
+            return True
         if result.get("error"):
             await update.message.reply_text(t(loc, "club.err"))
             return True
@@ -2167,7 +2187,7 @@ class ClubFlow:
         payload = api.club_list(club_id)
         items = payload.get("items") or []
         if not items:
-            await _safe_edit(query, t(loc, "club.list.empty"))
+            await self._tasteoff_no_pick(update, tid, club_id, "club.list.empty", query)
             return
         rows = []
         for item in items[:8]:
@@ -2194,10 +2214,22 @@ class ClubFlow:
             return
         label = f"{item.get('name') or ''} {item.get('vintage') or ''}".strip()
         result = api.add_tasteoff_bottle(club_id, tid, label)
+        if result.get("error") == "forbidden":
+            await self._show_tasteoff_setup(update, club_id, tid, query=query)
+            return
         if result.get("error"):
             await _safe_edit(query, t(loc, "club.err"))
             return
         await self._show_tasteoff_setup(update, club_id, tid, query=query)
+
+    async def _tasteoff_no_pick(self, update, tid, club_id, key, query):
+        """Nothing to pick here: say why and offer typing a name or going back."""
+        loc = self.locale(update)
+        from integrations.telegram_bot import _safe_edit
+        await _safe_edit(query, t(loc, key), reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(t(loc, "club.to.type_btn"), callback_data=club_cb("tb", tid))],
+            [InlineKeyboardButton(t(loc, "club.back"), callback_data=club_cb("to", club_id))],
+        ]))
 
     async def _tasteoff_from_cellar(self, update, tid, query):
         loc = self.locale(update)
@@ -2206,7 +2238,7 @@ class ClubFlow:
         home = api.get_club(club_id)
         from integrations.telegram_bot import _safe_edit
         if (home.get("cellar_visibility") or "none") != "full":
-            await _safe_edit(query, t(loc, "club.to.summary_only"))
+            await self._tasteoff_no_pick(update, tid, club_id, "club.to.summary_only", query)
             return
         members = (api.club_members(club_id) or {}).get("members") or []
         rows = []
@@ -2218,7 +2250,7 @@ class ClubFlow:
                 callback_data=club_cb("tm", tid, member["user_id"]),
             )])
         if not rows:
-            await _safe_edit(query, t(loc, "club.to.summary_only"))
+            await self._tasteoff_no_pick(update, tid, club_id, "club.to.summary_only", query)
             return
         rows.append([InlineKeyboardButton(t(loc, "club.back"), callback_data=club_cb("to", club_id))])
         await _safe_edit(
@@ -2233,11 +2265,11 @@ class ClubFlow:
         from integrations.telegram_bot import _safe_edit
         peek = api.club_peek(club_id, user_id)
         if peek.get("error") or peek.get("visibility") != "full":
-            await _safe_edit(query, t(loc, "club.to.summary_only"))
+            await self._tasteoff_no_pick(update, tid, club_id, "club.to.summary_only", query)
             return
         wines = peek.get("wines") or []
         if not wines:
-            await _safe_edit(query, t(loc, "club.to.summary_only"))
+            await self._tasteoff_no_pick(update, tid, club_id, "club.to.cellar_empty", query)
             return
         chat_id = str(update.effective_chat.id)
         self.remember(chat_id, tasteoff_id=tid, club_id=club_id, step="tasteoff_setup")
@@ -2252,7 +2284,7 @@ class ClubFlow:
                 callback_data=club_cb("tw", tid, int(wine_id)),
             )])
         if not rows:
-            await _safe_edit(query, t(loc, "club.to.summary_only"))
+            await self._tasteoff_no_pick(update, tid, club_id, "club.to.cellar_empty", query)
             return
         rows.append([InlineKeyboardButton(t(loc, "club.back"), callback_data=club_cb("tf", tid))])
         await _safe_edit(
@@ -2283,6 +2315,9 @@ class ClubFlow:
             return
         label = f"{wine.get('name') or ''} {wine.get('vintage') or ''}".strip()
         result = api.add_tasteoff_bottle(club_id, tid, label, wine_id=wine_id)
+        if result.get("error") == "forbidden":
+            await self._show_tasteoff_setup(update, club_id, tid, query=query)
+            return
         if result.get("error"):
             await _safe_edit(query, t(loc, "club.err"))
             return
@@ -2294,6 +2329,9 @@ class ClubFlow:
         api = self._api(update)
         result = api.open_tasteoff(club_id, tid)
         from integrations.telegram_bot import _safe_edit
+        if result.get("error") == "forbidden":
+            await self._show_tasteoff_setup(update, club_id, tid, query=query)
+            return
         if result.get("error") == "need_two":
             await _safe_edit(query, t(loc, "club.to.need_two"))
             return

@@ -258,6 +258,12 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.home.tasteoff": "Taste-off",
         "club.to.from_cellar": "From a cellar",
         "club.to.off": "Taste-offs aren't on yet.",
+        "club.to.hosting": (
+            "{host} is setting up {title}. You'll get a ping when scoring opens."
+        ),
+        "club.to.cellar_empty": (
+            "Nothing in that cellar to pick from yet — type a name instead."
+        ),
         "club.comment.off": "Comments aren't on yet.",
         "club.discover.title": "Clubs for everyone",
         "club.discover.btn": "Discover",
@@ -764,6 +770,12 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.home.tasteoff": "Proe",
         "club.to.from_cellar": "Uit 'n kelder",
         "club.to.off": "Proeë is nog nie aan nie.",
+        "club.to.hosting": (
+            "{host} berei {title} voor. Jy kry 'n boodskap sodra die telling begin."
+        ),
+        "club.to.cellar_empty": (
+            "Daar's nog niks in daai kelder om uit te kies nie — tik eerder 'n naam."
+        ),
         "club.comment.off": "Opmerkings is nog nie aan nie.",
         "club.discover.title": "Klubs vir almal",
         "club.discover.btn": "Ontdek",
