@@ -2421,8 +2421,8 @@ class ClubFlow:
         if result.get("error") == "forbidden":
             await self._show_tasteoff_setup(update, club_id, tid, query=query)
             return
-        if result.get("error") == "need_two":
-            await _safe_edit(query, t(loc, "club.to.need_two"))
+        if result.get("error") in ("need_wine", "need_two"):
+            await _safe_edit(query, t(loc, "club.to.need_wine"))
             return
         if result.get("error"):
             await _safe_edit(query, t(loc, "club.err"))

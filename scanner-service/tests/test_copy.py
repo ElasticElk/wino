@@ -93,7 +93,7 @@ def test_phase3_social_keys_are_present():
         "club.to.title",
         "club.to.score",
         "club.to.closed",
-        "club.to.need_two",
+        "club.to.need_wine",
         "club.to.open",
         "club.to.close",
         "club.to.running",

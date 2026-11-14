@@ -503,8 +503,8 @@ class TasteOffOpenView(TasteoffsEnabledMixin, ScannerAPIView):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
         if tasteoff.status != TasteOff.STATUS_SETUP:
             return Response({"error": "not_setup"}, status=status.HTTP_409_CONFLICT)
-        if tasteoff.bottles.count() < 2:
-            return Response({"error": "need_two"}, status=status.HTTP_409_CONFLICT)
+        if not tasteoff.bottles.exists():
+            return Response({"error": "need_wine"}, status=status.HTTP_409_CONFLICT)
         try:
             with transaction.atomic():
                 tasteoff.status = TasteOff.STATUS_SCORING

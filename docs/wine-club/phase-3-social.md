@@ -99,7 +99,7 @@ Pending comment state is **in memory** like `InviteFlow` (lost on restart → `T
 | `club.to.title` | Name this tasting? | Wat noem ons die proe? |
 | `club.to.score` | How was it? 1 (low) – 5 (high) | Hoe was dit? 1 (swak) – 5 (sterk) |
 | `club.to.closed` | Tasting closed. | Proe is afgesluit. |
-| `club.to.need_two` | Add at least two wines. | Voeg ten minste twee wyne by. |
+| `club.to.need_wine` | Add a wine first. | Voeg eers 'n wyn by. |
 | `club.comment.too_long` | Keep it under 280 characters. | Hou dit onder 280 karakters. |
 | `club.comment.again` | Tap Say something again. | Tik Sê iets weer. |
 | `club.comment.more` | and {n} more | en nog {n} |
@@ -262,7 +262,7 @@ Response:
 
 **`DELETE /api/clubs/<id>/tasteoffs/<tid>/bottles/<bid>/`** — host only, status=setup.
 
-**`POST /api/clubs/<id>/tasteoffs/<tid>/open/`** setup → scoring. 409 `{ "error": "need_two" }` if `< 2` bottles. Sets `opened_at`. Triggers fan-out.
+**`POST /api/clubs/<id>/tasteoffs/<tid>/open/`** setup → scoring. 409 `{ "error": "need_wine" }` if there are no bottles (one is enough). Sets `opened_at`. Triggers fan-out.
 
 **`GET /api/clubs/<id>/tasteoffs/<tid>/`** — members. Scores of others hidden until `closed` (**recommended:** hide others; show own). After close, include averages.
 

@@ -207,7 +207,7 @@ async def test_club_list_empty_and_add():
 
 
 @pytest.mark.asyncio
-async def test_tasteoff_setup_need_two_and_open():
+async def test_tasteoff_setup_need_wine_and_open():
     api = MagicMock()
     api.list_clubs.return_value = {
         "clubs": [{"id": 3, "name": "Thursday reds", "is_last_used": True}],
@@ -225,7 +225,7 @@ async def test_tasteoff_setup_need_two_and_open():
         "bottles": [{"id": 1, "label": "Chenin Blanc 2022"}],
     }
     api.add_tasteoff_bottle.return_value = {"id": 1, "label": "Chenin Blanc 2022", "status_code": 201}
-    api.open_tasteoff.return_value = {"error": "need_two", "status_code": 409}
+    api.open_tasteoff.return_value = {"error": "need_wine", "status_code": 409}
     handler = _handler(api, feature_tasteoffs="on")
     update = _update(text="/club tasteoff")
     await handler._club_flow().cmd_club(update, MagicMock(args=["tasteoff"]))
@@ -238,7 +238,7 @@ async def test_tasteoff_setup_need_two_and_open():
     query = _query(club_cb("op", 4))
     update.callback_query = query
     await handler._club_flow().on_callback(update, MagicMock())
-    assert query.edit_message_text.call_args.args[0] == t("en", "club.to.need_two")
+    assert query.edit_message_text.call_args.args[0] == t("en", "club.to.need_wine")
 
 
 @pytest.mark.asyncio

@@ -392,7 +392,7 @@ def test_tasteoff_score_constraint(db, django_user_model):
         )
 
 
-def test_tasteoff_need_two_and_auto_close(client, db, django_user_model):
+def test_tasteoff_need_wine_and_auto_close(client, db, django_user_model):
     _hillside, riverside, riley, _sam, lee = _people(django_user_model)
     club = _club_with_member(client, riley, lee, riverside)
     _enable("feature_tasteoffs")
@@ -402,21 +402,16 @@ def test_tasteoff_need_two_and_auto_close(client, db, django_user_model):
         content_type="application/json",
     )
     tid = created.json()["id"]
-    _auth(client, lee).post(
-        reverse("api-club-tasteoff-bottles", kwargs={"pk": club.id, "tid": tid}),
-        data={"label": "Only one"},
-        content_type="application/json",
-    )
     opened = _auth(client, lee).post(
         reverse("api-club-tasteoff-open", kwargs={"pk": club.id, "tid": tid}),
         data={},
         content_type="application/json",
     )
     assert opened.status_code == 409
-    assert opened.json()["error"] == "need_two"
+    assert opened.json()["error"] == "need_wine"
     _auth(client, lee).post(
         reverse("api-club-tasteoff-bottles", kwargs={"pk": club.id, "tid": tid}),
-        data={"label": "Second"},
+        data={"label": "Only one"},
         content_type="application/json",
     )
     opened = _auth(client, lee).post(

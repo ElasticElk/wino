@@ -145,7 +145,7 @@ Policy-of fragments for `club.join.known`: `a type-and-count summary of` / `'n t
 | `club.to.title` | Name this tasting? | Wat noem ons die proe? |
 | `club.to.score` | How was it? 1 (low) – 5 (high) | Hoe was dit? 1 (swak) – 5 (sterk) |
 | `club.to.closed` | Tasting closed. | Proe is afgesluit. |
-| `club.to.need_two` | Add at least two wines. | Voeg ten minste twee wyne by. |
+| `club.to.need_wine` | Add a wine first. | Voeg eers 'n wyn by. |
 | `club.to.open` | Open scoring | Begin telling |
 | `club.to.close` | Close tasting | Sluit die proe |
 | `club.to.running` | {host} is running a taste-off: {title}. Score 1–5. | {host} hou 'n proe: {title}. Tel 1–5. |
