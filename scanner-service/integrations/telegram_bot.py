@@ -408,12 +408,24 @@ VOTE_REACT = {
 }
 
 
+# Set from the service flags (feature_clubs + feature_tasting_notes): the vote
+# row then carries [Add note] so members who skip voting can still add one.
+NOTE_BUTTON_ON = False
+
+
 def vote_keyboard_row(item_id: int, chosen: str | None = None) -> list:
     buttons = []
     for val, label in VOTE_LABELS:
         text = f"[{label}]" if chosen == val else label
         buttons.append(InlineKeyboardButton(
             text, callback_data=_cb("vt", item_id=item_id, original=val),
+        ))
+    if NOTE_BUTTON_ON:
+        from integrations.copy import t as copy_t
+        from integrations.telegram_clubs import club_cb
+        buttons.append(InlineKeyboardButton(
+            copy_t("en", "club.note.btn_add_later"),
+            callback_data=club_cb("nt", "v", item_id),
         ))
     return buttons
 
@@ -3021,6 +3033,10 @@ class TelegramBotHandler:
                     "on", "true", "1", "yes",
                 }
         self.flags = flags
+        global NOTE_BUTTON_ON
+        NOTE_BUTTON_ON = bool(
+            flags.get("feature_clubs") and flags.get("feature_tasting_notes")
+        )
         if "chat_min_reply_ms" in config:
             try:
                 self._min_reply_ms = max(0, int(str(config.get("chat_min_reply_ms") or "1000").strip()))
@@ -5701,6 +5717,8 @@ class TelegramBotHandler:
                 except Exception as e:
                     logger.info(f"[vote] reaction failed: {e}")
             logger.info("[tap] vote item_id=%s chosen=%s", item_id, chosen)
+            # Feature-flagged "Add a tasting note?" after the vote (a real open).
+            await self._club_flow().maybe_offer_note(update, query, item_id)
             return
 
         if action in ("dx", "dy", "ds"):

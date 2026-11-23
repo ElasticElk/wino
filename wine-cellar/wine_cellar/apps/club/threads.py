@@ -19,7 +19,13 @@ import requests
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from wine_cellar.apps.club.copy import locale_for_user, opened_text, t, wine_phrase
+from wine_cellar.apps.club.copy import (
+    locale_for_user,
+    note_quote,
+    opened_text,
+    t,
+    wine_phrase,
+)
 from wine_cellar.apps.club.models import (
     ClubComment,
     ClubEvent,
@@ -28,6 +34,7 @@ from wine_cellar.apps.club.models import (
     ClubNotice,
     ClubThreadMute,
 )
+from wine_cellar.apps.club.notes import visible_note
 from wine_cellar.apps.scanner.flags import flag_on
 from wine_cellar.apps.scanner.models import TelegramUser
 
@@ -40,6 +47,7 @@ RATE_WINDOW = timedelta(seconds=60)
 FLUSH_LIMIT = 200
 # Telegram caps a message at 4096 characters; leave room for the quote line.
 PING_BODY_CHARS = 3500
+NOTE_QUOTE_MAX = 120  # a note is clipped to this in a ping or summary line
 ERROR_MAX = 200
 
 
@@ -196,10 +204,16 @@ def _event_line(event, loc) -> str:
 
         return "\U0001F4AC " + ask_line(event, loc)
     if event.kind == ClubEvent.KIND_OPENED and not event.retracted:
-        return opened_text(
+        line = opened_text(
             loc, html.escape(actor), event.vintage,
             html.escape(event.wine_name), event.vote,
         )
+        note = visible_note(event)
+        if note:
+            if len(note) > NOTE_QUOTE_MAX:
+                note = note[: NOTE_QUOTE_MAX - 1] + "\u2026"
+            line = f"{line} {note_quote(note)}"
+        return line
     return "\U0001F377 " + html.escape(
         wine_phrase(event.vintage, event.wine_name) if event.wine_name else actor
     )

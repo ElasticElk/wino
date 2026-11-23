@@ -23,6 +23,7 @@ from wine_cellar.apps.club.models import (
     TasteOffBottle,
     TasteOffScore,
 )
+from wine_cellar.apps.club.notes import notes_enabled, visible_note
 from wine_cellar.apps.club.peek import (
     FORBIDDEN_PEEK_KEYS,
     collect_keys,
@@ -795,9 +796,10 @@ def _events_qs(club, member, data):
         qs = qs.filter(created__gte=since)
     wine_text = str(data.get("wine_text") or data.get("grape") or "").strip()
     if wine_text:
-        qs = qs.filter(
-            Q(wine_name__icontains=wine_text) | Q(producer__icontains=wine_text)
-        )
+        match = Q(wine_name__icontains=wine_text) | Q(producer__icontains=wine_text)
+        if notes_enabled():
+            match |= Q(note__icontains=wine_text)
+        qs = qs.filter(match)
     vintage = data.get("vintage")
     try:
         if vintage not in (None, ""):
@@ -816,6 +818,7 @@ def _event_row(event: ClubEvent) -> dict:
         "producer": event.producer or "",
         "vote": event.vote or "",
         "created": event.created.isoformat() if event.created else None,
+        **({"tasting_note": visible_note(event)} if visible_note(event) else {}),
     }
 
 
@@ -1316,6 +1319,34 @@ def _asks_summary(club, text_query, max_events=8) -> list:
     return out
 
 
+def _tasting_notes(club, wine_text, max_events=12) -> list:
+    """Members' own tasting notes on open (not retracted) events."""
+    qs = (
+        ClubEvent.objects.filter(
+            club=club["club"], kind=ClubEvent.KIND_OPENED,
+            retracted_at__isnull=True,
+        )
+        .exclude(note="")
+        .select_related("actor")
+        .order_by("-created")
+    )
+    if wine_text:
+        qs = qs.filter(
+            Q(wine_name__icontains=wine_text)
+            | Q(producer__icontains=wine_text)
+            | Q(note__icontains=wine_text)
+        )
+    return [
+        {
+            "wine_name": e.wine_name,
+            "vintage": e.vintage,
+            "by": display_name(e.actor) if e.actor_id else "",
+            "note": visible_note(e),
+        }
+        for e in qs[:max_events]
+    ]
+
+
 def _answer_comments(club, data) -> dict:
     wine_text = str(data.get("wine_text") or data.get("grape") or "").strip()
     qs = (
@@ -1354,6 +1385,8 @@ def _answer_comments(club, data) -> dict:
         answer["threads"] = out_threads
     if flag_on("feature_club_reactions"):
         answer["reactions"] = _reaction_summary(club, wine_text)
+    if notes_enabled():
+        answer["tasting_notes"] = _tasting_notes(club, wine_text)
     from wine_cellar.apps.club.relay import relay_enabled
 
     if relay_enabled() and club["club"].kind != Club.KIND_GLOBAL:

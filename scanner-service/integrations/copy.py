@@ -306,6 +306,26 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "club.ask.off": "That's switched off right now.",
         "club.ask.global": "This is a feed-only club, so there's nobody to ask.",
+        "club.note.offer": "Add a tasting note for the {wine}?",
+        "club.note.btn_add": "Add a note",
+        "club.note.btn_skip": "Skip",
+        "club.note.btn_edit": "Edit note",
+        "club.note.btn_add_later": "Add note",
+        "club.note.btn_remove": "Remove note",
+        "club.note.prompt": "What did you think? A line or two.",
+        "club.note.edit_prompt": (
+            "Your note now: {note}\n\nWhat did you think? A line or two."
+        ),
+        "club.note.saved": "Saved. {clubs} will see it.",
+        "club.note.saved_none": "Saved.",
+        "club.note.blank": "Write something first.",
+        "club.note.rate": "That's a lot of notes. Try again in about {n} min.",
+        "club.note.no_club": (
+            "There's no club for this bottle, or it already has your note."
+        ),
+        "club.note.removed": "Note removed.",
+        "club.note.off": "Tasting notes are switched off right now.",
+        "club.note.gone": "Couldn't find that bottle any more.",
         "club.rx.on": "Reacted {emoji}",
         "club.rx.undone": "Removed {emoji}",
         "club.rx.retracted": "That bottle was put back, so reactions are closed.",
@@ -915,6 +935,26 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "club.ask.off": "Dit is nou af.",
         "club.ask.global": "Dis 'n klub net vir aktiwiteit, so daar is niemand om te vra nie.",
+        "club.note.offer": "Voeg 'n proenota by vir die {wine}?",
+        "club.note.btn_add": "Add a note",
+        "club.note.btn_skip": "Skip",
+        "club.note.btn_edit": "Edit note",
+        "club.note.btn_add_later": "Add note",
+        "club.note.btn_remove": "Remove note",
+        "club.note.prompt": "Wat het jy daarvan gedink? 'n Reël of twee.",
+        "club.note.edit_prompt": (
+            "Jou nota nou: {note}\n\nWat het jy daarvan gedink? 'n Reël of twee."
+        ),
+        "club.note.saved": "Gestoor. {clubs} sal dit sien.",
+        "club.note.saved_none": "Gestoor.",
+        "club.note.blank": "Skryf eers iets.",
+        "club.note.rate": "Dis baie notas. Probeer weer oor ongeveer {n} min.",
+        "club.note.no_club": (
+            "Daar is geen klub vir hierdie bottel nie, of dit het reeds jou nota."
+        ),
+        "club.note.removed": "Nota verwyder.",
+        "club.note.off": "Proenotas is nou af.",
+        "club.note.gone": "Kon daardie bottel nie meer vind nie.",
         "club.rx.on": "Gereageer {emoji}",
         "club.rx.undone": "Reaksie {emoji} verwyder",
         "club.rx.retracted": "Daardie bottel is teruggesit, so reaksies is toe.",

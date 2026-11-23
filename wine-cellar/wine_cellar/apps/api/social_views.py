@@ -23,6 +23,17 @@ from wine_cellar.apps.club.models import (
     TasteOffBottle,
     TasteOffScore,
 )
+from wine_cellar.apps.club.notes import (
+    NOTE_MAX,
+    SAVE_MAX,
+    SAVE_WINDOW,
+    can_offer,
+    notes_enabled,
+    save_allowed,
+    set_note_for_event,
+    set_note_for_item,
+    wine_label,
+)
 from wine_cellar.apps.club.peek import effective_visibility, tighter_visibility
 from wine_cellar.apps.club.reactions import (
     PALETTE,
@@ -191,8 +202,12 @@ class ThreadsEnabledMixin(ClubsEnabledMixin):
         return super().handle_exception(exc)
 
 
-class ClubThreadResolveView(ThreadsEnabledMixin, ScannerAPIView):
-    """Which event does a bot message (swipe-reply target) belong to?"""
+class ClubThreadResolveView(ClubsEnabledMixin, ScannerAPIView):
+    """Which event does a bot message (swipe-reply target) belong to?
+
+    A summary or recap message is recognised even with threads off (so the
+    swipe-reply gets the "Tap Reply or Thread" hint); an event needs the
+    threads flag."""
 
     def get(self, request):
         try:
@@ -206,6 +221,8 @@ class ClubThreadResolveView(ThreadsEnabledMixin, ScannerAPIView):
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
         if event is SUMMARY:
             return Response({"summary": True})
+        if not threads_enabled():
+            return Response({"error": "not_enabled"}, status=status.HTTP_404_NOT_FOUND)
         if _ask_hidden(event):
             return _ask_off_response()
         return Response(
@@ -214,6 +231,98 @@ class ClubThreadResolveView(ThreadsEnabledMixin, ScannerAPIView):
                 "club_id": event.club_id,
                 "retracted": event.retracted,
                 "muted": is_thread_muted(request.user.id, event.id),
+            }
+        )
+
+
+class NotesDisabled(Exception):
+    pass
+
+
+class NotesEnabledMixin(ClubsEnabledMixin):
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if not notes_enabled():
+            raise NotesDisabled()
+
+    def handle_exception(self, exc):
+        if isinstance(exc, NotesDisabled):
+            return Response({"error": "not_enabled"}, status=status.HTTP_404_NOT_FOUND)
+        return super().handle_exception(exc)
+
+
+class ClubNoteOfferView(NotesEnabledMixin, ScannerAPIView):
+    """After the vote on a bottle just opened: is "Add a tasting note?" worth
+    asking (a real open, a club to post to, no note yet)?"""
+
+    def get(self, request):
+        try:
+            item_id = int(request.query_params.get("item_id") or 0)
+        except (TypeError, ValueError):
+            item_id = 0
+        offer = bool(item_id) and can_offer(request.user, item_id)
+        body = {"offer": offer}
+        if offer:
+            body["wine"] = wine_label(request.user, item_id)
+        return Response(body)
+
+
+class ClubNoteView(NotesEnabledMixin, ScannerAPIView):
+    """Add, change or remove (empty text) the caller's own tasting note, by
+    ``item_id`` (just opened) or ``event_id`` (feed detail)."""
+
+    def post(self, request):
+        data = request.data or {}
+        text = data.get("text")
+        if not isinstance(text, str):
+            return Response({"error": "invalid"}, status=status.HTTP_400_BAD_REQUEST)
+        if len(" ".join(text.split())) > NOTE_MAX:
+            return Response(
+                {"error": "too_long", "max": NOTE_MAX},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not save_allowed(request.user):
+            return Response(
+                {"error": "rate_limited", "max": SAVE_MAX,
+                 "retry_minutes": SAVE_WINDOW // 60},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        if data.get("event_id"):
+            try:
+                event = ClubEvent.objects.filter(id=int(data["event_id"])).first()
+            except (TypeError, ValueError):
+                event = None
+            if event is None or not ClubMembership.objects.filter(
+                user=request.user, club_id=event.club_id,
+            ).exists():
+                return Response(
+                    {"error": "not_found"}, status=status.HTTP_404_NOT_FOUND,
+                )
+            events, error = set_note_for_event(request.user, event, text)
+        else:
+            try:
+                item_id = int(data.get("item_id") or 0)
+            except (TypeError, ValueError):
+                item_id = 0
+            if not item_id:
+                return Response(
+                    {"error": "invalid"}, status=status.HTTP_400_BAD_REQUEST,
+                )
+            events, error = set_note_for_item(request.user, item_id, text)
+        if error == "no_event":
+            return Response({"error": error}, status=status.HTTP_409_CONFLICT)
+        if error:
+            code = (
+                status.HTTP_400_BAD_REQUEST if error == "too_long"
+                else status.HTTP_404_NOT_FOUND
+            )
+            return Response({"error": error}, status=code)
+        return Response(
+            {
+                "saved": True,
+                "count": len(events),
+                "clubs": [e.club.name for e in events],
+                "removed": not text.strip(),
             }
         )
 

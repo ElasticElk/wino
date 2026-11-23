@@ -741,10 +741,10 @@ def test_default_tz_resolution_order(club):
     row, _ = UserSettings.objects.get_or_create(user=sam)
     row.language = "af"
     row.save()
-    assert zone() == "Africa/Johannesburg"  # locale beats the config key
+    assert zone() == "Australia/Perth"  # language never decides the zone
     row.country = "NL"
     row.save()
-    assert zone() == "Europe/Amsterdam"  # country beats locale
+    assert zone() == "Europe/Amsterdam"  # country beats the config key
     for country, name in (
         ("ZA", "Africa/Johannesburg"), ("GB", "Europe/London"),
         ("US", "America/New_York"), ("AU", "Australia/Sydney"),

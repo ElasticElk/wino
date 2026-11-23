@@ -118,10 +118,13 @@ async def test_swipe_reply_to_unrelated_message_falls_through():
 @pytest.mark.asyncio
 async def test_swipe_reply_flag_off_is_ignored():
     api = _api()
+    # Threads, notify and notes all off: no resolve HTTP call at all.
     handler = _handler(api, feature_clubs="on", feature_club_comments="on")
     update = _update("hi", reply_to=1)
     assert await handler._club_flow().on_reply(update, MagicMock()) is False
     api.club_thread_resolve.assert_not_called()
+    update.message.reply_text.assert_not_called()
+    api.add_club_comment.assert_not_called()
 
 
 @pytest.mark.asyncio

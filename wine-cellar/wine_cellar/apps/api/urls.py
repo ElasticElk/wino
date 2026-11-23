@@ -217,6 +217,16 @@ urlpatterns = [
         name="api-club-thread-resolve",
     ),
     path(
+        "clubs/notes/offer/",
+        social_views.ClubNoteOfferView.as_view(),
+        name="api-club-note-offer",
+    ),
+    path(
+        "clubs/notes/",
+        social_views.ClubNoteView.as_view(),
+        name="api-club-note",
+    ),
+    path(
         "clubs/events/<int:event_id>/mute/",
         social_views.ClubThreadMuteView.as_view(),
         name="api-club-thread-mute",

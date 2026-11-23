@@ -995,6 +995,26 @@ class WineCellarAPI:
     def club_ask_undo(self, event_id: int) -> dict:
         return self._club_post(f"/api/clubs/asks/{event_id}/undo/", {})
 
+    def club_note_offer(self, item_id: int) -> dict:
+        resp = self.session.get(
+            f"{self.base_url}/api/clubs/notes/offer/",
+            params={"item_id": item_id}, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json() if resp.content else {}
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
+    def club_note(self, text: str, item_id=None, event_id=None) -> dict:
+        payload = {"text": text}
+        if event_id:
+            payload["event_id"] = event_id
+        else:
+            payload["item_id"] = item_id
+        return self._club_post("/api/clubs/notes/", payload)
+
     def club_event_want(self, event_id: int) -> dict:
         return self._club_post(f"/api/clubs/events/{event_id}/want/", {})
 

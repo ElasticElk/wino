@@ -269,7 +269,7 @@ Buttons are English in both locales. Server keys live in `club/copy.py`, bot key
 | `club.notify.screen` (bot) | Notifications for {club} / Now: {mode} / {quiet} / Time zone: {tz} | Kennisgewings vir {club} / Nou: {mode} / {quiet} / Tydsone: {tz} |
 | `club.notify.quiet_on` / `quiet_off` (bot) | Quiet hours: {span} (applies to all your clubs) / Quiet hours: off (applies to all your clubs) | Stil ure: {span} (geld vir al jou klubs) / Stil ure: af (geld vir al jou klubs) |
 | `club.notify.quiet_line` (server, first summary only) | Quiet hours {span} ({city} time). | Stil ure {span} ({city}-tyd). |
-| `club.notify.btn_change` / `btn` / `btn_score` (server buttons) | Change / Notifications / Score | Change / Notifications / Punt |
+| `club.notify.btn_change` / `btn` / `btn_score` (server buttons) | Change / Notifications / Score | Change / Notifications / Score |
 | `club.notify.btn_auto` (bot button) | Automatic ({mode}) | same |
 | `club.notify.summary_reply` (bot) | Tap Reply or Thread under the item you're answering. | Tik Reply of Thread onder die item wat jy antwoord. |
 | `club.notify.auto_digest` (bot) | Clubs with {n} or more members get a daily recap unless you pick another option. | Klubs met {n} of meer lede kry 'n daaglikse opsomming tensy jy iets anders kies. |
@@ -278,3 +278,24 @@ Buttons are English in both locales. Server keys live in `club/copy.py`, bot key
 | `club.notify.tz_prompt` (bot) | Type your time zone, like Africa/Johannesburg or Europe/London. | Tik jou tydsone, soos Africa/Johannesburg of Europe/London. |
 | `club.notify.tz_bad` (bot) | I don't know that time zone. Try the form Region/City, like Europe/London. | Ek ken nie daardie tydsone nie. Probeer die vorm Streek/Stad, soos Europe/London. |
 | `chat.club.missed` / `missed_none` (bot) | What you missed: {list} / Nothing is waiting for you in that club. | Wat jy gemis het: {list} / Niks wag vir jou in daardie klub nie. |
+
+## Phase 5 — tasting notes (`feature_tasting_notes`)
+
+Buttons are English in both locales. Bot keys live in `scanner-service/integrations/copy.py`; the note itself is the member's own words (escaped, never translated). The card, summary and ping quote use curly quotes, no key.
+
+| Key | EN | AF |
+|---|---|---|
+| `club.note.offer` (bot) | Add a tasting note for the {wine}? | Voeg 'n proenota by vir die {wine}? |
+| `club.note.btn_add` / `btn_skip` (bot buttons) | Add a note / Skip | same |
+| `club.note.btn_edit` / `btn_add_later` / `btn_remove` (bot buttons, feed detail) | Edit note / Add note / Remove note | same |
+| `club.note.prompt` (bot) | What did you think? A line or two. | Wat het jy daarvan gedink? 'n Reël of twee. |
+| `club.note.edit_prompt` (bot) | Your note now: {note} / What did you think? A line or two. | Jou nota nou: {note} / Wat het jy daarvan gedink? 'n Reël of twee. |
+| `club.note.saved` (bot) | Saved. {clubs} will see it. | Gestoor. {clubs} sal dit sien. |
+| `club.note.saved_none` (bot) | Saved. | Gestoor. |
+| `club.note.blank` (bot) | Write something first. | Skryf eers iets. |
+| `club.note.rate` (bot) | That's a lot of notes. Try again in about {n} min. | Dis baie notas. Probeer weer oor ongeveer {n} min. |
+| `club.note.no_club` (bot) | There's no club for this bottle, or it already has your note. | Daar is geen klub vir hierdie bottel nie, of dit het reeds jou nota. |
+| `club.note.removed` (bot) | Note removed. | Nota verwyder. |
+| `club.note.off` (bot, toast) | Tasting notes are switched off right now. | Proenotas is nou af. |
+| `club.note.gone` (bot) | Couldn't find that bottle any more. | Kon daardie bottel nie meer vind nie. |
+| `club.comment.too_long` (bot, reused) | Keep it under 280 characters. | Hou dit onder 280 karakters. |

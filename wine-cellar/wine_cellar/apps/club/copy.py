@@ -173,7 +173,7 @@ MESSAGES = {
         ),
         "club.notify.btn_keep": "Keep every update",
         "club.notify.btn_recap": "Recap is fine",
-        "club.notify.btn_score": "Punt",
+        "club.notify.btn_score": "Score",
         "club.notify.btn_change": "Change",
         "club.notify.btn": "Notifications",
         "club.notify.quiet_line": "Stil ure {span} ({city}-tyd).",
@@ -214,7 +214,15 @@ def wine_phrase(vintage, wine_name) -> str:
     return name
 
 
-def opened_text(locale, actor_name, vintage, wine_name, vote="") -> str:
+def note_quote(note) -> str:
+    """The member's own words as a quoted line (escaped), or ''."""
+    note = " ".join(str(note or "").split())
+    if not note:
+        return ""
+    return "\u201c" + html.escape(note) + "\u201d"
+
+
+def opened_text(locale, actor_name, vintage, wine_name, vote="", note="") -> str:
     phrase = wine_phrase(vintage, wine_name)
     body = t(
         locale, "club.feed.opened",
@@ -225,6 +233,9 @@ def opened_text(locale, actor_name, vintage, wine_name, vote="") -> str:
     line = f"\U0001F377 {body}"
     if glyph:
         line = f"{line} {glyph}"
+    quote = note_quote(note)
+    if quote:
+        line = f"{line}\n{quote}"
     return line
 
 
@@ -237,9 +248,11 @@ def put_back_text(locale, actor_name, vintage, wine_name) -> str:
     return " ".join(body.split())
 
 
-def comment_card_text(locale, actor_name, vintage, wine_name, vote, comments) -> str:
+def comment_card_text(
+    locale, actor_name, vintage, wine_name, vote, comments, note="",
+) -> str:
     """Opened card plus up to 5 escaped comments. `comments` is [(name, text), ...]."""
-    head = opened_text(locale, actor_name, vintage, wine_name, vote)
+    head = opened_text(locale, actor_name, vintage, wine_name, vote, note=note)
     if not comments:
         return head
     lines = [head, ""]

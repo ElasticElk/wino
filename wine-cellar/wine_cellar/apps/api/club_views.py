@@ -26,6 +26,7 @@ from wine_cellar.apps.club.models import (
     ClubInvite,
     ClubMembership,
 )
+from wine_cellar.apps.club.notes import notes_enabled
 from wine_cellar.apps.club.peek import (
     effective_badges,
     effective_visibility,
@@ -437,6 +438,14 @@ class ClubHandoverView(ClubsEnabledMixin, ScannerAPIView):
         return Response(serialize_club_home(membership))
 
 
+def _feed_row(event, user) -> dict:
+    body = serialize_event(event, public=False)
+    if notes_enabled() and event.kind == "opened" and not event.retracted_at:
+        # The member's own open: the bot offers [Edit note] on it.
+        body["mine"] = event.actor_id == user.id
+    return body
+
+
 class ClubFeedView(ClubsEnabledMixin, ScannerAPIView):
     def get(self, request, pk):
         membership, error = _member_or_404(request, pk)
@@ -469,7 +478,7 @@ class ClubFeedView(ClubsEnabledMixin, ScannerAPIView):
                 "count": count,
                 "offset": offset,
                 "limit": limit,
-                "events": [serialize_event(e, public=False) for e in events],
+                "events": [_feed_row(e, request.user) for e in events],
             }
         )
 

@@ -241,6 +241,10 @@ class ClubEvent(models.Model):
     payload = models.JSONField(default=dict, blank=True)
     created = models.DateTimeField(auto_now_add=True)
     retracted_at = models.DateTimeField(null=True, blank=True)
+    # feature_tasting_notes: the actor's own words about the bottle (opened
+    # events only). Cleared when the open is retracted.
+    note = models.TextField(blank=True, default="")
+    note_added_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         indexes = [

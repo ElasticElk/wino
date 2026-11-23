@@ -178,14 +178,11 @@ def _service_default_tz() -> str:
 
 
 def default_tz(row, user=None) -> str:
-    """Zone for a member with no explicit quiet_tz: country, then Afrikaans
-    locale, then ServiceConfig default_time_zone, then settings.TIME_ZONE."""
+    """Zone for a member with no explicit quiet_tz: country, then ServiceConfig
+    default_time_zone, then settings.TIME_ZONE. Language never decides it."""
     country = str(getattr(row, "country", "") or "").upper()
     if COUNTRY_TZ.get(country):
         return COUNTRY_TZ[country]
-    language = str(getattr(row, "language", "") or "").lower().replace("_", "-")
-    if language.startswith("af"):
-        return "Africa/Johannesburg"
     configured = resolve_tz(_service_default_tz())
     return configured or settings.TIME_ZONE
 
@@ -452,7 +449,7 @@ def build_summary(rows, loc, threads=True, quiet=True, quiet_line=""):
             if notice.kind == ClubNotice.KIND_TASTEOFF:
                 if (notice.payload or {}).get("phase") == "open":
                     buttons.append((
-                        1, f"{t(loc, 'club.notify.btn_score')} "
+                        1, f"{t('en', 'club.notify.btn_score')} "
                         f"{_short((notice.payload or {}).get('title'))}".strip(),
                         f"cl:to:{club.id}",
                     ))

@@ -20,6 +20,7 @@ from wine_cellar.apps.club.models import (
     ClubInvite,
     ClubMembership,
 )
+from wine_cellar.apps.club.notes import visible_note
 from wine_cellar.apps.scanner.models import TelegramUser
 
 
@@ -113,6 +114,9 @@ def serialize_event(event: ClubEvent, *, public=True) -> dict:
         "created": created,
         "retracted": event.retracted,
     }
+    note = visible_note(event)
+    if note:
+        body["note"] = note
     if event.kind in (ClubEvent.KIND_TASTEOFF, ClubEvent.KIND_STAFF_NOTE):
         body["payload"] = event.payload or {}
     elif event.kind == ClubEvent.KIND_ASK:
