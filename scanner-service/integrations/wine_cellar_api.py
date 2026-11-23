@@ -973,6 +973,16 @@ class WineCellarAPI:
             body.update(chat_id=str(chat_id), message_id=message_id)
         return self._club_post(f"/api/clubs/events/{event_id}/react/", body)
 
+    def club_notify(self, club_id: int, patch: dict | None = None) -> dict:
+        url = f"{self.base_url}/api/clubs/{club_id}/notify/"
+        if patch:
+            resp = self.session.patch(url, json=patch, timeout=10)
+        else:
+            resp = self.session.get(url, timeout=10)
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        return resp.json()
+
     def club_ask_copy(self, event_id: int, chat_id, message_id) -> dict:
         return self._club_post(
             f"/api/clubs/asks/{event_id}/copy/",

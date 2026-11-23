@@ -44,6 +44,8 @@ class Club(models.Model):
     previous_cellar_visibility = models.CharField(max_length=8, blank=True, default="")
     previous_badges_visible = models.BooleanField(null=True, blank=True)
     frozen = models.BooleanField(default=False)
+    # Set once the "now 15 members" recap-switch message has gone out.
+    notify_crossing_sent_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         constraints = [
@@ -90,6 +92,19 @@ class ClubMembership(models.Model):
         related_name="club_memberships",
     )
     feed_muted = models.BooleanField(default=False)
+    # null = "default" (instant, or digest at DIGEST_MEMBERS). feed_muted is
+    # kept in sync with notify_mode == muted in save(); see club/notify.py.
+    NOTIFY_INSTANT = "instant"
+    NOTIFY_DIGEST = "digest"
+    NOTIFY_MUTED = "muted"
+    NOTIFY_MODES = [
+        (NOTIFY_INSTANT, "Every update"),
+        (NOTIFY_DIGEST, "Daily recap"),
+        (NOTIFY_MUTED, "Muted"),
+    ]
+    notify_mode = models.CharField(
+        max_length=8, choices=NOTIFY_MODES, null=True, blank=True, default=None,
+    )
     accepted_sharing_version = models.PositiveIntegerField(default=1)
     is_last_used = models.BooleanField(default=False)
     created = models.DateTimeField(auto_now_add=True)
@@ -115,6 +130,32 @@ class ClubMembership(models.Model):
 
     def __str__(self):
         return f"{self.user} -> {self.club} ({self.role})"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._synced = (self.feed_muted, self.notify_mode)
+
+    def save(self, *args, **kwargs):
+        """One source of truth: notify_mode. feed_muted follows it, and an
+        old-style write to feed_muted alone (the mute button, old code) is
+        mapped onto notify_mode (muted / instant)."""
+        old_muted, old_mode = getattr(self, "_synced", (None, None))
+        if self.notify_mode != old_mode:
+            self.feed_muted = self.notify_mode == self.NOTIFY_MUTED
+        elif self.feed_muted != old_muted:
+            self.notify_mode = (
+                self.NOTIFY_MUTED if self.feed_muted else self.NOTIFY_INSTANT
+            )
+        elif self.notify_mode == self.NOTIFY_MUTED and not self.feed_muted:
+            self.feed_muted = True
+        uf = kwargs.get("update_fields")
+        if uf is not None:
+            uf = set(uf)
+            if uf & {"feed_muted", "notify_mode"}:
+                uf |= {"feed_muted", "notify_mode"}
+            kwargs["update_fields"] = list(uf)
+        super().save(*args, **kwargs)
+        self._synced = (self.feed_muted, self.notify_mode)
 
 
 class ClubInvite(models.Model):
@@ -280,7 +321,20 @@ class ClubNotice(models.Model):
 
     KIND_COMMENT = "comment"
     KIND_REACTION = "reaction"
-    KIND = [(KIND_COMMENT, "Comment"), (KIND_REACTION, "Reaction")]
+    KIND_CARD = "card"
+    KIND_ASK = "ask"
+    KIND_TASTEOFF = "tasteoff"
+    KIND = [
+        (KIND_COMMENT, "Comment"),
+        (KIND_REACTION, "Reaction"),
+        (KIND_CARD, "Feed card"),
+        (KIND_ASK, "Ask"),
+        (KIND_TASTEOFF, "Taste-off"),
+    ]
+    # Held rows wait for the summary task instead of the instant flush.
+    HOLD_QUIET = "quiet"
+    HOLD_RECAP = "recap"
+    HOLD = [(HOLD_QUIET, "Quiet hours"), (HOLD_RECAP, "Daily recap")]
     recipient = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="+",
     )
@@ -289,8 +343,10 @@ class ClubNotice(models.Model):
     )
     event = models.ForeignKey(
         ClubEvent, on_delete=models.CASCADE, related_name="notices",
+        null=True, blank=True,
     )
     kind = models.CharField(max_length=12, choices=KIND, default=KIND_COMMENT)
+    hold = models.CharField(max_length=6, choices=HOLD, blank=True, default="")
     dedupe_key = models.CharField(max_length=120, unique=True)
     payload = models.JSONField(default=dict, blank=True)
     created = models.DateTimeField(auto_now_add=True)

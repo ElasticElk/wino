@@ -45,6 +45,12 @@ _MONTHS = (
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 )
+NOTIFY_MODES = ("instant", "digest", "muted")
+NOTIFY_ZONES = (
+    "Africa/Johannesburg", "Europe/London", "Europe/Amsterdam",
+    "America/New_York", "Australia/Sydney",
+)
+NOTIFY_PRESETS = ((22, 8), (23, 7), (21, 7))
 TYPE_LABEL = {
     "RE": "Red", "WH": "White", "RO": "Rosé", "SP": "Sparkling",
     "DE": "Dessert", "FO": "Fortified", "OR": "Orange",
@@ -342,6 +348,10 @@ def build_home(payload: dict, loc: str, flags=None) -> tuple[str, InlineKeyboard
         keyboard.append([InlineKeyboardButton(
             t(loc, "club.list.title"), callback_data=club_cb("li", payload["id"]),
         )])
+    if flags.get("feature_club_notify"):
+        keyboard.append([InlineKeyboardButton(
+            t("en", "club.notify.btn"), callback_data=club_cb("ns", payload["id"]),
+        )])
     if flags.get("feature_club_relay") and not is_global and not payload.get("frozen"):
         keyboard.append([InlineKeyboardButton(
             t("en", "club.ask.btn"), callback_data=club_cb("ak", payload["id"]),
@@ -395,6 +405,13 @@ class ClubFlow:
             clubs_enabled(self.handler)
             and self.threads_on()
             and self.handler.flag_on("feature_club_relay")
+        )
+
+    def notify_on(self) -> bool:
+        """Club notification settings and recap (feature_club_notify)."""
+        return bool(
+            clubs_enabled(self.handler)
+            and self.handler.flag_on("feature_club_notify")
         )
 
     def _prompt_store(self):
@@ -632,6 +649,8 @@ class ClubFlow:
             self.clear(chat_id)
             await update.message.reply_text(t(loc, "club.global.off"))
             return True
+        if step == "tz_type":
+            return await self._submit_tz(update, state, text)
         if step == "name":
             err = validate_typed_name(text)
             if err:
@@ -1436,6 +1455,8 @@ class ClubFlow:
             return await self._tasteoff_name_tap(update, rest)
         if action in ("ak", "au"):
             return await self._ask_callback(update, query, action, rest)
+        if action in ("ns", "nm", "nq", "nz", "nk", "nr"):
+            return await self._notify_callback(update, query, action, rest)
         if action in ("rx", "wt"):
             # These answer the tap themselves, with a toast.
             return await self._reaction_callback(update, query, action, rest)
@@ -1973,6 +1994,7 @@ class ClubFlow:
             "feature_club_comments": self.handler.flag_on("feature_club_comments"),
             "feature_global_clubs": self.handler.flag_on("feature_global_clubs"),
             "feature_club_relay": self.relay_on(),
+            "feature_club_notify": self.notify_on(),
         }
 
     def _default_tasteoff_title(self, club_name: str) -> str:
@@ -2544,6 +2566,176 @@ class ClubFlow:
         await self._toast(query, toast)
 
     # -- reactions and Want this (feature_club_reactions) -----------------
+    # -- notification settings (feature_club_notify) -----------------------
+    @staticmethod
+    def _quiet_label(quiet: dict) -> str:
+        return f"{quiet.get('start', '22:00')}-{quiet.get('end', '08:00')}"
+
+    def _notify_screen(self, loc, club_name, body):
+        mode = body.get("effective") or "instant"
+        quiet = body.get("quiet") or {}
+        on = bool(quiet.get("enabled"))
+        cid = body.get("club_id")
+        mode_label = t(loc, f"club.notify.mode_{mode}")
+        text = t(
+            loc, "club.notify.screen",
+            club=esc(club_name), mode=mode_label,
+            quiet=(
+                t(loc, "club.notify.quiet_on", span=self._quiet_label(quiet))
+                if on else t(loc, "club.notify.quiet_off")
+            ),
+            tz=esc(quiet.get("tz") or ""),
+        )
+        if body.get("mode") is None and mode == "digest":
+            text += "\n\n" + t(loc, "club.notify.auto_digest", n=body.get("digest_members", 15))
+        current = body.get("mode") or mode
+        labels = {
+            "instant": t("en", "club.notify.btn_instant"),
+            "digest": t("en", "club.notify.btn_digest"),
+            "muted": t("en", "club.notify.btn_muted"),
+        }
+        mode_row = [
+            InlineKeyboardButton(
+                ("\u2705 " if m == current else "") + labels[m],
+                callback_data=club_cb("nm", cid, i),
+            )
+            for i, m in enumerate(NOTIFY_MODES)
+        ]
+        span = self._quiet_label(quiet)
+        presets = [
+            InlineKeyboardButton(
+                ("\u2705 " if on and span == f"{a:02d}:00-{b:02d}:00" else "")
+                + f"{a:02d}-{b:02d}",
+                callback_data=club_cb("nq", cid, i),
+            )
+            for i, (a, b) in enumerate(NOTIFY_PRESETS)
+        ]
+        cur_tz = quiet.get("tz") or ""
+        zone_rows = []
+        for i, zone in enumerate(NOTIFY_ZONES):
+            zone_rows.append(InlineKeyboardButton(
+                ("\u2705 " if zone == cur_tz else "") + zone.split("/")[-1].replace("_", " "),
+                callback_data=club_cb("nz", cid, i),
+            ))
+        keyboard = [
+            mode_row,
+            [InlineKeyboardButton(
+                t("en", "club.notify.btn_quiet_off" if on else "club.notify.btn_quiet_on"),
+                callback_data=club_cb("nq", cid, "t"),
+            )],
+            presets,
+            zone_rows[:3], zone_rows[3:] + [InlineKeyboardButton(
+                t("en", "club.notify.btn_tz_type"), callback_data=club_cb("nz", cid, "x"),
+            )],
+            [InlineKeyboardButton(t(loc, "club.back"), callback_data=club_cb("h", cid))],
+        ]
+        return text, InlineKeyboardMarkup(keyboard)
+
+    async def _show_notify(self, update, club_id, query=None, patch=None):
+        loc = self.locale(update)
+        from integrations.telegram_bot import _safe_edit
+        api = self._api(update)
+        try:
+            body = api.club_notify(club_id, patch)
+            home = api.get_club(club_id)
+        except Exception as e:
+            logger.warning("[club] notify screen failed: %s", e)
+            body, home = {"error": str(e)}, {}
+        if body.get("error"):
+            key = "club.not_member" if body.get("status_code") == 404 else "club.err"
+            if body.get("error") == "invalid_tz":
+                key = "club.notify.tz_bad"
+            if query is not None:
+                await _safe_edit(query, t(loc, key))
+            else:
+                await update.message.reply_text(t(loc, key))
+            return
+        text, markup = self._notify_screen(loc, home.get("name") or "club", body)
+        if query is not None:
+            await _safe_edit(query, text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _notify_callback(self, update, query, action, rest) -> bool:
+        loc = self.locale(update)
+        from integrations.telegram_bot import _safe_edit
+        try:
+            await query.answer()
+        except Exception as e:
+            logger.info("[club] answer() failed: %s", e)
+        if not self.notify_on():
+            await _safe_edit(query, t(loc, "club.notify.off"))
+            return True
+        try:
+            club_id = int(rest[0])
+        except (TypeError, ValueError, IndexError):
+            await _safe_edit(query, t(loc, "club.err"))
+            return True
+        arg = rest[1] if len(rest) > 1 else ""
+        patch = None
+        if action == "nm" and arg.isdigit() and int(arg) < len(NOTIFY_MODES):
+            patch = {"mode": NOTIFY_MODES[int(arg)]}
+        elif action == "nk":
+            patch = {"mode": "instant"}
+        elif action == "nr":
+            patch = {"mode": "digest"}
+        elif action == "nq":
+            if arg == "t":
+                cur = self._api(update).club_notify(club_id) or {}
+                patch = {"quiet_enabled": not (cur.get("quiet") or {}).get("enabled")}
+            elif arg.isdigit() and int(arg) < len(NOTIFY_PRESETS):
+                a, b = NOTIFY_PRESETS[int(arg)]
+                patch = {
+                    "quiet_enabled": True,
+                    "quiet_start": f"{a:02d}:00", "quiet_end": f"{b:02d}:00",
+                }
+        elif action == "nz":
+            if arg == "x":
+                chat_id = str(query.message.chat_id)
+                self.clear(chat_id)
+                self.remember(chat_id, step="tz_type", club_id=club_id)
+                await query.message.reply_text(
+                    t(loc, "club.notify.tz_prompt"), reply_markup=_cancel_markup(),
+                )
+                return True
+            if arg.isdigit() and int(arg) < len(NOTIFY_ZONES):
+                patch = {"tz": NOTIFY_ZONES[int(arg)]}
+        if action in ("nk", "nr"):
+            # The 15-member message: confirm in place, no settings screen.
+            api = self._api(update)
+            body = api.club_notify(club_id, patch)
+            key = "club.notify.kept" if action == "nk" else "club.notify.recap_ok"
+            if body.get("error"):
+                key = "club.err"
+            await _safe_edit(query, t(loc, key))
+            return True
+        await self._show_notify(update, club_id, query=query, patch=patch)
+        return True
+
+    async def _submit_tz(self, update, state, text) -> bool:
+        loc = self.locale(update)
+        chat_id = str(update.effective_chat.id)
+        if not self.notify_on():
+            self.clear(chat_id)
+            await update.message.reply_text(t(loc, "club.notify.off"))
+            return True
+        club_id = state.get("club_id")
+        zone = (text or "").strip()
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo(zone)
+            valid = 0 < len(zone) <= 64
+        except Exception:
+            valid = False
+        if not valid:
+            await update.message.reply_text(
+                t(loc, "club.notify.tz_bad"), reply_markup=_cancel_markup(),
+            )
+            return True
+        self.clear(chat_id)
+        await self._show_notify(update, club_id, patch={"tz": zone})
+        return True
+
     def reactions_on(self) -> bool:
         return bool(
             clubs_enabled(self.handler)

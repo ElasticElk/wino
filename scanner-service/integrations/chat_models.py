@@ -52,7 +52,7 @@ INTENTS = set(SCHEMA_INTENTS)
 CLUB_KINDS = {
     "none", "members", "my_clubs", "cellar", "who_has", "oldest", "feed",
     "top_rated", "who_drinks", "avg_rating", "tasteoff", "badges",
-    "badge_progress", "list", "comments",
+    "badge_progress", "list", "comments", "missed",
 }
 HELP_TOPICS = {
     "invite", "new_cellar", "switch", "photo", "take_out", "commands", "other",
@@ -85,7 +85,7 @@ intent (pick one):
 - answer: only when context.open_question is set and the message answers it. Set answer_index if it matches one of context.options (0-based), else null.
 - unknown: anything else. Set unknown_kind to offtopic when it has nothing to do with wine, drink, food, wine places, their cellar or how Whiney works ("how high do planes fly", "write me a poem about cars"); unclear when you cannot tell. Never guess.
 
-club.kind when intent is club_query: members, my_clubs, cellar, who_has, oldest, feed, top_rated, who_drinks, avg_rating, badges, badge_progress, tasteoff, list, comments.
+club.kind when intent is club_query: members, my_clubs, cellar, who_has, oldest, feed, top_rated, who_drinks, avg_rating, badges, badge_progress, tasteoff, list, comments, missed ("what did I miss", "anything new in the club").
 member_name / slots.person is the person they named, else empty. club_name / slots.club is the club they named, else empty. wine_text is the wine words they used. grape is a grape they named. vintage is a year they said, else null. period is week, month, lately, or empty. when is next, last, a weekday, or empty.
 
 slots: copy names they used (wine, producer, appellation, vintage, colour, grape, person, club, location, quantity). Empty string / null if they did not say it. location is a fridge/rack for cellar_query and drink_remove, or a town for place.

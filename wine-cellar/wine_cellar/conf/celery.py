@@ -26,6 +26,10 @@ celery_app.conf.beat_schedule = {
         "task": "flush_club_notices",
         "schedule": crontab(minute="*"),
     },
+    "send_club_summaries": {
+        "task": "send_club_summaries",
+        "schedule": crontab(minute="*"),
+    },
     "close_stale_tasteoffs": {
         "task": "close_stale_tasteoffs",
         "schedule": crontab(minute="15", hour="3"),

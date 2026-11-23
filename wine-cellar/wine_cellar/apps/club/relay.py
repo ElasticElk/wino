@@ -26,6 +26,7 @@ from wine_cellar.apps.club.models import (
     ClubEvent,
     ClubEventDelivery,
     ClubMembership,
+    ClubNotice,
 )
 from wine_cellar.apps.club.threads import threads_enabled
 from wine_cellar.apps.scanner.flags import flag_on
@@ -171,6 +172,9 @@ def record_asker_copy(user, event_id, chat_id, message_id) -> str:
         event=event, kind=ClubEventDelivery.KIND_ASK,
         chat_id=str(chat_id), message_id=message_id,
     )
+    # A delivery that landed between the lookup and the insert must still
+    # edit this copy.
+    event.refresh_from_db()
     if (event.payload or {}).get("sent_at"):
         _edit_asker_copies(event)  # reported after delivery: catch up
         return "already_out"
@@ -233,6 +237,17 @@ def _edit_asker_copies(event, token=None) -> None:
             ClubEventDelivery.objects.filter(id=delivery.id).update(error=error[:200])
 
 
+def _edit_frozen_copies(event, token) -> None:
+    loc = locale_for_user(event.actor)
+    text = t(loc, "club.global.frozen")
+    chats = asker_chat_ids(event)
+    for delivery in event.deliveries.filter(
+        kind=ClubEventDelivery.KIND_ASK, message_id__isnull=False,
+    ):
+        if str(delivery.chat_id) in chats:
+            _edit_text(token, delivery.chat_id, delivery.message_id, text, None)
+
+
 STUCK_AFTER = timedelta(seconds=UNDO_SECONDS)
 STUCK_GIVE_UP = timedelta(days=1)
 
@@ -282,12 +297,20 @@ def deliver_ask(event_id) -> int:
         )
         if event is None or (event.payload or {}).get("sent_at"):
             return 0
-        if event.club.frozen:
-            return 0
+        frozen = bool(event.club.frozen)
         payload = dict(event.payload or {})
         payload["sent_at"] = timezone.now().isoformat()
+        if frozen:
+            # Stamped skipped, so the every-minute sweep stops retrying.
+            payload["skipped"] = "frozen"
         event.payload = payload
         event.save(update_fields=["payload"])
+    if frozen:
+        try:
+            _edit_frozen_copies(event, token)
+        except Exception:
+            logger.warning("asker frozen copy edit failed", exc_info=True)
+        return 0
     try:
         _edit_asker_copies(event, token)
     except Exception:
@@ -299,7 +322,23 @@ def deliver_ask(event_id) -> int:
     )
     seen = set()
     sent = 0
+    from wine_cellar.apps.club import notify
+
+    policy_on = notify.notify_enabled()
     for membership in members:
+        if policy_on:
+            decision = notify.decide(
+                membership.user_id, event.club_id, event=event,
+                membership=membership,
+            )
+            if decision.action == notify.DROP:
+                continue
+            if decision.action != notify.SEND:
+                notify.hold_notice(
+                    membership.user_id, event.club, event, ClubNotice.KIND_ASK,
+                    decision, f"ask:{event.id}:{membership.user_id}",
+                )
+                continue
         loc = locale_for_user(membership.user)
         text = ask_line(event, loc)
         markup = ask_markup(event, loc)

@@ -75,6 +75,18 @@ MESSAGES = {
         ),
         "club.to.reopen": "Reopen scoring",
         "club.global.kicked": "You've been removed from {name}.",
+        "club.notify.head_quiet": "Good morning. Here is what you missed.",
+        "club.notify.head_recap": "Your club recap.",
+        "club.notify.replies": "{n} new replies on {line}",
+        "club.notify.more": "+{n} more, open /club",
+        "club.notify.tasteoff_open": "\U0001F3C6 Taste-off {title} is open",
+        "club.notify.tasteoff_closed": "\U0001F3C6 Taste-off {title} has closed",
+        "club.notify.crossing": (
+            "{club} now has {n} members, so you'll get a daily recap "
+            "instead of every bottle."
+        ),
+        "club.notify.btn_keep": "Keep every update",
+        "club.notify.btn_recap": "Recap is fine",
         "club.global.frozen": "This club is paused.",
     },
     "af": {
@@ -145,6 +157,18 @@ MESSAGES = {
         ),
         "club.to.reopen": "Heropen telling",
         "club.global.kicked": "Jy is uit {name} verwyder.",
+        "club.notify.head_quiet": "Goeie more. Hier is wat jy gemis het.",
+        "club.notify.head_recap": "Jou klub-opsomming.",
+        "club.notify.replies": "{n} nuwe antwoorde op {line}",
+        "club.notify.more": "+{n} meer, maak /club oop",
+        "club.notify.tasteoff_open": "\U0001F3C6 Proe-kompetisie {title} is oop",
+        "club.notify.tasteoff_closed": "\U0001F3C6 Proe-kompetisie {title} het gesluit",
+        "club.notify.crossing": (
+            "{club} het nou {n} lede, so jy kry 'n daaglikse opsomming "
+            "in plaas van elke bottel."
+        ),
+        "club.notify.btn_keep": "Keep every update",
+        "club.notify.btn_recap": "Recap is fine",
         "club.global.frozen": "Hierdie klub is gepouseer.",
     },
 }

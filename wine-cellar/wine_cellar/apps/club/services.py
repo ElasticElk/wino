@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 from django.db import IntegrityError, transaction
@@ -340,7 +341,22 @@ def add_member(club: Club, user, household, *, already_ok=True):
         kind=ClubEvent.KIND_JOINED,
     )
     set_last_used(user, membership)
+    transaction.on_commit(lambda cid=club.id: _announce_crossing(cid))
     return membership, False
+
+
+def _announce_crossing(club_id):
+    try:
+        from wine_cellar.apps.club.notify import DIGEST_MEMBERS, notify_enabled
+        from wine_cellar.apps.club.tasks import club_notify_crossing
+
+        if not notify_enabled():
+            return
+        if ClubMembership.objects.filter(club_id=club_id).count() != DIGEST_MEMBERS:
+            return
+        club_notify_crossing.delay(club_id)
+    except Exception:  # never block a join
+        logging.getLogger(__name__).warning("crossing task failed", exc_info=True)
 
 
 def record_join_event_delivery(club: Club, actor):

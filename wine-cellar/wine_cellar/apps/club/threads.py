@@ -431,6 +431,31 @@ def _send_reaction_notice(notice, token) -> str:
     return "; ".join(errors)[:ERROR_MAX]
 
 
+def _apply_policy(notice, now) -> bool:
+    """feature_club_notify: hold or drop a due notice instead of sending it.
+    True when it was handled here (held, or dropped and stamped)."""
+    from wine_cellar.apps.club import notify
+
+    decision = notify.decide(
+        notice.recipient_id, notice.club_id, event=notice.event, now=now,
+    )
+    if decision.action == notify.SEND:
+        return False
+    if decision.action == notify.DROP:
+        ClubNotice.objects.filter(id=notice.id, sent_at__isnull=True).update(
+            sent_at=now, error=f"skipped:{decision.reason}",
+        )
+        return True
+    hold = (
+        ClubNotice.HOLD_RECAP if decision.action == notify.DIGEST
+        else ClubNotice.HOLD_QUIET
+    )
+    ClubNotice.objects.filter(id=notice.id, sent_at__isnull=True).update(
+        hold=hold, due_at=decision.due_at,
+    )
+    return True
+
+
 def flush_due_notices(now=None) -> int:
     """Send every due notice once. Returns how many were sent or skipped."""
     from wine_cellar.apps.club.reactions import reactions_enabled
@@ -448,9 +473,12 @@ def flush_due_notices(now=None) -> int:
         logger.warning("flush_club_notices: bot_token missing")
         return 0
     now = now or timezone.now()
+    from wine_cellar.apps.club import notify
+
+    policy_on = notify.notify_enabled()
     due = list(
         ClubNotice.objects.filter(
-            sent_at__isnull=True, due_at__lte=now, kind__in=kinds,
+            sent_at__isnull=True, due_at__lte=now, kind__in=kinds, hold="",
         )
         .select_related("recipient", "event", "event__club", "event__actor")
         .order_by("due_at", "id")[:FLUSH_LIMIT]
@@ -458,8 +486,11 @@ def flush_due_notices(now=None) -> int:
     done = 0
     for notice in due:
         try:
+            if policy_on and _apply_policy(notice, now):
+                done += 1
+                continue
             recent = ClubNotice.objects.filter(
-                recipient_id=notice.recipient_id,
+                recipient_id=notice.recipient_id, hold="",
                 sent_at__gte=now - RATE_WINDOW,
             ).count()
             if recent >= RATE_LIMIT_MAX:

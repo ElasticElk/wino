@@ -248,3 +248,29 @@ Buttons stay English ("Ask the club", "Undo", "Reply"). Server key `club.ask.lin
 | `club.ask.global` (bot) | This is a feed-only club, so there's nobody to ask. | Dis 'n klub net vir aktiwiteit, so daar is niemand om te vra nie. |
 
 Blank and over-long text reuse `club.comment.too_long`. Replies reuse the thread copy (`club.thread.*`).
+
+## Phase 5 — notifications (`feature_club_notify`)
+
+Buttons are English in both locales. Server keys live in `club/copy.py`, bot keys in `scanner-service/integrations/copy.py`.
+
+| Key | EN | AF |
+|---|---|---|
+| `club.notify.head_quiet` (server) | Good morning. Here is what you missed. | Goeie more. Hier is wat jy gemis het. |
+| `club.notify.head_recap` (server) | Your club recap. | Jou klub-opsomming. |
+| `club.notify.replies` (server) | {n} new replies on {line} | {n} nuwe antwoorde op {line} |
+| `club.notify.more` (server) | +{n} more, open /club | +{n} meer, maak /club oop |
+| `club.notify.tasteoff_open` / `_closed` (server) | 🏆 Taste-off {title} is open / has closed | 🏆 Proe-kompetisie {title} is oop / het gesluit |
+| `club.notify.crossing` (server) | {club} now has {n} members, so you'll get a daily recap instead of every bottle. | {club} het nou {n} lede, so jy kry 'n daaglikse opsomming in plaas van elke bottel. |
+| `club.notify.btn_keep` / `btn_recap` (server buttons) | Keep every update / Recap is fine | same |
+| `club.notify.btn` (bot button) | Notifications | Notifications |
+| `club.notify.btn_instant` / `btn_digest` / `btn_muted` (bot buttons) | Every update / Daily recap / Muted | same |
+| `club.notify.btn_quiet_on` / `btn_quiet_off` / `btn_tz_type` (bot buttons) | Quiet hours: turn on / turn off / Type one | same |
+| `club.notify.mode_instant` / `mode_digest` / `mode_muted` (bot) | every update / daily recap / muted | elke opdatering / daaglikse opsomming / stil |
+| `club.notify.screen` (bot) | Notifications for {club} / Now: {mode} / {quiet} / Time zone: {tz} | Kennisgewings vir {club} / Nou: {mode} / {quiet} / Tydsone: {tz} |
+| `club.notify.quiet_on` / `quiet_off` (bot) | Quiet hours: {span} / Quiet hours: off | Stil ure: {span} / Stil ure: af |
+| `club.notify.auto_digest` (bot) | Clubs with {n} or more members get a daily recap unless you pick another option. | Klubs met {n} of meer lede kry 'n daaglikse opsomming tensy jy iets anders kies. |
+| `club.notify.off` (bot) | That's switched off right now. | Dit is nou afgeskakel. |
+| `club.notify.kept` / `recap_ok` (bot) | Done. You'll keep getting every update. / Done. You'll get a daily recap. | Klaar. Jy kry steeds elke opdatering. / Klaar. Jy kry 'n daaglikse opsomming. |
+| `club.notify.tz_prompt` (bot) | Type your time zone, like Africa/Johannesburg or Europe/London. | Tik jou tydsone, soos Africa/Johannesburg of Europe/London. |
+| `club.notify.tz_bad` (bot) | I don't know that time zone. Try the form Region/City, like Europe/London. | Ek ken nie daardie tydsone nie. Probeer die vorm Streek/Stad, soos Europe/London. |
+| `chat.club.missed` / `missed_none` (bot) | What you missed: {list} / Nothing is waiting for you in that club. | Wat jy gemis het: {list} / Niks wag vir jou in daardie klub nie. |

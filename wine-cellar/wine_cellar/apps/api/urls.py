@@ -152,6 +152,11 @@ urlpatterns = [
         name="api-club-membership",
     ),
     path(
+        "clubs/<int:pk>/notify/",
+        club_views.ClubNotifyView.as_view(),
+        name="api-club-notify",
+    ),
+    path(
         "clubs/<int:pk>/leave/",
         club_views.ClubLeaveView.as_view(),
         name="api-club-leave",

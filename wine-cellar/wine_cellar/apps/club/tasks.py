@@ -27,6 +27,7 @@ from wine_cellar.apps.club.models import (
     ClubEvent,
     ClubEventDelivery,
     ClubMembership,
+    ClubNotice,
     TasteOff,
 )
 from wine_cellar.apps.scanner.flags import flag_on
@@ -84,6 +85,32 @@ def flush_club_notices():
     except Exception:  # pragma: no cover - last-resort guard
         logger.exception("deliver_stuck_asks failed")
     return sent
+
+
+@shared_task(name="send_club_summaries")
+def send_club_summaries():
+    """Beat (every minute): morning summaries and daily recaps. One message
+    per member holding every due row; idempotent (rows are stamped sent
+    before posting). Never raises."""
+    from wine_cellar.apps.club.notify import send_due_summaries
+
+    try:
+        return send_due_summaries()
+    except Exception:  # pragma: no cover - last-resort guard
+        logger.exception("send_club_summaries failed")
+        return 0
+
+
+@shared_task(name="club_notify_crossing")
+def club_notify_crossing(club_id):
+    """A join took the club to 15 members: one recap-switch message each."""
+    from wine_cellar.apps.club.notify import announce_crossing
+
+    try:
+        return announce_crossing(club_id)
+    except Exception:  # pragma: no cover - last-resort guard
+        logger.exception("club_notify_crossing failed")
+        return 0
 
 
 def _opened_markup(event, loc):
@@ -314,7 +341,33 @@ def deliver_club_event(event_id):
         .select_related("user")
     )
     seen = set()
+    from wine_cellar.apps.club import notify
+
+    policy_on = notify.notify_enabled()
     for membership in members:
+        if (
+            policy_on
+            and event.kind != ClubEvent.KIND_JOINED  # joins are governance
+            and membership.user_id != event.actor_id
+        ):
+            decision = notify.decide(
+                membership.user_id, event.club_id, event=event,
+                membership=membership,
+            )
+            if decision.action == notify.DROP:
+                continue
+            if decision.action != notify.SEND:
+                if not event.retracted:
+                    notify.hold_notice(
+                        membership.user_id, event.club, event,
+                        ClubNotice.KIND_CARD, decision,
+                        f"card:{event.id}:{membership.user_id}",
+                    )
+                continue
+            if event.retracted and notify.has_held(
+                membership.user_id, event.id, ClubNotice.KIND_CARD,
+            ):
+                continue  # never saw the bottle: no "put back" either
         chats = TelegramUser.objects.filter(
             user=membership.user, is_active=True,
         )
@@ -756,7 +809,27 @@ def deliver_tasteoff_open(tasteoff_id):
         .select_related("user")
     )
     seen = set()
+    from wine_cellar.apps.club import notify
+
+    policy_on = notify.notify_enabled()
     for membership in members:
+        if policy_on and membership.user_id != tasteoff.host_id:
+            decision = notify.decide(
+                membership.user_id, tasteoff.club_id, membership=membership,
+            )
+            if decision.action == notify.DROP:
+                continue
+            if decision.action != notify.SEND:
+                notify.hold_notice(
+                    membership.user_id, tasteoff.club, None,
+                    ClubNotice.KIND_TASTEOFF, decision,
+                    f"to:{tasteoff.id}:{membership.user_id}:open",
+                    {
+                        "tasteoff_id": tasteoff.id, "phase": "open",
+                        "title": tasteoff.title,
+                    },
+                )
+                continue
         for tu in TelegramUser.objects.filter(user=membership.user, is_active=True):
             if tu.chat_id in seen:
                 continue
@@ -814,7 +887,27 @@ def deliver_tasteoff_closed(tasteoff_id):
         club=tasteoff.club, feed_muted=False,
     ).select_related("user")
     seen = set()
+    from wine_cellar.apps.club import notify
+
+    policy_on = notify.notify_enabled()
     for membership in members:
+        if policy_on and membership.user_id != tasteoff.host_id:
+            decision = notify.decide(
+                membership.user_id, tasteoff.club_id, membership=membership,
+            )
+            if decision.action == notify.DROP:
+                continue
+            if decision.action != notify.SEND:
+                notify.hold_notice(
+                    membership.user_id, tasteoff.club, None,
+                    ClubNotice.KIND_TASTEOFF, decision,
+                    f"to:{tasteoff.id}:{membership.user_id}:closed",
+                    {
+                        "tasteoff_id": tasteoff.id, "phase": "closed",
+                        "title": tasteoff.title,
+                    },
+                )
+                continue
         for tu in TelegramUser.objects.filter(user=membership.user, is_active=True):
             if tu.chat_id in seen:
                 continue

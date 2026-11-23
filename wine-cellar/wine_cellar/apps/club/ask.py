@@ -57,6 +57,7 @@ CLUB_ASK_KINDS = frozenset(
         "badge_progress",
         "list",
         "comments",
+        "missed",
     }
 )
 
@@ -95,6 +96,7 @@ CELLAR_KINDS = frozenset({"cellar", "who_has", "oldest"})
 TASTEOFF_KINDS = frozenset({"tasteoff"})
 LIST_KINDS = frozenset({"list"})
 COMMENT_KINDS = frozenset({"comments"})
+NOTIFY_KINDS = frozenset({"missed"})
 BADGE_KINDS = frozenset({"badges", "badge_progress"})
 
 
@@ -148,6 +150,7 @@ def _flags() -> dict:
         "clubs": flag_on("feature_clubs"),
         "lists": flag_on("feature_lists"),
         "comments": flag_on("feature_club_comments"),
+        "notify": flag_on("feature_club_notify"),
         "tasteoffs": flag_on("feature_tasteoffs"),
         "global_clubs": flag_on("feature_global_clubs"),
     }
@@ -159,6 +162,8 @@ def _gated(kind: str, flags: dict) -> dict | None:
     if kind in LIST_KINDS and not flags["lists"]:
         return {"status": "fallback"}
     if kind in COMMENT_KINDS and not flags["comments"]:
+        return {"status": "fallback"}
+    if kind in NOTIFY_KINDS and not flags["notify"]:
         return {"status": "fallback"}
     return None
 
@@ -267,6 +272,17 @@ def _answer_my_clubs(memberships: list[ClubMembership]) -> dict:
 
 
 def _answer_in_club(user, club: dict, kind: str, data: dict, flags: dict) -> dict:
+    if kind == "missed":
+        from wine_cellar.apps.club.notify import missed_items
+
+        items = missed_items(user, club["club"])
+        return {
+            "status": "ok",
+            "kind": "missed",
+            "club": _club_meta(club),
+            "items": items,
+            "state": items[0]["state"] if items else "none",
+        }
     members = _club_members(club["club"])
     if kind == "members":
         return _answer_members(club, members)

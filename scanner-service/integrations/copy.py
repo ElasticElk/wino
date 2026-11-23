@@ -130,6 +130,38 @@ MESSAGES: dict[str, dict[str, str]] = {
             "Muted {name}. Opens still go to the club; you won't get pings. /club then Unmute."
         ),
         "club.unmuted": "Unmuted {name}.",
+        "club.notify.btn": "Notifications",
+        "club.notify.btn_instant": "Every update",
+        "club.notify.btn_digest": "Daily recap",
+        "club.notify.btn_muted": "Muted",
+        "club.notify.btn_quiet_on": "Quiet hours: turn on",
+        "club.notify.btn_quiet_off": "Quiet hours: turn off",
+        "club.notify.btn_tz_type": "Type one",
+        "club.notify.mode_instant": "every update",
+        "club.notify.mode_digest": "daily recap",
+        "club.notify.mode_muted": "muted",
+        "club.notify.screen": (
+            "Notifications for {club}\n\n"
+            "Now: {mode}\n"
+            "{quiet}\n"
+            "Time zone: {tz}"
+        ),
+        "club.notify.quiet_on": "Quiet hours: {span}",
+        "club.notify.quiet_off": "Quiet hours: off",
+        "club.notify.auto_digest": (
+            "Clubs with {n} or more members get a daily recap unless you pick another option."
+        ),
+        "club.notify.off": "That's switched off right now.",
+        "club.notify.kept": "Done. You'll keep getting every update.",
+        "club.notify.recap_ok": "Done. You'll get a daily recap.",
+        "club.notify.tz_prompt": (
+            "Type your time zone, like Africa/Johannesburg or Europe/London."
+        ),
+        "club.notify.tz_bad": (
+            "I don't know that time zone. Try the form Region/City, like Europe/London."
+        ),
+        "chat.club.missed_none": "Nothing is waiting for you in that club.",
+        "chat.club.missed": "What you missed:\n{list}",
         "club.left": "You've left {name}.",
         "club.handover.need": "Hand the club to someone else first.",
         "club.handover.btn": "Hand over",
@@ -703,6 +735,38 @@ MESSAGES: dict[str, dict[str, str]] = {
             "{name} is stil. Oops gaan nog na die klub; jy kry nie pings nie. /club dan Unmute."
         ),
         "club.unmuted": "{name} is nie meer stil nie.",
+        "club.notify.btn": "Notifications",
+        "club.notify.btn_instant": "Every update",
+        "club.notify.btn_digest": "Daily recap",
+        "club.notify.btn_muted": "Muted",
+        "club.notify.btn_quiet_on": "Quiet hours: turn on",
+        "club.notify.btn_quiet_off": "Quiet hours: turn off",
+        "club.notify.btn_tz_type": "Type one",
+        "club.notify.mode_instant": "elke opdatering",
+        "club.notify.mode_digest": "daaglikse opsomming",
+        "club.notify.mode_muted": "stil",
+        "club.notify.screen": (
+            "Kennisgewings vir {club}\n\n"
+            "Nou: {mode}\n"
+            "{quiet}\n"
+            "Tydsone: {tz}"
+        ),
+        "club.notify.quiet_on": "Stil ure: {span}",
+        "club.notify.quiet_off": "Stil ure: af",
+        "club.notify.auto_digest": (
+            "Klubs met {n} of meer lede kry 'n daaglikse opsomming tensy jy iets anders kies."
+        ),
+        "club.notify.off": "Dit is nou afgeskakel.",
+        "club.notify.kept": "Klaar. Jy kry steeds elke opdatering.",
+        "club.notify.recap_ok": "Klaar. Jy kry 'n daaglikse opsomming.",
+        "club.notify.tz_prompt": (
+            "Tik jou tydsone, soos Africa/Johannesburg of Europe/London."
+        ),
+        "club.notify.tz_bad": (
+            "Ek ken nie daardie tydsone nie. Probeer die vorm Streek/Stad, soos Europe/London."
+        ),
+        "chat.club.missed_none": "Niks wag vir jou in daardie klub nie.",
+        "chat.club.missed": "Wat jy gemis het:\n{list}",
         "club.left": "Jy het {name} verlaat.",
         "club.handover.need": "Gee eers die klub aan iemand anders.",
         "club.handover.btn": "Gee oor",
