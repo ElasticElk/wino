@@ -91,7 +91,8 @@ async def test_swipe_reply_is_a_comment_without_say_something():
     assert await handler._club_flow().on_reply(update, MagicMock()) is True
     api.club_thread_resolve.assert_called_once_with("4242", 555)
     api.add_club_comment.assert_called_once_with(3, 88, "we had that in Stellenbosch")
-    assert update.message.reply_text.call_args.args[0] == t("en", "club.comment.saved")
+    assert update.message.reply_text.call_args.args[0] == t("en", "club.comment.sent")
+    assert update.message.reply_text.call_args.kwargs.get("reply_markup") is None
 
 
 @pytest.mark.asyncio
@@ -207,7 +208,7 @@ async def test_post_button_saves_the_held_comment():
     api.add_club_comment.assert_called_once_with(3, 88, "worth a try")
     assert flow._prompt_get("4242") is None
     assert update.callback_query.message.reply_text.call_args.args[0] == t(
-        "en", "club.comment.saved",
+        "en", "club.comment.sent",
     )
 
 

@@ -3680,6 +3680,23 @@ class TelegramBotHandler:
             flag_off_tap = (
                 label in LABEL_FLAGS and not flags_now.get(LABEL_FLAGS[label])
             )
+            # Swipe-reply to a club card or ping is a comment on that event
+            # (feature_club_threads); no Say something step needed. Handled
+            # before the bar repair so a reply in a club thread gets only its
+            # own one-line confirmation; the bar returns on the next message.
+            if label is None and not flag_off_tap and getattr(
+                update.message, "reply_to_message", None,
+            ) is not None:
+                try:
+                    replied = await self._club_flow().on_reply(update, context)
+                except Exception as e:
+                    logger.info("[club] swipe-reply failed: %s", e)
+                    replied = False
+                if replied:
+                    handled_by = "club"
+                    self._text_meta["outcome"] = self._text_meta.get("outcome") or "answered"
+                    return
+
             # A label repairs the bar itself (on_label), after any naming
             # keyboard it drops, so it never sends two.
             if (
@@ -3696,19 +3713,6 @@ class TelegramBotHandler:
                 await pacer.wait()
                 await self._nav().on_label(update, context, label)
                 return
-
-            # Swipe-reply to a club card or ping is a comment on that event
-            # (feature_club_threads); no Say something step needed.
-            if getattr(update.message, "reply_to_message", None) is not None:
-                try:
-                    replied = await self._club_flow().on_reply(update, context)
-                except Exception as e:
-                    logger.info("[club] swipe-reply failed: %s", e)
-                    replied = False
-                if replied:
-                    handled_by = "club"
-                    self._text_meta["outcome"] = self._text_meta.get("outcome") or "answered"
-                    return
 
             # A "near me" ask only survives an area name; anything else (even
             # a message the router never sees) drops it and the bar returns.

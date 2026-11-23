@@ -258,6 +258,7 @@ MESSAGES: dict[str, dict[str, str]] = {
             "Type a short note (280 characters max). Only your next message counts."
         ),
         "club.comment.saved": "Noted.",
+        "club.comment.sent": "✓ Sent to the club.",
         "club.comment.too_long": "Keep it under 280 characters.",
         "club.comment.again": "Tap Say something again.",
         "club.comment.more": "and {n} more",
@@ -887,6 +888,7 @@ MESSAGES: dict[str, dict[str, str]] = {
             "Tik 'n kort nota (hoogstens 280 karakters). Net jou volgende boodskap tel."
         ),
         "club.comment.saved": "Genoteer.",
+        "club.comment.sent": "✓ Na die klub gestuur.",
         "club.comment.too_long": "Hou dit onder 280 karakters.",
         "club.comment.again": "Tik Sê iets weer.",
         "club.comment.more": "en nog {n}",
