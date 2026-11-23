@@ -277,7 +277,8 @@ class ClubNotice(models.Model):
     """
 
     KIND_COMMENT = "comment"
-    KIND = [(KIND_COMMENT, "Comment")]
+    KIND_REACTION = "reaction"
+    KIND = [(KIND_COMMENT, "Comment"), (KIND_REACTION, "Reaction")]
     recipient = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="+",
     )
@@ -305,9 +306,48 @@ class ClubNotice(models.Model):
         ]
         constraints = [
             models.UniqueConstraint(
-                fields=["recipient", "event"],
+                fields=["recipient", "event", "kind"],
                 condition=models.Q(sent_at__isnull=True),
                 name="clubnotice_one_pending",
+            ),
+        ]
+
+
+class ClubReaction(models.Model):
+    """One member's emoji reaction on a club event (toggle: row = on)."""
+
+    event = models.ForeignKey(
+        ClubEvent, on_delete=models.CASCADE, related_name="reactions",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="+",
+    )
+    emoji = models.CharField(max_length=8)
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["event", "user", "emoji"], name="unique_club_reaction",
+            ),
+        ]
+
+
+class ClubWant(models.Model):
+    """A member tapped Want this on an opened-wine card (saved to their list)."""
+
+    event = models.ForeignKey(
+        ClubEvent, on_delete=models.CASCADE, related_name="wants",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="+",
+    )
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["event", "user"], name="unique_club_want",
             ),
         ]
 

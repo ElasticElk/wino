@@ -197,7 +197,9 @@ def _event_line(event, loc) -> str:
 
 
 def _markup(event, loc, muted: bool, thread: bool = False) -> dict:
-    rows = []
+    from wine_cellar.apps.club.reactions import reaction_rows
+
+    rows = list(reaction_rows(event))
     if thread:
         rows.append([{
             "text": t(loc, "club.thread.btn_view", n=_comment_count(event)),
@@ -226,8 +228,9 @@ def _post(token, chat_id, text, markup, reply_to=None):
         "chat_id": chat_id,
         "text": text,
         "parse_mode": "HTML",
-        "reply_markup": markup,
     }
+    if markup is not None:
+        payload["reply_markup"] = markup
     if reply_to:
         payload["reply_to_message_id"] = reply_to
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -346,6 +349,8 @@ def _send_notice(notice, token) -> str:
         return "skipped:thread_muted"
     if event.retracted:
         return "skipped:retracted"
+    if notice.kind == ClubNotice.KIND_REACTION:
+        return _send_reaction_notice(notice, token)
     ids = (notice.payload or {}).get("comment_ids") or []
     comments = list(
         ClubComment.objects.filter(id__in=ids)
@@ -384,11 +389,42 @@ def _send_notice(notice, token) -> str:
     return "; ".join(errors)[:ERROR_MAX]
 
 
+def _send_reaction_notice(notice, token) -> str:
+    """Quiet message to the event owner: who reacted / saved. No buttons."""
+    from wine_cellar.apps.club.reactions import render_notice
+
+    event, user = notice.event, notice.recipient
+    loc = locale_for_user(user)
+    text = render_notice(notice, loc)
+    if not text:
+        return "skipped:empty"
+    chats = list(
+        TelegramUser.objects.filter(user=user, is_active=True)
+        .values_list("chat_id", flat=True)
+        .distinct()
+    )
+    if not chats:
+        return "skipped:no_chat"
+    errors = []
+    for chat_id in chats:
+        mid, error = _post(token, chat_id, text, None)
+        _record(event, chat_id, mid, error)
+        if error:
+            errors.append(f"{chat_id}:{error}")
+    return "; ".join(errors)[:ERROR_MAX]
+
+
 def flush_due_notices(now=None) -> int:
     """Send every due notice once. Returns how many were sent or skipped."""
+    from wine_cellar.apps.club.reactions import reactions_enabled
     from wine_cellar.apps.wine.tasks import _bot_token
 
-    if not threads_enabled():
+    kinds = []
+    if threads_enabled():
+        kinds.append(ClubNotice.KIND_COMMENT)
+    if reactions_enabled():
+        kinds.append(ClubNotice.KIND_REACTION)
+    if not kinds:
         return 0
     token = _bot_token()
     if not token:
@@ -396,7 +432,9 @@ def flush_due_notices(now=None) -> int:
         return 0
     now = now or timezone.now()
     due = list(
-        ClubNotice.objects.filter(sent_at__isnull=True, due_at__lte=now)
+        ClubNotice.objects.filter(
+            sent_at__isnull=True, due_at__lte=now, kind__in=kinds,
+        )
         .select_related("recipient", "event", "event__club", "event__actor")
         .order_by("due_at", "id")[:FLUSH_LIMIT]
     )

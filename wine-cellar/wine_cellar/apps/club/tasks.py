@@ -83,6 +83,10 @@ def flush_club_notices():
 def _opened_markup(event, loc):
     if event.kind != ClubEvent.KIND_OPENED or event.retracted:
         return None
+    from wine_cellar.apps.club.reactions import reaction_rows
+
+    rows = list(reaction_rows(event))
+    reactions = bool(rows)
     row = []
     if flag_on("feature_club_comments"):
         row.append(
@@ -92,15 +96,86 @@ def _opened_markup(event, loc):
             }
         )
     if flag_on("feature_lists"):
+        # With reactions on, Want this replaces the To-drink button.
         row.append(
             {
-                "text": t(loc, "club.td.btn"),
-                "callback_data": f"cl:td:{event.id}",
+                "text": t(loc, "club.rx.want_btn" if reactions else "club.td.btn"),
+                "callback_data": (
+                    f"cl:wt:{event.id}" if reactions else f"cl:td:{event.id}"
+                ),
             }
         )
-    if not row:
+    if row:
+        rows.append(row)
+    if not rows:
         return None
-    return {"inline_keyboard": [row]}
+    return {"inline_keyboard": rows}
+
+
+def _edit_markup(token, chat_id, message_id, markup) -> str:
+    """editMessageReplyMarkup. '' when fine or harmless, else an error."""
+    import requests
+
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "reply_markup": markup or {"inline_keyboard": []},
+    }
+    url = f"https://api.telegram.org/bot{token}/editMessageReplyMarkup"
+    try:
+        response = requests.post(url, json=payload, timeout=15)
+    except requests.RequestException as exc:
+        return f"network:{type(exc).__name__}"
+    if response.status_code == 200:
+        return ""
+    try:
+        description = str((response.json() or {}).get("description") or "")
+    except ValueError:
+        description = ""
+    low = description.lower()
+    if "message is not modified" in low or "message to edit not found" in low:
+        return ""
+    return f"{response.status_code}:{description}"[:200]
+
+
+@shared_task(name="refresh_event_reactions")
+def refresh_event_reactions(event_id):
+    """One debounced pass: put the current counts on members' card copies."""
+    from wine_cellar.apps.club.reactions import clear_refresh_key, reactions_enabled
+
+    clear_refresh_key(event_id)
+    if not reactions_enabled():
+        return 0
+    event = (
+        ClubEvent.objects.select_related("club", "actor").filter(id=event_id).first()
+    )
+    if event is None or event.retracted or event.kind != ClubEvent.KIND_OPENED:
+        return 0
+    token = _bot_token()
+    if not token:
+        return 0
+    edited = 0
+    cards = event.deliveries.filter(
+        kind=ClubEventDelivery.KIND_CARD, message_id__isnull=False,
+    )
+    for delivery in cards:
+        tu = TelegramUser.objects.filter(
+            chat_id=delivery.chat_id, is_active=True,
+        ).select_related("user").first()
+        loc = locale_for_user(tu.user) if tu is not None else "en"
+        try:
+            error = _edit_markup(
+                token, delivery.chat_id, delivery.message_id,
+                _opened_markup(event, loc),
+            )
+        except Exception:
+            logger.warning("reaction edit failed", exc_info=True)
+            continue
+        if error:
+            logger.info("reaction edit %s: %s", delivery.chat_id, error)
+        else:
+            edited += 1
+    return edited
 
 
 @shared_task(name="publish_club_event")

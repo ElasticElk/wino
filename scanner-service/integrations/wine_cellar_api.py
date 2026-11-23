@@ -965,6 +965,23 @@ class WineCellarAPI:
             body["status_code"] = resp.status_code
         return body
 
+    def club_event_react(self, event_id: int, index: int) -> dict:
+        return self._club_post(f"/api/clubs/events/{event_id}/react/", {"i": index})
+
+    def club_event_want(self, event_id: int) -> dict:
+        return self._club_post(f"/api/clubs/events/{event_id}/want/", {})
+
+    def _club_post(self, path: str, payload: dict) -> dict:
+        resp = self.session.post(
+            f"{self.base_url}{path}", json=payload, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json() if resp.content else {}
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
     def event_to_list(self, club_id: int, event_id: int) -> dict:
         resp = self.session.post(
             f"{self.base_url}/api/clubs/{club_id}/events/{event_id}/to-list/",

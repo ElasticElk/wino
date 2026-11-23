@@ -28,7 +28,7 @@ class Migration(migrations.Migration):
                 (
                     "kind",
                     models.CharField(
-                        choices=[("comment", "Comment")],
+                        choices=[("comment", "Comment"), ("reaction", "Reaction")],
                         default="comment",
                         max_length=12,
                     ),

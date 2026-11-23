@@ -6,7 +6,7 @@ def merge_duplicates(apps, schema_editor):
     ClubNotice = apps.get_model("club", "ClubNotice")
     seen = {}
     for notice in ClubNotice.objects.filter(sent_at__isnull=True).order_by("id"):
-        key = (notice.recipient_id, notice.event_id)
+        key = (notice.recipient_id, notice.event_id, notice.kind)
         keep = seen.get(key)
         if keep is None:
             seen[key] = notice
@@ -33,7 +33,7 @@ class Migration(migrations.Migration):
             model_name="clubnotice",
             constraint=models.UniqueConstraint(
                 condition=models.Q(("sent_at__isnull", True)),
-                fields=("recipient", "event"),
+                fields=("recipient", "event", "kind"),
                 name="clubnotice_one_pending",
             ),
         ),

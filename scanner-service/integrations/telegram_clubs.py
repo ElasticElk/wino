@@ -99,6 +99,23 @@ def club_cb(*parts) -> str:
     return data
 
 
+REACTION_PALETTE = ("\U0001F377", "\U0001F60D", "\U0001F44D", "\U0001F602", "\U0001F914")
+PALETTE = REACTION_PALETTE
+
+
+def reaction_buttons(event_id, counts=None) -> list:
+    """One compact row of emoji buttons ('🍷 3' when the count is > 0).
+    Reusable for cards, comment pings and relay asks."""
+    counts = list(counts or [0] * len(PALETTE))
+    return [
+        InlineKeyboardButton(
+            f"{emoji} {n}" if n else emoji,
+            callback_data=club_cb("rx", event_id, i),
+        )
+        for i, (emoji, n) in enumerate(zip(PALETTE, counts))
+    ]
+
+
 def parse_club_cb(data: str) -> tuple[str, list[str]] | None:
     if not (data or "").startswith("cl:"):
         return None
@@ -390,9 +407,10 @@ class ClubFlow:
             logger.info("[club] prompt store write failed: %s", e)
 
     def _prompt_hold(self, chat_id, prompt: dict, text: str) -> None:
-        """Keep the prompt (and its original timestamp) and remember a held text."""
+        """Keep the prompt and remember a held text, with a fresh window so
+        Post / No still works when the user taps a while later."""
         try:
-            self._prompt_store()[str(chat_id)] = dict(prompt, held=text)
+            self._prompt_store()[str(chat_id)] = dict(prompt, held=text, at=time.time())
         except Exception as e:
             logger.info("[club] prompt store write failed: %s", e)
 
@@ -1391,6 +1409,9 @@ class ClubFlow:
         action, rest = parsed
         if action == "tn":
             return await self._tasteoff_name_tap(update, rest)
+        if action in ("rx", "wt"):
+            # These answer the tap themselves, with a toast.
+            return await self._reaction_callback(update, query, action, rest)
         try:
             await query.answer()
         except Exception as e:
@@ -2312,11 +2333,18 @@ class ClubFlow:
     async def _close_comment_prompt(self, update, chat_id, prompt_id) -> None:
         if not prompt_id:
             return
-        bot = getattr(getattr(update, "message", None), "get_bot", None)
-        try:
-            bot = bot() if callable(bot) else None
-        except Exception:
-            bot = None
+        bot = None
+        for holder in (
+            getattr(update, "message", None),
+            getattr(getattr(update, "callback_query", None), "message", None),
+        ):
+            getter = getattr(holder, "get_bot", None)
+            try:
+                bot = getter() if callable(getter) else None
+            except Exception:
+                bot = None
+            if bot is not None:
+                break
         if bot is None:
             return
         try:
@@ -2325,6 +2353,108 @@ class ClubFlow:
             )
         except Exception:
             pass
+
+    # -- reactions and Want this (feature_club_reactions) -----------------
+    def reactions_on(self) -> bool:
+        return bool(
+            clubs_enabled(self.handler)
+            and self.handler.flag_on("feature_club_reactions")
+        )
+
+    @staticmethod
+    async def _toast(query, text: str) -> None:
+        try:
+            await query.answer(text[:190])
+        except Exception as e:
+            logger.info("[club] toast failed: %s", e)
+
+    @staticmethod
+    def _with_counts(markup, counts, event_id):
+        """The tapped message's keyboard, with only the emoji row refreshed."""
+        rows = []
+        replaced = False
+        for row in getattr(markup, "inline_keyboard", None) or []:
+            first = getattr(row[0], "callback_data", "") if row else ""
+            if str(first).startswith("cl:rx:"):
+                rows.append(reaction_buttons(event_id, counts))
+                replaced = True
+            else:
+                rows.append(list(row))
+        return InlineKeyboardMarkup(rows) if replaced else None
+
+    async def _reaction_callback(self, update, query, action, rest) -> bool:
+        loc = self.locale(update)
+        if not self.reactions_on():
+            if action == "wt" and clubs_enabled(self.handler):
+                pass  # flag off: fall through to the plain To-drink path
+            else:
+                await self._toast(query, t(loc, "club.rx.off"))
+                return True
+        try:
+            event_id = int(rest[0]) if rest else 0
+        except (TypeError, ValueError):
+            event_id = 0
+        if action == "wt":
+            if not self.reactions_on():
+                try:
+                    await query.answer()
+                except Exception:
+                    pass
+                await self._event_to_list(update, event_id, query)
+                return True
+            await self._want_this(update, query, event_id)
+            return True
+        try:
+            index = int(rest[1]) if len(rest) > 1 else -1
+        except (TypeError, ValueError):
+            index = -1
+        if not event_id or not 0 <= index < len(PALETTE):
+            await self._toast(query, t(loc, "club.err"))
+            return True
+        try:
+            result = self._api(update).club_event_react(event_id, index)
+        except Exception as e:
+            logger.info("[club] react failed: %s", e)
+            result = {"error": "err"}
+        if result.get("status_code") == 409 or result.get("error") == "retracted":
+            await self._toast(query, t(loc, "club.rx.retracted"))
+            return True
+        if result.get("error"):
+            await self._toast(query, t(loc, "club.err"))
+            return True
+        emoji = PALETTE[index]
+        await self._toast(
+            query, t(loc, "club.rx.on" if result.get("on") else "club.rx.undone", emoji=emoji),
+        )
+        markup = self._with_counts(
+            getattr(query.message, "reply_markup", None),
+            result.get("counts") or [0] * len(PALETTE), event_id,
+        )
+        if markup is not None:
+            try:
+                await query.edit_message_reply_markup(reply_markup=markup)
+            except Exception as e:
+                logger.info("[club] reaction markup edit: %s", e)
+        return True
+
+    async def _want_this(self, update, query, event_id) -> None:
+        loc = self.locale(update)
+        if not self.handler.flag_on("feature_lists"):
+            await self._toast(query, t(loc, "club.td.off"))
+            return
+        try:
+            result = self._api(update).club_event_want(event_id)
+        except Exception as e:
+            logger.info("[club] want failed: %s", e)
+            result = {"error": "err"}
+        if result.get("status_code") == 409 or result.get("error") == "retracted":
+            await self._toast(query, t(loc, "club.rx.retracted"))
+        elif result.get("status_code") == 404:
+            await self._toast(query, t(loc, "club.td.off"))
+        elif result.get("error"):
+            await self._toast(query, t(loc, "club.err"))
+        else:
+            await self._toast(query, t(loc, "club.td.added"))
 
     async def _event_to_list(self, update, event_id, query):
         loc = self.locale(update)

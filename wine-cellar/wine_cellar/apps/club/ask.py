@@ -1236,6 +1236,45 @@ def _comment_threads(club, matching, max_events=6) -> list:
     return out
 
 
+def _reaction_summary(club, wine_text, max_events=8) -> list:
+    """Reactions and Want this saves per matching opened-wine event."""
+    from wine_cellar.apps.club.reactions import PALETTE
+
+    events = ClubEvent.objects.filter(
+        club=club["club"], kind=ClubEvent.KIND_OPENED, retracted_at__isnull=True,
+    ).select_related("actor")
+    if wine_text:
+        events = events.filter(
+            Q(wine_name__icontains=wine_text) | Q(producer__icontains=wine_text)
+        )
+    out = []
+    for event in events.order_by("-created")[: max_events * 3]:
+        reactions = list(
+            event.reactions.select_related("user").order_by("created", "id")
+        )
+        wants = list(
+            event.wants.select_related("user").order_by("created", "id")
+        )
+        if not reactions and not wants:
+            continue
+        by_emoji = {}
+        for r in reactions:
+            by_emoji.setdefault(r.emoji, []).append(display_name(r.user))
+        out.append({
+            "wine_name": event.wine_name,
+            "vintage": event.vintage,
+            "opened_by": display_name(event.actor) if event.actor_id else "",
+            "reactions": [
+                {"emoji": e, "count": len(by_emoji[e]), "by": by_emoji[e]}
+                for e in PALETTE if e in by_emoji
+            ],
+            "wanted_by": [display_name(w.user) for w in wants],
+        })
+        if len(out) >= max_events:
+            break
+    return out
+
+
 def _answer_comments(club, data) -> dict:
     wine_text = str(data.get("wine_text") or data.get("grape") or "").strip()
     qs = (
@@ -1271,4 +1310,6 @@ def _answer_comments(club, data) -> dict:
     }
     if out_threads is not None:
         answer["threads"] = out_threads
+    if flag_on("feature_club_reactions"):
+        answer["reactions"] = _reaction_summary(club, wine_text)
     return answer

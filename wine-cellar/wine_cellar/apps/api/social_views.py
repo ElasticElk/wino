@@ -23,6 +23,14 @@ from wine_cellar.apps.club.models import (
     TasteOffScore,
 )
 from wine_cellar.apps.club.peek import effective_visibility, tighter_visibility
+from wine_cellar.apps.club.reactions import (
+    PALETTE,
+    counts_for,
+    mine_for,
+    reactions_enabled,
+    record_want,
+    toggle_reaction,
+)
 from wine_cellar.apps.club.services import (
     TASTEOFF_REOPEN_WINDOW,
     close_tasteoff,
@@ -217,27 +225,110 @@ class ClubEventToListView(ClubListsEnabledMixin, ScannerAPIView):
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
         if event.retracted:
             return Response({"error": "retracted"}, status=status.HTTP_409_CONFLICT)
-        lst = get_or_create_personal_list(request.user)
-        existing = WineListItem.objects.filter(
-            list=lst,
-            moved_at__isnull=True,
-            name=event.wine_name,
-            producer=event.producer or "",
-            vintage=event.vintage,
-        ).first()
-        if existing:
-            body = serialize_item(existing)
+        item, created = add_event_to_list(request.user, event)
+        body = serialize_item(item)
+        if not created:
             body["status_code"] = 200
             return Response(body)
-        item = WineListItem.objects.create(
-            list=lst,
-            name=event.wine_name or "wine",
-            producer=event.producer or "",
-            vintage=event.vintage,
-            source="club_feed",
-            added_by=request.user,
+        return Response(body, status=status.HTTP_201_CREATED)
+
+
+def add_event_to_list(user, event):
+    """Snapshot an opened-wine event onto the user's personal To-drink list.
+    Idempotent. Returns (item, created)."""
+    lst = get_or_create_personal_list(user)
+    existing = WineListItem.objects.filter(
+        list=lst,
+        moved_at__isnull=True,
+        name=event.wine_name,
+        producer=event.producer or "",
+        vintage=event.vintage,
+    ).first()
+    if existing:
+        return existing, False
+    item = WineListItem.objects.create(
+        list=lst,
+        name=event.wine_name or "wine",
+        producer=event.producer or "",
+        vintage=event.vintage,
+        source="club_feed",
+        added_by=user,
+    )
+    return item, True
+
+
+class ReactionsEnabledMixin(ClubsEnabledMixin):
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if not reactions_enabled():
+            raise CommentsDisabled()
+
+    def handle_exception(self, exc):
+        if isinstance(exc, CommentsDisabled):
+            return Response({"error": "not_enabled"}, status=status.HTTP_404_NOT_FOUND)
+        return super().handle_exception(exc)
+
+
+def _member_event(request, event_id):
+    """The event, only when the caller is a member of its club (the same
+    audience that was sent the card)."""
+    event = (
+        ClubEvent.objects.select_related("club", "actor").filter(id=event_id).first()
+    )
+    if event is None or not ClubMembership.objects.filter(
+        user=request.user, club_id=event.club_id,
+    ).exists():
+        return None
+    return event
+
+
+class ClubEventReactView(ReactionsEnabledMixin, ScannerAPIView):
+    """POST {"i": 0-4}: toggle the caller's reaction."""
+
+    def post(self, request, event_id):
+        event = _member_event(request, event_id)
+        if event is None:
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        if event.retracted:
+            return Response({"error": "retracted"}, status=status.HTTP_409_CONFLICT)
+        if event.kind != ClubEvent.KIND_OPENED:
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            index = int((request.data or {}).get("i"))
+            if not 0 <= index < len(PALETTE):
+                raise ValueError
+        except (TypeError, ValueError):
+            return Response({"error": "bad_index"}, status=status.HTTP_400_BAD_REQUEST)
+        on = toggle_reaction(request.user, event, index)
+        return Response(
+            {
+                "on": on,
+                "emoji": PALETTE[index],
+                "counts": counts_for(event),
+                "mine": mine_for(event, request.user),
+            }
         )
-        return Response(serialize_item(item), status=status.HTTP_201_CREATED)
+
+
+class ClubEventWantView(ReactionsEnabledMixin, ScannerAPIView):
+    """Want this: save the wine to the caller's own To-drink list."""
+
+    def post(self, request, event_id):
+        if not flag_on("feature_lists"):
+            return Response({"error": "not_enabled"}, status=status.HTTP_404_NOT_FOUND)
+        event = _member_event(request, event_id)
+        if event is None:
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        if event.retracted:
+            return Response({"error": "retracted"}, status=status.HTTP_409_CONFLICT)
+        if event.kind != ClubEvent.KIND_OPENED:
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        item, created = add_event_to_list(request.user, event)
+        first = record_want(request.user, event)
+        return Response(
+            {"saved": True, "created": created, "notified": first},
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
 
 
 def _club_list(club):

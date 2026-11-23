@@ -18,3 +18,17 @@ Flag `feature_club_threads` (ServiceConfig, default off, scanner reads it at sta
 
 ## Tests
 `wine-cellar/tests/test_club_threads.py`, `scanner-service/tests/test_club_threads.py`. Telegram HTTP is always mocked.
+
+# P2 reactions and Want this
+
+Flag `feature_club_reactions` (ServiceConfig, default off; needs `feature_clubs`). Off: cards, pings and the `cl:td` To-drink button behave exactly as before.
+
+- **Palette** 🍷 😍 👍 😂 🤔: one compact row on opened-wine feed cards and comment pings (`reaction_rows` / `reaction_row` in `club/reactions.py`; `reaction_buttons` in `telegram_clubs.py`). A button shows its count when above zero ("🍷 3"). Callback `cl:rx:<event>:<i>` toggles the tapper's `ClubReaction` (unique event, user, emoji). The tapper gets a toast (no new message) and their own keyboard's emoji row is refreshed in place. Phase 3 relay asks reuse the same helper.
+- **Count edits**: `refresh_event_reactions` edits members' delivered card copies (`editMessageReplyMarkup`). One pass per event per 30 s: the cache key `club:rxrefresh:<event>` is the dedupe key, the task runs 30 s after the first tap and reads the counts then. "message is not modified" and "message to edit not found" are harmless; other errors are logged. Retracted events are skipped. Comment-ping copies show counts as of when they were sent (only the tapper's own copy updates live).
+- **Owner pings**: only the event's actor, never for their own taps. `ClubNotice` kind `reaction`, payload `{"rx": {user_id: [emoji]}, "wants": [user_id]}`, 2-minute batch window, one pending row per (recipient, event, kind). Un-react inside the window removes that line (empty notice is deleted); after the send nothing is retracted. Text: "Sam and Pat reacted 🍷😍 to your 2019 Merlot", plus "Pat saved it to their To-drink list" (or "... saved your <wine> to ..." when no reaction line). Owner `feed_muted` and thread mute are honoured at send time. No buttons; recorded as a `ping` delivery so a swipe-reply to it comments on the event.
+- **Want this** (`cl:wt:<event>`): replaces the To-drink button on cards while the flag is on and `feature_lists` is on. `POST /api/clubs/events/<id>/want/` reuses the feed-to-list code (`add_event_to_list`, idempotent, source `club_feed`) for the tapper's own personal list and records a `ClubWant` row; the owner is told once per (event, tapper). Lists off: toast `club.td.off`. A stale `cl:wt` with the flag off falls back to the old To-drink path.
+- **Sharing levels**: reactions and wants need club membership (the audience the card was sent to); non-members get 404. Retracted events: 409 `retracted`, scanner toast `club.rx.retracted`, nothing changes.
+- **API**: `POST /api/clubs/events/<id>/react/` `{"i": 0-4}` returns `{on, emoji, counts, mine}`; `POST /api/clubs/events/<id>/want/`. Both 404 `not_enabled` with the flag off.
+- **Ask**: `POST /api/clubs/ask/` kind `comments` adds `reactions` (per matching opened event: emoji counts with names, `wanted_by`) when the flag is on.
+- Models: `ClubReaction`, `ClubWant` (migration club 0006). `ClubNotice` partial unique now includes `kind` (edited into unpushed 0004/0005).
+- Tests: `wine-cellar/tests/test_club_reactions.py`, `scanner-service/tests/test_club_reactions.py`.

@@ -54,6 +54,12 @@ MESSAGES = {
         "club.thread.btn_view": "Thread ({n})",
         "club.thread.more": "+{n} more. Tap Thread to read them all.",
         "club.td.btn": "To-drink list",
+        "club.rx.want_btn": "Want this",
+        "club.rx.and": "and",
+        "club.rx.others": "{n} others",
+        "club.rx.ping": "{names} reacted {emojis} to your {wine}",
+        "club.rx.want_it": "{names} saved it to their To-drink list",
+        "club.rx.want_wine": "{names} saved your {wine} to their To-drink list",
         "club.to.running": (
             "{host} is running a taste-off: {title}. Score 1–5."
         ),
@@ -115,6 +121,12 @@ MESSAGES = {
         "club.thread.btn_view": "Thread ({n})",
         "club.thread.more": "+{n} meer. Tik Thread om almal te lees.",
         "club.td.btn": "To-drink-lys",
+        "club.rx.want_btn": "Want this",
+        "club.rx.and": "en",
+        "club.rx.others": "{n} ander",
+        "club.rx.ping": "{names} het {emojis} gestuur op jou {wine}",
+        "club.rx.want_it": "{names} het dit op hul To-drink-lys gesit",
+        "club.rx.want_wine": "{names} het jou {wine} op hul To-drink-lys gesit",
         "club.to.running": (
             "{host} hou 'n proe: {title}. Tel 1–5."
         ),

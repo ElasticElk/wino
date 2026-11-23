@@ -206,3 +206,21 @@ Buttons stay English in both languages. Server pings use `wine_cellar/apps/club/
 | `club.thread.gone` | That conversation isn't there any more. | Daai gesprek is nie meer daar nie. |
 
 Swipe-reply too long reuses `club.comment.too_long`; saved reuses `club.comment.saved`. A ping's body lines are `💬 {name}: {text}` (name and text escaped, no catalog key).
+
+## Phase 5 — reactions (`feature_club_reactions`)
+
+Buttons stay English. Server keys live in `wine_cellar/apps/club/copy.py`, bot keys in `scanner-service/integrations/copy.py`.
+
+| key | EN | AF |
+| --- | --- | --- |
+| `club.rx.want_btn` (server) | Want this | Want this |
+| `club.rx.and` / `club.rx.others` (server) | and / {n} others | en / {n} ander |
+| `club.rx.ping` (server) | {names} reacted {emojis} to your {wine} | {names} het {emojis} gestuur op jou {wine} |
+| `club.rx.want_it` (server) | {names} saved it to their To-drink list | {names} het dit op hul To-drink-lys gesit |
+| `club.rx.want_wine` (server) | {names} saved your {wine} to their To-drink list | {names} het jou {wine} op hul To-drink-lys gesit |
+| `club.rx.off` (bot) | Reactions aren't on yet. | Reaksies is nog nie aan nie. |
+| `club.rx.on` (bot toast) | Reacted {emoji} | Gereageer {emoji} |
+| `club.rx.undone` (bot toast) | Removed {emoji} | Reaksie {emoji} verwyder |
+| `club.rx.retracted` (bot toast) | That bottle was put back, so reactions are closed. | Daardie bottel is teruggesit, so reaksies is toe. |
+
+Want this reuses `club.td.added` and `club.td.off` as toasts.

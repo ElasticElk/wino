@@ -217,6 +217,16 @@ urlpatterns = [
         name="api-club-thread-mute",
     ),
     path(
+        "clubs/events/<int:event_id>/react/",
+        social_views.ClubEventReactView.as_view(),
+        name="api-club-event-react",
+    ),
+    path(
+        "clubs/events/<int:event_id>/want/",
+        social_views.ClubEventWantView.as_view(),
+        name="api-club-event-want",
+    ),
+    path(
         "clubs/<int:pk>/events/<int:event_id>/comments/",
         social_views.ClubCommentCollectionView.as_view(),
         name="api-club-event-comments",
