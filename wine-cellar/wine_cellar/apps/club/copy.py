@@ -51,6 +51,8 @@ MESSAGES = {
         "club.thread.btn_mute": "Mute thread",
         "club.thread.btn_unmute": "Unmute thread",
         "club.thread.about": "On: {line}",
+        "club.thread.btn_view": "Thread ({n})",
+        "club.thread.more": "+{n} more. Tap Thread to read them all.",
         "club.td.btn": "To-drink list",
         "club.to.running": (
             "{host} is running a taste-off: {title}. Score 1–5."
@@ -110,6 +112,8 @@ MESSAGES = {
         "club.thread.btn_mute": "Mute thread",
         "club.thread.btn_unmute": "Unmute thread",
         "club.thread.about": "Oor: {line}",
+        "club.thread.btn_view": "Thread ({n})",
+        "club.thread.more": "+{n} meer. Tik Thread om almal te lees.",
         "club.td.btn": "To-drink-lys",
         "club.to.running": (
             "{host} hou 'n proe: {title}. Tel 1–5."

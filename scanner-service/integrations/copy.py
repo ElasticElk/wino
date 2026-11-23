@@ -230,9 +230,17 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.thread.btn_unmute": "Unmute thread",
         "club.thread.btn_view": "Thread ({n})",
         "club.thread.prompt": (
-            "Type a short note (280 characters max). Your next message in the "
-            "next 15 minutes is the comment. You can also swipe-reply to any "
-            "club message."
+            "Type a short note (280 characters max) and send it. If you wait "
+            "more than 2 minutes, I'll check before posting. You can also "
+            "swipe-reply to any club message."
+        ),
+        "club.thread.confirm": "Post this to the thread on {wine}?",
+        "club.thread.confirm_wine": "that bottle",
+        "club.thread.btn_post": "Post",
+        "club.thread.btn_not_mine": "No, it's for me",
+        "club.thread.post_failed": "Couldn't post that, try again.",
+        "club.thread.retracted": (
+            "That bottle was put back, so there's no thread to reply to."
         ),
         "club.thread.muted": "Thread muted. No more pings from it.",
         "club.thread.unmuted": "Thread unmuted. You'll get pings from it again.",
@@ -772,9 +780,17 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.thread.btn_unmute": "Unmute thread",
         "club.thread.btn_view": "Thread ({n})",
         "club.thread.prompt": (
-            "Tik 'n kort nota (hoogstens 280 karakters). Jou volgende boodskap "
-            "binne die volgende 15 minute is die opmerking. Jy kan ook op enige "
-            "klubboodskap swiep-antwoord."
+            "Tik 'n kort nota (hoogstens 280 karakters) en stuur dit. As jy "
+            "langer as 2 minute wag, vra ek eers voor ek plaas. Jy kan ook op "
+            "enige klubboodskap swiep-antwoord."
+        ),
+        "club.thread.confirm": "Plaas dit in die gesprek oor {wine}?",
+        "club.thread.confirm_wine": "daardie bottel",
+        "club.thread.btn_post": "Post",
+        "club.thread.btn_not_mine": "No, it's for me",
+        "club.thread.post_failed": "Kon dit nie plaas nie, probeer weer.",
+        "club.thread.retracted": (
+            "Daardie bottel is teruggesit, so daar is geen gesprek om op te antwoord nie."
         ),
         "club.thread.muted": "Gesprek gedemp. Geen pings meer daaruit nie.",
         "club.thread.unmuted": "Gesprek nie meer gedemp nie. Jy kry weer pings daaruit.",

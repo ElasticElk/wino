@@ -323,7 +323,7 @@ def test_ask_comments_includes_full_thread(client, club):
         data={"kind": "comments", "club_id": club_.id, "wine_text": "merlot"},
         content_type="application/json",
     ).json()
-    assert body["threads"] == []
+    assert "threads" not in body
 
 
 def test_thread_copy_en_af():
@@ -331,3 +331,100 @@ def test_thread_copy_en_af():
 
     assert t("af", "club.thread.about", line="x").startswith("Oor:")
     assert t("en", "club.thread.btn_mute") == t("af", "club.thread.btn_mute")
+
+
+def test_comment_merged_after_due_list_is_not_lost(club):
+    from wine_cellar.apps.club import threads as th
+
+    club_, event, users = club
+    first = _comment(event, users["lee"], "first")
+    enqueue_comment_notices(first.id)
+    second = _comment(event, users["pat"], "second-late")
+    real = th._send_notice
+
+    def merge_then_send(notice, token):
+        return real(notice, token)
+
+    # Merge between the due read and the claim: patch the claim's first read.
+    orig = th.ClubNotice.objects.select_for_update
+
+    def racing(*a, **k):
+        notice = ClubNotice.objects.filter(recipient=users["sam"]).first()
+        if notice is not None and second.id not in notice.payload["comment_ids"]:
+            ClubNotice.objects.filter(id=notice.id).update(
+                payload={"comment_ids": [first.id, second.id]},
+            )
+        return orig(*a, **k)
+
+    with patch(POST, return_value=_reply(mid=950)) as post, patch.object(
+        th.ClubNotice.objects, "select_for_update", side_effect=racing,
+    ):
+        flush_due_notices(now=_later())
+    text = _calls_to(post, "200")[0]["text"]
+    assert "first" in text and "second-late" in text
+
+
+def test_long_ping_is_capped_with_thread_button(club):
+    club_, event, users = club
+    for i in range(30):
+        _comment(event, users["lee"], f"n{i:02d} " + "x" * 270)
+    ids = list(ClubComment.objects.values_list("id", flat=True))
+    for cid in ids:
+        enqueue_comment_notices(cid)
+    with patch(POST, return_value=_reply(mid=960)) as post:
+        flush_due_notices(now=_later())
+    payload = _calls_to(post, "200")[0]
+    assert len(payload["text"]) < 4096
+    assert "n29" in payload["text"] and "n00" not in payload["text"]
+    assert "more. Tap Thread to read them all" in payload["text"]
+    first_row = payload["reply_markup"]["inline_keyboard"][0]
+    assert first_row[0]["text"].startswith("Thread (")
+    assert first_row[0]["callback_data"] == f"cl:th:{club_.id}:{event.id}:0"
+
+
+def test_other_400_does_not_resend_and_403_recorded(club):
+    club_, event, users = club
+    enqueue_comment_notices(_comment(event, users["lee"], "hi").id)
+    bad = _reply(400, description="Bad Request: can't parse entities")
+    with patch(POST, return_value=bad) as post:
+        flush_due_notices(now=_later())
+    assert len(_calls_to(post, "200")) == 1
+    assert "400" in ClubNotice.objects.get(recipient=users["sam"]).error
+
+
+def test_retracted_event_sends_no_ping(club):
+    club_, event, users = club
+    enqueue_comment_notices(_comment(event, users["lee"], "hi").id)
+    ClubEvent.objects.filter(id=event.id).update(retracted_at=timezone.now())
+    with patch(POST, return_value=_reply()) as post:
+        flush_due_notices(now=_later())
+    assert post.call_count == 0
+    assert ClubNotice.objects.get(recipient=users["sam"]).error == "skipped:retracted"
+
+
+def test_concurrent_enqueue_keeps_one_pending_notice(club):
+    from django.db import IntegrityError, transaction
+
+    from wine_cellar.apps.club import threads as th
+
+    club_, event, users = club
+    enqueue_comment_notices(_comment(event, users["lee"], "a").id)
+    assert ClubNotice.objects.filter(recipient=users["sam"]).count() == 1
+    with pytest.raises(IntegrityError), transaction.atomic():
+        ClubNotice.objects.create(
+            recipient=users["sam"], club=club_, event=event,
+            dedupe_key="other", due_at=timezone.now(),
+        )
+    # Lost race: first merge look-up sees nothing, create hits the constraint.
+    second = _comment(event, users["pat"], "b")
+    real = th._merge_into_pending
+    calls = {"n": 0}
+
+    def fake(event_, comment_, uid):
+        calls["n"] += 1
+        return False if calls["n"] == 1 else real(event_, comment_, uid)
+
+    with patch.object(th, "_merge_into_pending", side_effect=fake):
+        th._queue_for(event, second, users["sam"].id, timezone.now())
+    notice = ClubNotice.objects.get(recipient=users["sam"])
+    assert second.id in notice.payload["comment_ids"]

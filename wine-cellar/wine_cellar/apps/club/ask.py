@@ -1251,13 +1251,12 @@ def _answer_comments(club, data) -> dict:
             | Q(text__icontains=wine_text)
         )
     rows = list(qs[:12])
-    threads = []
+    out_threads = None
     if flag_on("feature_club_threads"):
-        threads = _comment_threads(club, qs)
-    return {
+        out_threads = _comment_threads(club, qs)
+    answer = {
         "status": "ok",
         "kind": "comments",
-        "threads": threads,
         "club": _club_meta(club),
         "query": wine_text,
         "comments": [
@@ -1270,3 +1269,6 @@ def _answer_comments(club, data) -> dict:
             for c in rows
         ],
     }
+    if out_threads is not None:
+        answer["threads"] = out_threads
+    return answer

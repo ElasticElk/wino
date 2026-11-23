@@ -36,6 +36,9 @@ COMMENT_MAX = 280
 # feature_club_threads: the Say something / Reply prompt lasts 15 minutes and
 # lives in a CardStore (Redis when set), so it survives a scanner restart.
 THREAD_PROMPT_TTL_SECONDS = 15 * 60
+# Inside this window (or as a Telegram reply to the prompt/card/ping) the next
+# message is taken as the comment; after it the sender is asked first.
+THREAD_DIRECT_SECONDS = 2 * 60
 THREAD_PAGE_CHARS = 3600
 VOTE_GLYPH = {"down": "\U0001F44E", "up": "\U0001F44D", "meh": ""}
 _MONTHS = (
@@ -134,6 +137,30 @@ def _event_action_row(event: dict, loc: str, flags=None) -> list:
             t(loc, "club.td.btn"), callback_data=club_cb("td", event_id),
         ))
     return row
+
+
+class _HeldTextUpdate:
+    """A callback tap replaying the sender's held text as a normal message.
+    Telegram objects are frozen, so wrap instead of mutating."""
+
+    def __init__(self, update, message, text):
+        self._update = update
+        self.message = _HeldTextMessage(message, text)
+        self.effective_message = self.message
+        self.callback_query = None
+
+    def __getattr__(self, name):
+        return getattr(self._update, name)
+
+
+class _HeldTextMessage:
+    def __init__(self, inner, text):
+        self._inner = inner
+        self.text = text
+        self.reply_to_message = None
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
 
 
 def _cancel_markup() -> InlineKeyboardMarkup:
@@ -362,6 +389,13 @@ class ClubFlow:
         except Exception as e:
             logger.info("[club] prompt store write failed: %s", e)
 
+    def _prompt_hold(self, chat_id, prompt: dict, text: str) -> None:
+        """Keep the prompt (and its original timestamp) and remember a held text."""
+        try:
+            self._prompt_store()[str(chat_id)] = dict(prompt, held=text)
+        except Exception as e:
+            logger.info("[club] prompt store write failed: %s", e)
+
     def _prompt_drop(self, chat_id) -> None:
         try:
             self._prompt_store().pop(str(chat_id))
@@ -526,7 +560,7 @@ class ClubFlow:
         if clubs_enabled(self.handler) and self.threads_on():
             prompt = self._prompt_get(chat_id)
             if prompt:
-                return await self._submit_prompt_comment(update, chat_id, prompt)
+                return await self._take_or_ask(update, context, chat_id, prompt)
         state = self.state_for(chat_id)
         if not state:
             return False
@@ -1483,6 +1517,8 @@ class ClubFlow:
                 await self._join_card(update, query=query)
         elif action in ("cm", "rp"):
             await self._start_comment(update, int(rest[0]) if rest else 0, query)
+        elif action in ("pt", "pn") and self.threads_on():
+            await self._confirm_held(update, context, query, post=action == "pt")
         elif action == "mt" and self.threads_on():
             await self._toggle_thread_mute(update, int(rest[0]) if rest else 0, query)
         elif action == "th" and self.threads_on() and len(rest) >= 2:
@@ -1963,14 +1999,16 @@ class ClubFlow:
             self.clear(chat_id)
             prompt = t(loc, "club.thread.prompt")
             event = self._events_seen.pop(event_id, None)
+            wine = ""
             if event and (event.get("kind") or "opened") == "opened":
                 prompt = f"\U0001F4AC {_wine_line(event, loc)}\n\n{prompt}"
+                wine = f"{event.get('vintage') or ''} {event.get('wine_name') or ''}".strip()
             sent = await query.message.reply_text(
                 prompt, parse_mode="HTML", reply_markup=_cancel_markup(),
             )
             self._prompt_put(
                 chat_id, event_id=event_id, club_id=club_id,
-                prompt_id=getattr(sent, "message_id", None),
+                prompt_id=getattr(sent, "message_id", None), wine=wine,
             )
             return
         # Say what the note goes under: a home-card shortcut is not obviously
@@ -2031,12 +2069,16 @@ class ClubFlow:
         )
         return True
 
-    async def _post_thread_comment(self, update, event_id, club_id, text) -> bool:
-        """Post a comment from the typed prompt or a swipe-reply. Never raises."""
+    async def _post_thread_comment(
+        self, update, event_id, club_id, text, message=None,
+    ) -> bool:
+        """Post a comment from the typed prompt or a swipe-reply. Never raises.
+        ``message`` is where replies go (a callback has no update.message)."""
         loc = self.locale(update)
+        message = message or update.message
         note = (text or "").strip()
         if not note or len(note) > COMMENT_MAX:
-            await update.message.reply_text(
+            await message.reply_text(
                 t(loc, "club.comment.too_long"),
                 reply_markup=self._comment_again_markup(event_id),
             )
@@ -2047,15 +2089,15 @@ class ClubFlow:
             logger.info("[club] comment post failed: %s", e)
             result = {"error": "err"}
         if result.get("error") == "retracted" or result.get("status_code") == 409:
-            await update.message.reply_text(t(loc, "club.err"), reply_markup=_menu_markup())
+            await message.reply_text(t(loc, "club.err"), reply_markup=_menu_markup())
             return True
         if result.get("error"):
-            await update.message.reply_text(
+            await message.reply_text(
                 t(loc, "club.err"), reply_markup=self._comment_again_markup(event_id),
             )
             return True
         from integrations.telegram_nav import follow_up_rows
-        await update.message.reply_text(
+        await message.reply_text(
             t(loc, "club.comment.saved"),
             reply_markup=InlineKeyboardMarkup(follow_up_rows("club", {
                 "flags": self._flags(), "club_id": club_id,
@@ -2063,13 +2105,76 @@ class ClubFlow:
         )
         return True
 
-    async def _submit_prompt_comment(self, update, chat_id, prompt) -> bool:
+    async def _take_or_ask(self, update, context, chat_id, prompt) -> bool:
+        """The Reply / Say something prompt lives 15 minutes, but only a message
+        that is plainly the comment is posted without asking."""
+        message = update.message
+        if prompt.get("held") is not None:
+            # They ignored the question and typed something else: it is theirs.
+            self._prompt_drop(chat_id)
+            await self._close_comment_prompt(update, chat_id, prompt.get("prompt_id"))
+            return False
+        fresh = time.time() - float(prompt.get("at") or 0) <= THREAD_DIRECT_SECONDS
+        if fresh or await self._is_reply_to_thread(update, chat_id, prompt):
+            self._prompt_drop(chat_id)
+            await self._close_comment_prompt(update, chat_id, prompt.get("prompt_id"))
+            return await self._post_thread_comment(
+                update, prompt.get("event_id"), prompt.get("club_id"), message.text,
+            )
+        loc = self.locale(update)
+        wine = prompt.get("wine") or t(loc, "club.thread.confirm_wine")
+        self._prompt_hold(chat_id, prompt, message.text or "")
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                t("en", "club.thread.btn_post"), callback_data=club_cb("pt"),
+            ),
+            InlineKeyboardButton(
+                t("en", "club.thread.btn_not_mine"), callback_data=club_cb("pn"),
+            ),
+        ]])
+        await message.reply_text(
+            t(loc, "club.thread.confirm", wine=esc(wine)),
+            parse_mode="HTML", reply_markup=markup,
+        )
+        return True
+
+    async def _is_reply_to_thread(self, update, chat_id, prompt) -> bool:
+        reply = getattr(update.message, "reply_to_message", None)
+        if reply is None:
+            return False
+        if prompt.get("prompt_id") and reply.message_id == prompt.get("prompt_id"):
+            return True
+        try:
+            found = self._api(update).club_thread_resolve(chat_id, reply.message_id)
+        except Exception:
+            return False
+        return bool(
+            not found.get("error") and found.get("event_id") == prompt.get("event_id")
+        )
+
+    async def _confirm_held(self, update, context, query, post: bool) -> None:
+        chat_id = str(update.effective_chat.id)
+        loc = self.locale(update)
+        prompt = self._prompt_get(chat_id)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        held = (prompt or {}).get("held")
+        if not prompt or held is None:
+            await query.message.reply_text(t(loc, "club.thread.gone"))
+            return
         self._prompt_drop(chat_id)
         await self._close_comment_prompt(update, chat_id, prompt.get("prompt_id"))
-        return await self._post_thread_comment(
-            update, prompt.get("event_id"), prompt.get("club_id"),
-            update.message.text,
-        )
+        if post:
+            await self._post_thread_comment(
+                update, prompt.get("event_id"), prompt.get("club_id"), held,
+                message=query.message,
+            )
+            return
+        # Not a comment: answer it like any other message.
+        shim = _HeldTextUpdate(update, query.message, held)
+        await self.handler._unknown_text(shim, context)
 
     async def on_reply(self, update, context) -> bool:
         """A swipe-reply to a club message is a comment on that event.
@@ -2084,17 +2189,24 @@ class ClubFlow:
         if sender is not None and not getattr(sender, "is_bot", True):
             return False
         chat_id = str(update.effective_chat.id)
+        loc = self.locale(update)
         try:
             found = self._api(update).club_thread_resolve(chat_id, reply.message_id)
         except Exception as e:
             logger.info("[club] thread resolve failed: %s", e)
-            return False
+            found = {"error": "err"}
+        if found.get("error") and found.get("status_code") != 404:
+            # Network/API trouble is not "not a club message": say so and stop.
+            await message.reply_text(
+                t(loc, "club.thread.post_failed"), reply_markup=_menu_markup(),
+            )
+            return True
         if found.get("error") or not found.get("event_id"):
             return False
         self._prompt_drop(chat_id)
         if found.get("retracted"):
             await message.reply_text(
-                t(self.locale(update), "club.err"), reply_markup=_menu_markup(),
+                t(loc, "club.thread.retracted"), reply_markup=_menu_markup(),
             )
             return True
         return await self._post_thread_comment(

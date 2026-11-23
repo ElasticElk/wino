@@ -303,6 +303,13 @@ class ClubNotice(models.Model):
                 name="clubnotice_rcpt_idx",
             ),
         ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["recipient", "event"],
+                condition=models.Q(sent_at__isnull=True),
+                name="clubnotice_one_pending",
+            ),
+        ]
 
 
 class ClubDismantleVote(models.Model):

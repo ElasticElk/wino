@@ -38,6 +38,8 @@ BATCH_WINDOW = timedelta(minutes=2)
 RATE_LIMIT_MAX = 6
 RATE_WINDOW = timedelta(seconds=60)
 FLUSH_LIMIT = 200
+# Telegram caps a message at 4096 characters; leave room for the quote line.
+PING_BODY_CHARS = 3500
 ERROR_MAX = 200
 
 
@@ -93,6 +95,49 @@ def resolve_message(user, chat_id, message_id):
     return delivery.event
 
 
+def _merge_into_pending(event, comment, uid) -> bool:
+    """Add the comment to the recipient's unsent notice. False when none."""
+    notice = (
+        ClubNotice.objects.select_for_update()
+        .filter(
+            recipient_id=uid, event=event,
+            kind=ClubNotice.KIND_COMMENT, sent_at__isnull=True,
+        )
+        .order_by("-id")
+        .first()
+    )
+    if notice is None:
+        return False
+    ids = list((notice.payload or {}).get("comment_ids") or [])
+    if comment.id not in ids:
+        ids.append(comment.id)
+        notice.payload = {"comment_ids": ids}
+        notice.save(update_fields=["payload"])
+    return True
+
+
+def _queue_for(event, comment, uid, now) -> None:
+    with transaction.atomic():
+        if _merge_into_pending(event, comment, uid):
+            return
+        try:
+            with transaction.atomic():
+                ClubNotice.objects.get_or_create(
+                    dedupe_key=f"cm:{event.id}:{uid}:{comment.id}",
+                    defaults={
+                        "recipient_id": uid,
+                        "club": event.club,
+                        "event": event,
+                        "kind": ClubNotice.KIND_COMMENT,
+                        "payload": {"comment_ids": [comment.id]},
+                        "due_at": now + BATCH_WINDOW,
+                    },
+                )
+        except IntegrityError:
+            # A concurrent enqueue made the pending row first: merge into it.
+            _merge_into_pending(event, comment, uid)
+
+
 def enqueue_comment_notices(comment_id) -> int:
     """Queue (or merge into) one ping per recipient. Returns recipients."""
     if not threads_enabled():
@@ -119,34 +164,7 @@ def enqueue_comment_notices(comment_id) -> int:
         uid = membership.user_id
         if uid in muted:
             continue
-        with transaction.atomic():
-            notice = (
-                ClubNotice.objects.select_for_update()
-                .filter(
-                    recipient_id=uid, event=event,
-                    kind=ClubNotice.KIND_COMMENT, sent_at__isnull=True,
-                )
-                .order_by("-id")
-                .first()
-            )
-            if notice is not None:
-                ids = list((notice.payload or {}).get("comment_ids") or [])
-                if comment.id not in ids:
-                    ids.append(comment.id)
-                    notice.payload = {"comment_ids": ids}
-                    notice.save(update_fields=["payload"])
-            else:
-                ClubNotice.objects.get_or_create(
-                    dedupe_key=f"cm:{event.id}:{uid}:{comment.id}",
-                    defaults={
-                        "recipient_id": uid,
-                        "club": event.club,
-                        "event": event,
-                        "kind": ClubNotice.KIND_COMMENT,
-                        "payload": {"comment_ids": [comment.id]},
-                        "due_at": now + BATCH_WINDOW,
-                    },
-                )
+        _queue_for(event, comment, uid, now)
         queued += 1
     if queued:
         _schedule_flush()
@@ -178,9 +196,15 @@ def _event_line(event, loc) -> str:
     )
 
 
-def _markup(event, loc, muted: bool) -> dict:
+def _markup(event, loc, muted: bool, thread: bool = False) -> dict:
+    rows = []
+    if thread:
+        rows.append([{
+            "text": t(loc, "club.thread.btn_view", n=_comment_count(event)),
+            "callback_data": f"cl:th:{event.club_id}:{event.id}:0",
+        }])
     return {
-        "inline_keyboard": [[
+        "inline_keyboard": rows + [[
             {
                 "text": t(loc, "club.thread.btn_reply"),
                 "callback_data": f"cl:rp:{event.id}",
@@ -267,6 +291,30 @@ def _record(event, chat_id, message_id, error):
         logger.warning("could not record ping delivery", exc_info=True)
 
 
+def _comment_count(event) -> int:
+    return ClubComment.objects.filter(event=event).count()
+
+
+def _fit_comments(comments, loc):
+    """Newest comments that fit PING_BODY_CHARS (after escaping), oldest
+    first, plus a note for the rest. Returns (text, hidden_count)."""
+    lines = [_comment_lines([c]) for c in comments]
+    kept, size = [], 0
+    for line in reversed(lines):
+        if kept and size + len(line) + 1 > PING_BODY_CHARS:
+            break
+        if not kept and len(line) > PING_BODY_CHARS:
+            line = line[:PING_BODY_CHARS]
+        kept.append(line)
+        size += len(line) + 1
+    kept.reverse()
+    hidden = len(lines) - len(kept)
+    text = "\n".join(kept)
+    if hidden:
+        text += "\n" + t(loc, "club.thread.more", n=hidden)
+    return text, hidden
+
+
 def _comment_lines(comments) -> str:
     from wine_cellar.apps.club.services import display_name
 
@@ -275,6 +323,14 @@ def _comment_lines(comments) -> str:
         who = html.escape(display_name(comment.user) if comment.user_id else "")
         lines.append(f"\U0001F4AC {who}: {html.escape(comment.text or '')}")
     return "\n".join(lines)
+
+
+def _reply_target_gone(error: str) -> bool:
+    low = error.lower()
+    return error.startswith("400") and (
+        "message to be replied not found" in low
+        or "reply message not found" in low
+    )
 
 
 def _send_notice(notice, token) -> str:
@@ -288,6 +344,8 @@ def _send_notice(notice, token) -> str:
         return "skipped:club_muted"
     if is_thread_muted(user.id, event.id):
         return "skipped:thread_muted"
+    if event.retracted:
+        return "skipped:retracted"
     ids = (notice.payload or {}).get("comment_ids") or []
     comments = list(
         ClubComment.objects.filter(id__in=ids)
@@ -305,8 +363,8 @@ def _send_notice(notice, token) -> str:
     if not chats:
         return "skipped:no_chat"
     loc = locale_for_user(user)
-    body = _comment_lines(comments)
-    markup = _markup(event, loc, muted=False)
+    body, hidden = _fit_comments(comments, loc)
+    markup = _markup(event, loc, muted=False, thread=bool(hidden))
     errors = []
     for chat_id in chats:
         reply_to = _reply_target(event, chat_id)
@@ -315,7 +373,7 @@ def _send_notice(notice, token) -> str:
             quote = t(loc, "club.thread.about", line=_event_line(event, loc))
             text = f"{quote}\n\n{body}"
         mid, error = _post(token, chat_id, text, markup, reply_to=reply_to)
-        if mid is None and reply_to and error.startswith("400"):
+        if mid is None and reply_to and _reply_target_gone(error):
             # Reply target gone: resend fresh, quoting the card line.
             quote = t(loc, "club.thread.about", line=_event_line(event, loc))
             text = f"{quote}\n\n{body}"
@@ -354,12 +412,20 @@ def flush_due_notices(now=None) -> int:
                     due_at=now + RATE_WINDOW,
                 )
                 continue
-            claimed = ClubNotice.objects.filter(
-                id=notice.id, sent_at__isnull=True,
-            ).update(sent_at=now)
-            if not claimed:
-                continue
-            error = _send_notice(notice, token)
+            with transaction.atomic():
+                locked = (
+                    ClubNotice.objects.select_for_update(of=("self",))
+                    .select_related("recipient", "event", "event__club", "event__actor")
+                    .filter(id=notice.id, sent_at__isnull=True)
+                    .first()
+                )
+                if locked is None:
+                    continue
+                locked.sent_at = now
+                locked.save(update_fields=["sent_at"])
+            # The payload is read under the claim, so a comment merged after
+            # the due list was built is still in this ping.
+            error = _send_notice(locked, token)
             if error:
                 ClubNotice.objects.filter(id=notice.id).update(error=error)
             done += 1

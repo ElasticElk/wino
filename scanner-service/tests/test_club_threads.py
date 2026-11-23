@@ -125,11 +125,121 @@ async def test_swipe_reply_flag_off_is_ignored():
 
 
 @pytest.mark.asyncio
-async def test_resolve_failure_never_raises():
+async def test_resolve_failure_tells_user_and_stops():
     api = _api()
     api.club_thread_resolve.side_effect = RuntimeError("down")
     handler = _handler(api)
-    assert await handler._club_flow().on_reply(_update("hi", reply_to=1), MagicMock()) is False
+    update = _update("hi", reply_to=1)
+    assert await handler._club_flow().on_reply(update, MagicMock()) is True
+    assert update.message.reply_text.call_args.args[0] == t("en", "club.thread.post_failed")
+    api.add_club_comment.assert_not_called()
+    api.club_thread_resolve.side_effect = None
+    api.club_thread_resolve.return_value = {"error": "HTTP 500", "status_code": 500}
+    update = _update("hi", reply_to=1)
+    assert await handler._club_flow().on_reply(update, MagicMock()) is True
+
+
+@pytest.mark.asyncio
+async def test_swipe_reply_to_retracted_event_has_own_copy():
+    api = _api()
+    api.club_thread_resolve.return_value = {
+        "event_id": 88, "club_id": 3, "retracted": True,
+    }
+    handler = _handler(api)
+    update = _update("hi", reply_to=555)
+    assert await handler._club_flow().on_reply(update, MagicMock()) is True
+    assert update.message.reply_text.call_args.args[0] == t("en", "club.thread.retracted")
+    assert "put back" in t("en", "club.thread.retracted")
+    assert t("af", "club.thread.retracted") != t("en", "club.thread.retracted")
+    api.add_club_comment.assert_not_called()
+
+
+def _store_prompt(handler, age_s, **extra):
+    store = CardStore(ttl=THREAD_PROMPT_TTL_SECONDS, prefix="whiney:clubcm:")
+    handler._club_comment_store = store
+    flow = handler._club_flow()
+    flow._prompt_put(
+        "4242", event_id=88, club_id=3, prompt_id=900, wine="2019 Merlot", **extra,
+    )
+    entry = store.get("4242")
+    entry["at"] = time.time() - age_s
+    store["4242"] = entry
+    return flow
+
+
+@pytest.mark.asyncio
+async def test_late_text_is_asked_before_posting():
+    api = _api()
+    handler = _handler(api)
+    flow = _store_prompt(handler, 5 * 60)
+    update = _update("what goes with lamb?")
+    assert await flow.on_text(update, MagicMock()) is True
+    api.add_club_comment.assert_not_called()
+    call = update.message.reply_text.call_args
+    assert call.args[0] == "Post this to the thread on 2019 Merlot?"
+    assert _labels(call.kwargs["reply_markup"]) == ["Post", "No, it's for me"]
+    assert t("af", "club.thread.confirm", wine="x") != t("en", "club.thread.confirm", wine="x")
+    assert flow._prompt_get("4242")["held"] == "what goes with lamb?"
+
+
+@pytest.mark.asyncio
+async def test_late_reply_to_prompt_is_taken_directly():
+    api = _api()
+    handler = _handler(api)
+    flow = _store_prompt(handler, 5 * 60)
+    update = _update("lovely", reply_to=900)
+    assert await flow.on_text(update, MagicMock()) is True
+    api.add_club_comment.assert_called_once_with(3, 88, "lovely")
+
+
+@pytest.mark.asyncio
+async def test_post_button_saves_the_held_comment():
+    api = _api()
+    handler = _handler(api)
+    flow = _store_prompt(handler, 5 * 60)
+    await flow.on_text(_update("worth a try"), MagicMock())
+    update = _update()
+    update.callback_query = _query(club_cb("pt"))
+    await flow.on_callback(update, MagicMock())
+    api.add_club_comment.assert_called_once_with(3, 88, "worth a try")
+    assert flow._prompt_get("4242") is None
+    assert update.callback_query.message.reply_text.call_args.args[0] == t(
+        "en", "club.comment.saved",
+    )
+
+
+@pytest.mark.asyncio
+async def test_not_for_me_clears_prompt_and_routes_original_text():
+    api = _api()
+    handler = _handler(api)
+    flow = _store_prompt(handler, 5 * 60)
+    await flow.on_text(_update("what goes with lamb?"), MagicMock())
+    routed = []
+
+    async def fake_unknown(update, context):
+        routed.append((update.message.text, update.message.reply_to_message))
+
+    handler._unknown_text = fake_unknown
+    update = _update()
+    update.callback_query = _query(club_cb("pn"))
+    await flow.on_callback(update, MagicMock())
+    assert routed == [("what goes with lamb?", None)]
+    api.add_club_comment.assert_not_called()
+    assert flow._prompt_get("4242") is None
+
+
+@pytest.mark.asyncio
+async def test_post_button_after_expiry_says_gone():
+    api = _api()
+    handler = _handler(api)
+    flow = _store_prompt(handler, 5 * 60)
+    update = _update()
+    update.callback_query = _query(club_cb("pt"))
+    await flow.on_callback(update, MagicMock())  # nothing held
+    api.add_club_comment.assert_not_called()
+    assert update.callback_query.message.reply_text.call_args.args[0] == t(
+        "en", "club.thread.gone",
+    )
 
 
 @pytest.mark.asyncio
@@ -143,7 +253,7 @@ async def test_say_something_prompt_is_stored_and_survives_restart():
     update.callback_query = query
     await handler._club_flow().on_callback(update, MagicMock())
     assert t("en", "club.thread.prompt") in query.message.reply_text.call_args.args[0]
-    assert "15 minutes" in t("en", "club.thread.prompt")
+    assert "2 minutes" in t("en", "club.thread.prompt")
     assert store.get("4242")["event_id"] == 88
     # A brand-new handler (restart) sharing the store still takes the comment.
     handler2 = _handler(api)

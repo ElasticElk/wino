@@ -192,7 +192,13 @@ Buttons stay English in both languages. Server pings use `wine_cellar/apps/club/
 | `club.thread.btn_unmute` | Unmute thread | Unmute thread |
 | `club.thread.btn_view` | Thread ({n}) | Thread ({n}) |
 | `club.thread.about` (server) | On: {line} | Oor: {line} |
-| `club.thread.prompt` | Type a short note (280 characters max). Your next message in the next 15 minutes is the comment. You can also swipe-reply to any club message. | Tik 'n kort nota (hoogstens 280 karakters). Jou volgende boodskap binne die volgende 15 minute is die opmerking. Jy kan ook op enige klubboodskap swiep-antwoord. |
+| `club.thread.prompt` | Type a short note (280 characters max) and send it. If you wait more than 2 minutes, I'll check before posting. You can also swipe-reply to any club message. | Tik 'n kort nota (hoogstens 280 karakters) en stuur dit. As jy langer as 2 minute wag, vra ek eers voor ek plaas. Jy kan ook op enige klubboodskap swiep-antwoord. |
+| `club.thread.confirm` | Post this to the thread on {wine}? | Plaas dit in die gesprek oor {wine}? |
+| `club.thread.confirm_wine` | that bottle | daardie bottel |
+| `club.thread.post_failed` | Couldn't post that, try again. | Kon dit nie plaas nie, probeer weer. |
+| `club.thread.retracted` | That bottle was put back, so there's no thread to reply to. | Daardie bottel is teruggesit, so daar is geen gesprek om op te antwoord nie. |
+| `club.thread.btn_post` / `btn_not_mine` | Post / No, it's for me (English in both) | same |
+| `club.thread.more` (server) | +{n} more. Tap Thread to read them all. | +{n} meer. Tik Thread om almal te lees. |
 | `club.thread.muted` | Thread muted. No more pings from it. | Gesprek gedemp. Geen pings meer daaruit nie. |
 | `club.thread.unmuted` | Thread unmuted. You'll get pings from it again. | Gesprek nie meer gedemp nie. Jy kry weer pings daaruit. |
 | `club.thread.empty` | Nobody has replied yet. | Niemand het nog geantwoord nie. |
