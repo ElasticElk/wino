@@ -88,6 +88,17 @@ def maybe_clear_share_notice(household) -> None:
         household.save(update_fields=["club_share_notice_sent_at"])
 
 
+def visible_events(club):
+    """The club's events as members may see them: asks only while the relay
+    flag is on."""
+    from wine_cellar.apps.club.relay import relay_enabled
+
+    qs = ClubEvent.objects.filter(club=club)
+    if not relay_enabled():
+        qs = qs.exclude(kind=ClubEvent.KIND_ASK)
+    return qs
+
+
 def serialize_event(event: ClubEvent, *, public=True) -> dict:
     created = event.created.isoformat() if event.created else None
     body = {
@@ -103,6 +114,9 @@ def serialize_event(event: ClubEvent, *, public=True) -> dict:
     }
     if event.kind in (ClubEvent.KIND_TASTEOFF, ClubEvent.KIND_STAFF_NOTE):
         body["payload"] = event.payload or {}
+    elif event.kind == ClubEvent.KIND_ASK:
+        # Only the text: nothing else of the payload leaves the server.
+        body["payload"] = {"text": str((event.payload or {}).get("text") or "")}
     if not public:
         body["actor_id"] = event.actor_id
         body["item_id"] = event.item_id
@@ -136,7 +150,8 @@ def serialize_club_home(membership: ClubMembership, *, events=None) -> dict:
     club = membership.club
     if events is None:
         events = list(
-            ClubEvent.objects.filter(club=club, retracted_at__isnull=True)
+            visible_events(club)
+            .filter(retracted_at__isnull=True)
             .select_related("actor")
             .prefetch_related("actor__telegram_users")
             .order_by("-created")[:8]

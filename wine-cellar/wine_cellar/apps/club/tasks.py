@@ -138,6 +138,24 @@ def _edit_markup(token, chat_id, message_id, markup) -> str:
     return f"{response.status_code}:{description}"[:200]
 
 
+def _ask_card_markup(event, loc):
+    from wine_cellar.apps.club.relay import ask_markup
+
+    return ask_markup(event, loc)
+
+
+@shared_task(name="deliver_club_ask")
+def deliver_club_ask(event_id):
+    """Send an ask to the club once its Undo window has passed."""
+    from wine_cellar.apps.club.relay import deliver_ask
+
+    try:
+        return deliver_ask(event_id)
+    except Exception:  # pragma: no cover - last-resort guard
+        logger.exception("deliver_club_ask failed")
+        return 0
+
+
 @shared_task(name="refresh_event_reactions")
 def refresh_event_reactions(event_id):
     """One debounced pass: put the current counts on members' card copies."""
@@ -149,14 +167,18 @@ def refresh_event_reactions(event_id):
     event = (
         ClubEvent.objects.select_related("club", "actor").filter(id=event_id).first()
     )
-    if event is None or event.retracted or event.kind != ClubEvent.KIND_OPENED:
+    if event is None or event.retracted or event.kind not in (
+        ClubEvent.KIND_OPENED, ClubEvent.KIND_ASK,
+    ):
         return 0
     token = _bot_token()
     if not token:
         return 0
     edited = 0
+    is_ask = event.kind == ClubEvent.KIND_ASK
     cards = event.deliveries.filter(
-        kind=ClubEventDelivery.KIND_CARD, message_id__isnull=False,
+        kind=ClubEventDelivery.KIND_ASK if is_ask else ClubEventDelivery.KIND_CARD,
+        message_id__isnull=False,
     )
     for delivery in cards:
         tu = TelegramUser.objects.filter(
@@ -166,7 +188,7 @@ def refresh_event_reactions(event_id):
         try:
             error = _edit_markup(
                 token, delivery.chat_id, delivery.message_id,
-                _opened_markup(event, loc),
+                _ask_card_markup(event, loc) if is_ask else _opened_markup(event, loc),
             )
         except Exception:
             logger.warning("reaction edit failed", exc_info=True)
@@ -269,7 +291,10 @@ def deliver_club_event(event_id):
     )
     if event is None:
         return
-    if event.kind in (ClubEvent.KIND_TASTEOFF, ClubEvent.KIND_COMMENT):
+    if event.kind in (
+        ClubEvent.KIND_TASTEOFF, ClubEvent.KIND_COMMENT, ClubEvent.KIND_ASK,
+    ):
+        # Asks go out through deliver_club_ask (delayed, with Undo).
         return
     if event.club.frozen and event.kind != ClubEvent.KIND_STAFF_NOTE:
         return
@@ -644,7 +669,7 @@ def refresh_event_comment_card(event_id):
         .filter(id=event_id)
         .first()
     )
-    if event is None or event.retracted:
+    if event is None or event.retracted or event.kind != ClubEvent.KIND_OPENED:
         return
     comments = _comment_pairs(event)
     if len(comments) > 3:

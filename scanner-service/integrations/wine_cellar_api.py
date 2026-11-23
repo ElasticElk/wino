@@ -968,6 +968,12 @@ class WineCellarAPI:
     def club_event_react(self, event_id: int, index: int) -> dict:
         return self._club_post(f"/api/clubs/events/{event_id}/react/", {"i": index})
 
+    def club_ask(self, club_id: int, text: str) -> dict:
+        return self._club_post(f"/api/clubs/{club_id}/ask/", {"text": text})
+
+    def club_ask_undo(self, event_id: int) -> dict:
+        return self._club_post(f"/api/clubs/asks/{event_id}/undo/", {})
+
     def club_event_want(self, event_id: int) -> dict:
         return self._club_post(f"/api/clubs/events/{event_id}/want/", {})
 

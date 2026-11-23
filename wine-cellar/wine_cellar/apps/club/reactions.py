@@ -37,8 +37,11 @@ def reactions_enabled() -> bool:
     return flag_on("feature_clubs") and flag_on("feature_club_reactions")
 
 
+REACTABLE_KINDS = (ClubEvent.KIND_OPENED, ClubEvent.KIND_ASK)
+
+
 def reactable(event) -> bool:
-    return event.kind == ClubEvent.KIND_OPENED and not event.retracted
+    return event.kind in REACTABLE_KINDS and not event.retracted
 
 
 def counts_for(event) -> list[int]:
@@ -59,9 +62,13 @@ def mine_for(event, user) -> list[int]:
     return [i for i, e in enumerate(PALETTE) if e in have]
 
 
-def reaction_row(event, counts=None) -> list[dict]:
-    """The compact emoji row: '🍷 3' when the count is above zero."""
-    counts = counts if counts is not None else counts_for(event)
+def reaction_row(event, counts=None, with_counts=True) -> list[dict]:
+    """The compact emoji row: '🍷 3' when the count is above zero. With
+    ``with_counts`` False (reply pings) the bare palette is returned."""
+    if not with_counts:
+        counts = [0] * len(PALETTE)
+    elif counts is None:
+        counts = counts_for(event)
     return [
         {
             "text": f"{emoji} {n}" if n else emoji,
@@ -71,11 +78,11 @@ def reaction_row(event, counts=None) -> list[dict]:
     ]
 
 
-def reaction_rows(event) -> list[list[dict]]:
+def reaction_rows(event, with_counts=True) -> list[list[dict]]:
     """Palette rows for a keyboard ([] when off or not reactable)."""
     if not reactions_enabled() or not reactable(event):
         return []
-    return [reaction_row(event)]
+    return [reaction_row(event, with_counts=with_counts)]
 
 
 def toggle_reaction(user, event, index) -> bool:
@@ -194,6 +201,8 @@ def render_notice(notice, loc) -> str:
     from wine_cellar.apps.club.services import display_name
 
     event = notice.event
+    if event.kind == ClubEvent.KIND_ASK:
+        return _render_ask_notice(notice, loc)
     payload = notice.payload or {}
     rx = payload.get("rx") or {}
     wants = [u for u in (payload.get("wants") or []) if u != notice.recipient_id]
@@ -220,6 +229,25 @@ def render_notice(notice, loc) -> str:
         key = "club.rx.want_it" if lines else "club.rx.want_wine"
         lines.append(t(loc, key, names=_names(loc, want_names), wine=wine))
     return "\n".join(lines)
+
+
+def _render_ask_notice(notice, loc) -> str:
+    """Quiet message to the asker: who reacted to their question."""
+    from django.contrib.auth import get_user_model
+
+    from wine_cellar.apps.club.services import display_name
+
+    rx = (notice.payload or {}).get("rx") or {}
+    ids = [int(u) for u in rx if int(u) != notice.recipient_id]
+    if not ids:
+        return ""
+    users = {u.id: u for u in get_user_model().objects.filter(id__in=ids)}
+    names = [display_name(users[i]) for i in ids if i in users]
+    if not names:
+        return ""
+    used = {e for u in ids for e in rx[str(u)]}
+    emojis = "".join(e for e in PALETTE if e in used)
+    return t(loc, "club.rx.ping_ask", names=_names(loc, names), emojis=emojis)
 
 
 # -- debounced count edits ---------------------------------------------------

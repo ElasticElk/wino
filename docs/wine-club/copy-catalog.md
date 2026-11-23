@@ -218,9 +218,32 @@ Buttons stay English. Server keys live in `wine_cellar/apps/club/copy.py`, bot k
 | `club.rx.ping` (server) | {names} reacted {emojis} to your {wine} | {names} het {emojis} gestuur op jou {wine} |
 | `club.rx.want_it` (server) | {names} saved it to their To-drink list | {names} het dit op hul To-drink-lys gesit |
 | `club.rx.want_wine` (server) | {names} saved your {wine} to their To-drink list | {names} het jou {wine} op hul To-drink-lys gesit |
-| `club.rx.off` (bot) | Reactions aren't on yet. | Reaksies is nog nie aan nie. |
+| `club.rx.off` (bot toast) | Reactions are switched off right now. | Reaksies is nou af. |
+| `club.rx.already` (bot toast) | Already on your list | Reeds op jou lys |
+| `club.rx.ping_ask` (server) | {names} reacted {emojis} to your question | {names} het {emojis} gestuur op jou vraag |
 | `club.rx.on` (bot toast) | Reacted {emoji} | Gereageer {emoji} |
 | `club.rx.undone` (bot toast) | Removed {emoji} | Reaksie {emoji} verwyder |
 | `club.rx.retracted` (bot toast) | That bottle was put back, so reactions are closed. | Daardie bottel is teruggesit, so reaksies is toe. |
 
 Want this reuses `club.td.added` and `club.td.off` as toasts.
+
+## Phase 5 — Ask the club (`feature_club_relay`)
+
+Buttons stay English ("Ask the club", "Undo", "Reply"). Server key `club.ask.line` is in `wine_cellar/apps/club/copy.py`; the rest are bot keys in `scanner-service/integrations/copy.py`. Names and text are escaped (`esc()` / `html.escape`) before they reach any template.
+
+| key | EN | AF |
+| --- | --- | --- |
+| `club.ask.btn` (bot) | Ask the club | Ask the club |
+| `club.ask.prompt` (bot) | What would you like to ask the club? Type it (280 characters max). Every member gets it, and replies come back to you. | Wat wil jy die klub vra? Tik dit (hoogstens 280 karakters). Elke lid kry dit, en antwoorde kom terug na jou. |
+| `club.ask.line` (server and bot) | {name} asks the club: {text} | {name} vra die klub: {text} |
+| `club.ask.sent` (bot) | Sent to {club}. | Gestuur na {club}. |
+| `club.ask.undo` (bot) | Undo | Undo |
+| `club.ask.undone` (bot) | Taken back. Nothing was sent. | Teruggetrek. Niks is gestuur nie. |
+| `club.ask.out` (bot) | That one is already out. | Daardie een is reeds uit. |
+| `club.ask.gone` (bot) | That ask isn't there any more. | Daardie vraag is nie meer daar nie. |
+| `club.ask.dup` (bot) | You just asked that. No need to send it twice. | Jy het dit nou net gevra. Dit hoef nie twee keer gestuur te word nie. |
+| `club.ask.limit` (bot) | That's 3 asks in the last hour. Try again in about {n} min. | Dis 3 vrae in die laaste uur. Probeer weer oor ongeveer {n} min. |
+| `club.ask.off` (bot toast) | Ask the club isn't on yet. | Vra die klub is nog nie aan nie. |
+| `club.ask.global` (bot) | This is a feed-only club, so there's nobody to ask. | Dis 'n klub net vir aktiwiteit, so daar is niemand om te vra nie. |
+
+Blank and over-long text reuse `club.comment.too_long`. Replies reuse the thread copy (`club.thread.*`).

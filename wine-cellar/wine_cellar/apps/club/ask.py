@@ -1275,10 +1275,36 @@ def _reaction_summary(club, wine_text, max_events=8) -> list:
     return out
 
 
+def _asks_summary(club, text_query, max_events=8) -> list:
+    """Ask-the-club messages with their full threads. An ask is not cellar
+    data: every member sees it, and only the text and names are returned."""
+    events = ClubEvent.objects.filter(
+        club=club["club"], kind=ClubEvent.KIND_ASK,
+    ).select_related("actor")
+    if text_query:
+        events = events.filter(payload__text__icontains=text_query)
+    out = []
+    for event in events.order_by("-created")[:max_events]:
+        out.append({
+            "asked_by": display_name(event.actor) if event.actor_id else "",
+            "text": str((event.payload or {}).get("text") or ""),
+            "created": event.created.isoformat() if event.created else None,
+            "replies": [
+                {
+                    "display_name": display_name(c.user) if c.user_id else "",
+                    "text": c.text,
+                }
+                for c in event.comments.select_related("user").order_by("created")
+            ],
+        })
+    return out
+
+
 def _answer_comments(club, data) -> dict:
     wine_text = str(data.get("wine_text") or data.get("grape") or "").strip()
     qs = (
         ClubComment.objects.filter(event__club=club["club"])
+        .exclude(event__kind=ClubEvent.KIND_ASK)  # asks carry their own thread
         .select_related("event", "user")
         .prefetch_related("user__telegram_users")
         .order_by("-created")
@@ -1312,4 +1338,8 @@ def _answer_comments(club, data) -> dict:
         answer["threads"] = out_threads
     if flag_on("feature_club_reactions"):
         answer["reactions"] = _reaction_summary(club, wine_text)
+    from wine_cellar.apps.club.relay import relay_enabled
+
+    if relay_enabled() and club["club"].kind != Club.KIND_GLOBAL:
+        answer["asks"] = _asks_summary(club, wine_text)
     return answer

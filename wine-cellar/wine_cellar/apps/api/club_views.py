@@ -23,7 +23,6 @@ from wine_cellar.apps.club.models import (
     VISIBILITY_RANK,
     Club,
     ClubDismantleVote,
-    ClubEvent,
     ClubInvite,
     ClubMembership,
 )
@@ -53,6 +52,7 @@ from wine_cellar.apps.club.services import (
     serialize_invite,
     serialize_vote,
     set_last_used,
+    visible_events,
 )
 from wine_cellar.apps.scanner.flags import flag_on
 from wine_cellar.apps.scanner.households import get_user_household
@@ -366,7 +366,7 @@ class ClubFeedView(ClubsEnabledMixin, ScannerAPIView):
         except (TypeError, ValueError):
             offset = 0
         qs = (
-            ClubEvent.objects.filter(club=membership.club)
+            visible_events(membership.club)
             .select_related("actor")
             .prefetch_related("actor__telegram_users")
             .annotate(comment_count=Count("comments"))

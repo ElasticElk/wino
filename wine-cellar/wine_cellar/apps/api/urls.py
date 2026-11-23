@@ -227,6 +227,16 @@ urlpatterns = [
         name="api-club-event-want",
     ),
     path(
+        "clubs/<int:pk>/ask/",
+        social_views.ClubRelayAskView.as_view(),
+        name="api-club-ask",
+    ),
+    path(
+        "clubs/asks/<int:event_id>/undo/",
+        social_views.ClubAskUndoView.as_view(),
+        name="api-club-ask-undo",
+    ),
+    path(
         "clubs/<int:pk>/events/<int:event_id>/comments/",
         social_views.ClubCommentCollectionView.as_view(),
         name="api-club-event-comments",

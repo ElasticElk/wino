@@ -203,3 +203,35 @@ async def test_close_prompt_uses_bot_from_button_message():
     bot.edit_message_reply_markup.assert_awaited_once_with(
         chat_id=4242, message_id=55, reply_markup=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_want_this_repeat_says_already_on_list():
+    api = MagicMock()
+    api.club_event_want.return_value = {"saved": True, "created": False, "status_code": 200}
+    handler = _handler(api, **ON)
+    q = _query(club_cb("wt", 88), _card_markup())
+    await handler._club_flow().on_callback(_update(q), MagicMock())
+    assert q.answer.call_args.args[0] == "Already on your list"
+    assert t("af", "club.rx.already") != t("en", "club.rx.already")
+    api.club_event_want.return_value = {"saved": True, "created": True, "status_code": 201}
+    q = _query(club_cb("wt", 88), _card_markup())
+    await handler._club_flow().on_callback(_update(q), MagicMock())
+    assert q.answer.call_args.args[0] == t("en", "club.td.added")
+
+
+@pytest.mark.asyncio
+async def test_stale_reaction_tap_flag_off_neutral_copy_and_palette_removed():
+    api = MagicMock()
+    off = _handler(api, feature_clubs="on")
+    q = _query(club_cb("rx", 88, 0), _card_markup())
+    await off._club_flow().on_callback(_update(q), MagicMock())
+    api.club_event_react.assert_not_called()
+    assert q.answer.call_args.args[0] == t("en", "club.rx.off")
+    assert "yet" not in t("en", "club.rx.off")
+    rows = q.edit_message_reply_markup.call_args.kwargs["reply_markup"].inline_keyboard
+    assert [[b.text for b in r] for r in rows] == [["Say something", "Want this"]]
+    # a message that is only the palette loses its keyboard entirely
+    q = _query(club_cb("rx", 88, 0), InlineKeyboardMarkup([reaction_buttons(88)]))
+    await off._club_flow().on_callback(_update(q), MagicMock())
+    assert q.edit_message_reply_markup.call_args.kwargs["reply_markup"] is None

@@ -4,8 +4,8 @@ from django.urls import reverse
 from django.views.generic import DetailView, FormView, ListView
 
 from wine_cellar.apps.club.forms import ClubSettingsForm
-from wine_cellar.apps.club.models import Club, ClubEvent, ClubMembership
-from wine_cellar.apps.club.services import apply_policy, membership_of
+from wine_cellar.apps.club.models import Club, ClubMembership
+from wine_cellar.apps.club.services import apply_policy, membership_of, visible_events
 from wine_cellar.apps.scanner.flags import flag_on
 
 
@@ -45,7 +45,7 @@ class ClubDetailView(ClubWebMixin, DetailView):
         context = super().get_context_data(**kwargs)
         context["membership"] = self.membership
         context["events"] = (
-            ClubEvent.objects.filter(club=self.object)
+            visible_events(self.object)
             .select_related("actor")
             .order_by("-created")[:20]
         )

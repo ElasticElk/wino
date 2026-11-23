@@ -250,7 +250,26 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.td.btn": "To-drink list",
         "club.td.added": "On your To-drink list.",
         "club.td.off": "To-drink lists aren't on yet.",
-        "club.rx.off": "Reactions aren't on yet.",
+        "club.rx.off": "Reactions are switched off right now.",
+        "club.rx.already": "Already on your list",
+        "club.ask.btn": "Ask the club",
+        "club.ask.prompt": (
+            "What would you like to ask the club?\n\n"
+            "Type it (280 characters max). Every member gets it, and replies "
+            "come back to you."
+        ),
+        "club.ask.line": "{name} asks the club: {text}",
+        "club.ask.sent": "Sent to {club}.",
+        "club.ask.undo": "Undo",
+        "club.ask.undone": "Taken back. Nothing was sent.",
+        "club.ask.out": "That one is already out.",
+        "club.ask.gone": "That ask isn't there any more.",
+        "club.ask.dup": "You just asked that. No need to send it twice.",
+        "club.ask.limit": (
+            "That's 3 asks in the last hour. Try again in about {n} min."
+        ),
+        "club.ask.off": "Ask the club isn't on yet.",
+        "club.ask.global": "This is a feed-only club, so there's nobody to ask.",
         "club.rx.on": "Reacted {emoji}",
         "club.rx.undone": "Removed {emoji}",
         "club.rx.retracted": "That bottle was put back, so reactions are closed.",
@@ -804,7 +823,26 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.td.btn": "To-drink-lys",
         "club.td.added": "Op jou To-drink-lys.",
         "club.td.off": "To-drink-lyste is nog nie aan nie.",
-        "club.rx.off": "Reaksies is nog nie aan nie.",
+        "club.rx.off": "Reaksies is nou af.",
+        "club.rx.already": "Reeds op jou lys",
+        "club.ask.btn": "Ask the club",
+        "club.ask.prompt": (
+            "Wat wil jy die klub vra?\n\n"
+            "Tik dit (hoogstens 280 karakters). Elke lid kry dit, en "
+            "antwoorde kom terug na jou."
+        ),
+        "club.ask.line": "{name} vra die klub: {text}",
+        "club.ask.sent": "Gestuur na {club}.",
+        "club.ask.undo": "Undo",
+        "club.ask.undone": "Teruggetrek. Niks is gestuur nie.",
+        "club.ask.out": "Daardie een is reeds uit.",
+        "club.ask.gone": "Daardie vraag is nie meer daar nie.",
+        "club.ask.dup": "Jy het dit nou net gevra. Dit hoef nie twee keer gestuur te word nie.",
+        "club.ask.limit": (
+            "Dis 3 vrae in die laaste uur. Probeer weer oor ongeveer {n} min."
+        ),
+        "club.ask.off": "Vra die klub is nog nie aan nie.",
+        "club.ask.global": "Dis 'n klub net vir aktiwiteit, so daar is niemand om te vra nie.",
         "club.rx.on": "Gereageer {emoji}",
         "club.rx.undone": "Reaksie {emoji} verwyder",
         "club.rx.retracted": "Daardie bottel is teruggesit, so reaksies is toe.",

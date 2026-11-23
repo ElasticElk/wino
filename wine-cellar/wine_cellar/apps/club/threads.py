@@ -186,6 +186,10 @@ def _event_line(event, loc) -> str:
     from wine_cellar.apps.club.services import display_name
 
     actor = display_name(event.actor) if event.actor_id else ""
+    if event.kind == ClubEvent.KIND_ASK:
+        from wine_cellar.apps.club.relay import ask_line
+
+        return "\U0001F4AC " + ask_line(event, loc)
     if event.kind == ClubEvent.KIND_OPENED and not event.retracted:
         return opened_text(
             loc, html.escape(actor), event.vintage,
@@ -199,7 +203,8 @@ def _event_line(event, loc) -> str:
 def _markup(event, loc, muted: bool, thread: bool = False) -> dict:
     from wine_cellar.apps.club.reactions import reaction_rows
 
-    rows = list(reaction_rows(event))
+    # Pings show the bare palette: counts live only on the refreshed card.
+    rows = list(reaction_rows(event, with_counts=False))
     if thread:
         rows.append([{
             "text": t(loc, "club.thread.btn_view", n=_comment_count(event)),
@@ -222,7 +227,7 @@ def _markup(event, loc, muted: bool, thread: bool = False) -> dict:
     }
 
 
-def _post(token, chat_id, text, markup, reply_to=None):
+def _post(token, chat_id, text, markup, reply_to=None, silent=False):
     """sendMessage. Returns (message_id | None, error string). Never raises."""
     payload = {
         "chat_id": chat_id,
@@ -233,6 +238,8 @@ def _post(token, chat_id, text, markup, reply_to=None):
         payload["reply_markup"] = markup
     if reply_to:
         payload["reply_to_message_id"] = reply_to
+    if silent:
+        payload["disable_notification"] = True
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     for attempt in range(2):
         try:
@@ -273,6 +280,16 @@ def _reply_target(event, chat_id):
     )
     if card is not None:
         return card.message_id
+    ask = (
+        ClubEventDelivery.objects.filter(
+            event=event, chat_id=chat_id, kind=ClubEventDelivery.KIND_ASK,
+            message_id__isnull=False,
+        )
+        .order_by("-id")
+        .first()
+    )
+    if ask is not None:
+        return ask.message_id
     ping = (
         ClubEventDelivery.objects.filter(
             event=event, chat_id=chat_id, kind=ClubEventDelivery.KIND_PING,
@@ -407,7 +424,7 @@ def _send_reaction_notice(notice, token) -> str:
         return "skipped:no_chat"
     errors = []
     for chat_id in chats:
-        mid, error = _post(token, chat_id, text, None)
+        mid, error = _post(token, chat_id, text, None, silent=True)
         _record(event, chat_id, mid, error)
         if error:
             errors.append(f"{chat_id}:{error}")

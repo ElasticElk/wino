@@ -162,6 +162,7 @@ class ClubEvent(models.Model):
     KIND_TASTEOFF = "tasteoff"
     KIND_COMMENT = "comment"
     KIND_STAFF_NOTE = "staff_note"
+    KIND_ASK = "ask"
     KIND = [
         (KIND_OPENED, "Opened"),
         (KIND_VOTED, "Voted"),
@@ -171,6 +172,7 @@ class ClubEvent(models.Model):
         (KIND_TASTEOFF, "Taste-off"),
         (KIND_COMMENT, "Comment"),
         (KIND_STAFF_NOTE, "Staff note"),
+        (KIND_ASK, "Ask the club"),
     ]
     club = models.ForeignKey(Club, on_delete=models.CASCADE, related_name="events")
     actor = models.ForeignKey(

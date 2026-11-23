@@ -138,12 +138,20 @@ def _visibility_label(loc, vis: str) -> str:
 
 
 def _event_action_row(event: dict, loc: str, flags=None) -> list:
+    flags = flags or {}
+    if event.get("kind") == "ask" and event.get("id") and not event.get("retracted"):
+        # An ask has no wine: only Reply (its thread button is added by the feed).
+        if flags.get("feature_club_comments"):
+            return [InlineKeyboardButton(
+                t(loc, "club.thread.btn_reply"),
+                callback_data=club_cb("rp", event["id"]),
+            )]
+        return []
     if (event.get("kind") or "opened") != "opened" or event.get("retracted"):
         return []
     event_id = event.get("id")
     if not event_id:
         return []
-    flags = flags or {}
     row = []
     if flags.get("feature_club_comments"):
         row.append(InlineKeyboardButton(
@@ -204,6 +212,9 @@ def _wine_line(event: dict, loc: str) -> str:
     if kind == "staff_note":
         note = ((event.get("payload") or {}).get("text") or event.get("wine_name") or "")
         return f"\U0001F30D {esc(note)}"
+    if kind == "ask":
+        text = (event.get("payload") or {}).get("text") or ""
+        return "\U0001F4AC " + t(loc, "club.ask.line", name=esc(name), text=esc(text))
     if kind == "tasteoff":
         title = event.get("wine_name") or "Tasting"
         return f"\U0001F3C6 {esc(title)}"
@@ -331,6 +342,10 @@ def build_home(payload: dict, loc: str, flags=None) -> tuple[str, InlineKeyboard
         keyboard.append([InlineKeyboardButton(
             t(loc, "club.list.title"), callback_data=club_cb("li", payload["id"]),
         )])
+    if flags.get("feature_club_relay") and not is_global:
+        keyboard.append([InlineKeyboardButton(
+            t("en", "club.ask.btn"), callback_data=club_cb("ak", payload["id"]),
+        )])
     last = []
     if payload.get("role") == "owner" and not is_global:
         last.append(InlineKeyboardButton(
@@ -372,6 +387,14 @@ class ClubFlow:
         return bool(
             self.handler.flag_on("feature_club_comments")
             and self.handler.flag_on("feature_club_threads")
+        )
+
+    def relay_on(self) -> bool:
+        """Ask the club (needs clubs + threads, since replies are threads)."""
+        return bool(
+            clubs_enabled(self.handler)
+            and self.threads_on()
+            and self.handler.flag_on("feature_club_relay")
         )
 
     def _prompt_store(self):
@@ -577,6 +600,8 @@ class ClubFlow:
         chat_id = str(update.effective_chat.id)
         if clubs_enabled(self.handler) and self.threads_on():
             prompt = self._prompt_get(chat_id)
+            if prompt and prompt.get("kind") == "ask":
+                return await self._submit_ask(update, chat_id, prompt)
             if prompt:
                 return await self._take_or_ask(update, context, chat_id, prompt)
         state = self.state_for(chat_id)
@@ -1409,6 +1434,8 @@ class ClubFlow:
         action, rest = parsed
         if action == "tn":
             return await self._tasteoff_name_tap(update, rest)
+        if action in ("ak", "au"):
+            return await self._ask_callback(update, query, action, rest)
         if action in ("rx", "wt"):
             # These answer the tap themselves, with a toast.
             return await self._reaction_callback(update, query, action, rest)
@@ -1945,6 +1972,7 @@ class ClubFlow:
             "feature_tasteoffs": self.handler.flag_on("feature_tasteoffs"),
             "feature_club_comments": self.handler.flag_on("feature_club_comments"),
             "feature_global_clubs": self.handler.flag_on("feature_global_clubs"),
+            "feature_club_relay": self.relay_on(),
         }
 
     def _default_tasteoff_title(self, club_name: str) -> str:
@@ -2354,6 +2382,128 @@ class ClubFlow:
         except Exception:
             pass
 
+    # -- Ask the club (feature_club_relay) ---------------------------------
+    async def _ask_callback(self, update, query, action, rest) -> bool:
+        """cl:ak:<club> opens the prompt; cl:au:<event> takes an ask back.
+        Answers the tap itself (a toast when the feature is off)."""
+        loc = self.locale(update)
+        if not self.relay_on():
+            await self._toast(query, t(loc, "club.ask.off"))
+            return True
+        try:
+            await query.answer()
+        except Exception as e:
+            logger.info("[club] answer() failed: %s", e)
+        try:
+            ident = int(rest[0]) if rest else 0
+        except (TypeError, ValueError):
+            ident = 0
+        if action == "au":
+            await self._undo_ask(update, query, ident)
+        else:
+            await self._start_ask(update, query, ident)
+        return True
+
+    async def _start_ask(self, update, query, club_id) -> None:
+        loc = self.locale(update)
+        try:
+            club = self._api(update).get_club(club_id)
+        except Exception as e:
+            logger.info("[club] ask club lookup failed: %s", e)
+            club = {"error": "err"}
+        if club.get("error"):
+            await query.message.reply_text(
+                t(loc, "club.not_member" if club.get("status_code") == 404 else "club.err"),
+                reply_markup=_menu_markup(),
+            )
+            return
+        if club.get("kind") == "global":
+            await query.message.reply_text(
+                t(loc, "club.ask.global"), reply_markup=_menu_markup(),
+            )
+            return
+        chat_id = str(update.effective_chat.id)
+        nav = getattr(self.handler, "_nav", None)
+        if callable(nav):
+            nav().pending.cancel(chat_id)  # one "next message" slot per chat
+        self.clear(chat_id)
+        sent = await query.message.reply_text(
+            t(loc, "club.ask.prompt"), reply_markup=_cancel_markup(),
+        )
+        self._prompt_put(
+            chat_id, kind="ask", club_id=club_id,
+            prompt_id=getattr(sent, "message_id", None),
+        )
+
+    async def _submit_ask(self, update, chat_id, prompt) -> bool:
+        """The next message is the ask. A blank or over-long one keeps the
+        prompt open so it can be retyped."""
+        loc = self.locale(update)
+        message = update.message
+        if not self.relay_on():
+            self._prompt_drop(chat_id)
+            await self._close_comment_prompt(update, chat_id, prompt.get("prompt_id"))
+            await message.reply_text(t(loc, "club.ask.off"), reply_markup=_menu_markup())
+            return True
+        text = (message.text or "").strip()
+        if not text or len(text) > COMMENT_MAX:
+            self._prompt_put(
+                chat_id, **{k: v for k, v in prompt.items() if k != "at"},
+            )
+            await message.reply_text(t(loc, "club.comment.too_long"))
+            return True
+        self._prompt_drop(chat_id)
+        await self._close_comment_prompt(update, chat_id, prompt.get("prompt_id"))
+        try:
+            result = self._api(update).club_ask(prompt.get("club_id"), text)
+        except Exception as e:
+            logger.info("[club] ask failed: %s", e)
+            result = {"error": "err"}
+        error = result.get("error")
+        if error == "duplicate":
+            await message.reply_text(t(loc, "club.ask.dup"), reply_markup=_menu_markup())
+        elif error == "rate_limited":
+            await message.reply_text(
+                t(loc, "club.ask.limit", n=result.get("retry_minutes") or 60),
+                reply_markup=_menu_markup(),
+            )
+        elif error == "too_long":
+            await message.reply_text(t(loc, "club.comment.too_long"))
+        elif error == "global":
+            await message.reply_text(t(loc, "club.ask.global"), reply_markup=_menu_markup())
+        elif error == "not_enabled" or result.get("status_code") == 404:
+            await message.reply_text(t(loc, "club.ask.off"), reply_markup=_menu_markup())
+        elif error:
+            await message.reply_text(t(loc, "club.err"), reply_markup=_menu_markup())
+        else:
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+                t("en", "club.ask.undo"),
+                callback_data=club_cb("au", result.get("event_id") or 0),
+            )]])
+            await message.reply_text(
+                t(loc, "club.ask.sent", club=esc(result.get("club_name") or "")),
+                parse_mode="HTML", reply_markup=markup,
+            )
+        return True
+
+    async def _undo_ask(self, update, query, event_id) -> None:
+        loc = self.locale(update)
+        from integrations.telegram_bot import _safe_edit
+        try:
+            result = self._api(update).club_ask_undo(event_id)
+        except Exception as e:
+            logger.info("[club] ask undo failed: %s", e)
+            result = {"error": "err"}
+        if result.get("error") == "already_out":
+            text = t(loc, "club.ask.out")
+        elif result.get("status_code") == 404:
+            text = t(loc, "club.ask.gone")
+        elif result.get("error"):
+            text = t(loc, "club.err")
+        else:
+            text = t(loc, "club.ask.undone")
+        await _safe_edit(query, text)
+
     # -- reactions and Want this (feature_club_reactions) -----------------
     def reactions_on(self) -> bool:
         return bool(
@@ -2389,6 +2539,7 @@ class ClubFlow:
                 pass  # flag off: fall through to the plain To-drink path
             else:
                 await self._toast(query, t(loc, "club.rx.off"))
+                await self._drop_palette(query)
                 return True
         try:
             event_id = int(rest[0]) if rest else 0
@@ -2437,6 +2588,22 @@ class ClubFlow:
                 logger.info("[club] reaction markup edit: %s", e)
         return True
 
+    @staticmethod
+    async def _drop_palette(query) -> None:
+        """Stale tap: take the emoji row off the message, keep other buttons."""
+        markup = getattr(getattr(query, "message", None), "reply_markup", None)
+        rows = []
+        for row in getattr(markup, "inline_keyboard", None) or []:
+            first = getattr(row[0], "callback_data", "") if row else ""
+            if not str(first).startswith("cl:rx:"):
+                rows.append(list(row))
+        try:
+            await query.edit_message_reply_markup(
+                reply_markup=InlineKeyboardMarkup(rows) if rows else None,
+            )
+        except Exception as e:
+            logger.info("[club] palette removal failed: %s", e)
+
     async def _want_this(self, update, query, event_id) -> None:
         loc = self.locale(update)
         if not self.handler.flag_on("feature_lists"):
@@ -2453,6 +2620,8 @@ class ClubFlow:
             await self._toast(query, t(loc, "club.td.off"))
         elif result.get("error"):
             await self._toast(query, t(loc, "club.err"))
+        elif result.get("created") is False:
+            await self._toast(query, t(loc, "club.rx.already"))
         else:
             await self._toast(query, t(loc, "club.td.added"))
 

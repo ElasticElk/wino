@@ -25,11 +25,22 @@ from wine_cellar.apps.club.models import (
 from wine_cellar.apps.club.peek import effective_visibility, tighter_visibility
 from wine_cellar.apps.club.reactions import (
     PALETTE,
+    REACTABLE_KINDS,
     counts_for,
     mine_for,
     reactions_enabled,
     record_want,
     toggle_reaction,
+)
+from wine_cellar.apps.club.relay import (
+    ASK_MAX,
+    RATE_MAX,
+    UNDO_SECONDS,
+    create_ask,
+    relay_enabled,
+    retry_minutes,
+    schedule_delivery,
+    undo_ask,
 )
 from wine_cellar.apps.club.services import (
     TASTEOFF_REOPEN_WINDOW,
@@ -225,6 +236,9 @@ class ClubEventToListView(ClubListsEnabledMixin, ScannerAPIView):
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
         if event.retracted:
             return Response({"error": "retracted"}, status=status.HTTP_409_CONFLICT)
+        if event.kind != ClubEvent.KIND_OPENED:
+            # An ask (or any non-bottle event) has no wine to save.
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
         item, created = add_event_to_list(request.user, event)
         body = serialize_item(item)
         if not created:
@@ -291,7 +305,7 @@ class ClubEventReactView(ReactionsEnabledMixin, ScannerAPIView):
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
         if event.retracted:
             return Response({"error": "retracted"}, status=status.HTTP_409_CONFLICT)
-        if event.kind != ClubEvent.KIND_OPENED:
+        if event.kind not in REACTABLE_KINDS:
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
         try:
             index = int((request.data or {}).get("i"))
@@ -329,6 +343,71 @@ class ClubEventWantView(ReactionsEnabledMixin, ScannerAPIView):
             {"saved": True, "created": created, "notified": first},
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
+
+
+class RelayEnabledMixin(ClubsEnabledMixin):
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if not relay_enabled():
+            raise CommentsDisabled()
+
+    def handle_exception(self, exc):
+        if isinstance(exc, CommentsDisabled):
+            return Response({"error": "not_enabled"}, status=status.HTTP_404_NOT_FOUND)
+        return super().handle_exception(exc)
+
+
+class ClubRelayAskView(RelayEnabledMixin, ScannerAPIView):
+    """POST {"text"}: Ask the club. Delivery follows after the Undo window."""
+
+    def post(self, request, pk):
+        membership, error = _member_or_404(request, pk)
+        if error:
+            return error
+        text = str((request.data or {}).get("text") or "")
+        event, err = create_ask(request.user, membership.club, text)
+        if err == "duplicate":
+            return Response(
+                {"error": "duplicate", "event_id": event.id},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if err == "rate_limited":
+            return Response(
+                {
+                    "error": "rate_limited",
+                    "max": RATE_MAX,
+                    "retry_minutes": retry_minutes(event),
+                },
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        if err == "too_long":
+            return Response(
+                {"error": "too_long", "max": ASK_MAX},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if err in ("blank", "global"):
+            return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
+        if err:
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        transaction.on_commit(lambda eid=event.id: schedule_delivery(eid))
+        return Response(
+            {
+                "event_id": event.id,
+                "club_name": membership.club.name,
+                "undo_seconds": UNDO_SECONDS,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class ClubAskUndoView(RelayEnabledMixin, ScannerAPIView):
+    def post(self, request, event_id):
+        result = undo_ask(request.user, event_id)
+        if result == "already_out":
+            return Response({"error": "already_out"}, status=status.HTTP_409_CONFLICT)
+        if result == "not_found":
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"undone": True})
 
 
 def _club_list(club):

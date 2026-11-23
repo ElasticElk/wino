@@ -22,6 +22,8 @@
                     {{ event.created }}
                     {% if event.kind == 'opened' %}
                         · {% translate "opened" %} {{ event.wine_name }} {{ event.vintage|default_if_none:"" }}
+                    {% elif event.kind == 'ask' %}
+                        · {% translate "asked the club" %}: {{ event.payload.text }}
                     {% elif event.kind == 'joined' %}
                         · {% translate "joined" %}
                     {% else %}
