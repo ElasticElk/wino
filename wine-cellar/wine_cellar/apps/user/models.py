@@ -1,3 +1,5 @@
+import datetime
+
 import pycountry
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -31,3 +33,9 @@ class UserSettings(models.Model):
     # alone is also the "never asked" state.
     country_prompted = models.BooleanField(default=False)
     notifications = models.BooleanField(default=True)
+    # Club quiet hours (feature_club_notify). Empty tz = settings.TIME_ZONE.
+    quiet_tz = models.CharField(max_length=64, blank=True, default="")
+    quiet_enabled = models.BooleanField(default=True)
+    quiet_start = models.TimeField(default=datetime.time(22, 0))
+    quiet_end = models.TimeField(default=datetime.time(8, 0))
+    last_summary_at = models.DateTimeField(null=True, blank=True)

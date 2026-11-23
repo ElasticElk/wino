@@ -216,6 +216,8 @@ def gated_flag(parsed: dict, features: dict | None) -> str | None:
             return "feature_tasteoffs"
         if kind == "comments" and not features.get("comments"):
             return "feature_club_comments"
+        if kind == "missed" and not features.get("notify"):
+            return "feature_club_notify"
         if kind == "list" and not features.get("lists"):
             return "feature_lists"
         return None

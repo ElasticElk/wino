@@ -130,6 +130,42 @@ MESSAGES: dict[str, dict[str, str]] = {
             "Muted {name}. Opens still go to the club; you won't get pings. /club then Unmute."
         ),
         "club.unmuted": "Unmuted {name}.",
+        "club.notify.btn": "Notifications",
+        "club.notify.btn_instant": "Every update",
+        "club.notify.btn_digest": "Daily recap",
+        "club.notify.btn_muted": "Muted",
+        "club.notify.btn_auto": "Automatic ({mode})",
+        "club.notify.btn_quiet_on": "Quiet hours: turn on",
+        "club.notify.btn_quiet_off": "Quiet hours: turn off",
+        "club.notify.btn_tz_type": "Type one",
+        "club.notify.mode_instant": "every update",
+        "club.notify.mode_digest": "daily recap",
+        "club.notify.mode_muted": "muted",
+        "club.notify.screen": (
+            "Notifications for {club}\n\n"
+            "Now: {mode}\n"
+            "{quiet}\n"
+            "Time zone: {tz}"
+        ),
+        "club.notify.quiet_on": "Quiet hours: {span} (applies to all your clubs)",
+        "club.notify.quiet_off": "Quiet hours: off (applies to all your clubs)",
+        "club.notify.auto_digest": (
+            "Clubs with {n} or more members get a daily recap unless you pick another option."
+        ),
+        "club.notify.summary_reply": (
+            "Tap Reply or Thread under the item you're answering."
+        ),
+        "club.notify.off": "That's switched off right now.",
+        "club.notify.kept": "Done. You'll keep getting every update.",
+        "club.notify.recap_ok": "Done. You'll get a daily recap.",
+        "club.notify.tz_prompt": (
+            "Type your time zone, like Africa/Johannesburg or Europe/London."
+        ),
+        "club.notify.tz_bad": (
+            "I don't know that time zone. Try the form Region/City, like Europe/London."
+        ),
+        "chat.club.missed_none": "Nothing is waiting for you in that club.",
+        "chat.club.missed": "What you missed:\n{list}",
         "club.left": "You've left {name}.",
         "club.handover.need": "Hand the club to someone else first.",
         "club.handover.btn": "Hand over",
@@ -225,9 +261,74 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.comment.too_long": "Keep it under 280 characters.",
         "club.comment.again": "Tap Say something again.",
         "club.comment.more": "and {n} more",
+        "club.thread.btn_reply": "Reply",
+        "club.thread.btn_mute": "Mute thread",
+        "club.thread.btn_unmute": "Unmute thread",
+        "club.thread.btn_view": "Thread ({n})",
+        "club.thread.prompt": (
+            "Type a short note (280 characters max) and send it. If you wait "
+            "more than 2 minutes, I'll check before posting. You can also "
+            "swipe-reply to any club message."
+        ),
+        "club.thread.confirm": "Post this to the thread on {wine}?",
+        "club.thread.confirm_wine": "that bottle",
+        "club.thread.btn_post": "Post",
+        "club.thread.btn_not_mine": "No, it's for me",
+        "club.thread.post_failed": "Couldn't post that, try again.",
+        "club.thread.retracted": (
+            "That bottle was put back, so there's no thread to reply to."
+        ),
+        "club.thread.muted": "Thread muted. No more pings from it.",
+        "club.thread.unmuted": "Thread unmuted. You'll get pings from it again.",
+        "club.thread.empty": "Nobody has replied yet.",
+        "club.thread.page": "Page {page} of {pages}",
+        "club.thread.gone": "That conversation isn't there any more.",
         "club.td.btn": "To-drink list",
         "club.td.added": "On your To-drink list.",
         "club.td.off": "To-drink lists aren't on yet.",
+        "club.rx.off": "Reactions are switched off right now.",
+        "club.rx.already": "Already on your list",
+        "club.ask.btn": "Ask the club",
+        "club.ask.prompt": (
+            "What would you like to ask the club?\n\n"
+            "Type it (280 characters max). Every member gets it, and replies "
+            "show up here."
+        ),
+        "club.ask.line": "{name} asks the club: {text}",
+        "club.ask.sent": "Sending to {club}: {text}",
+        "club.ask.undo": "Undo",
+        "club.ask.undone": "Taken back. Nothing was sent.",
+        "club.ask.out": "That one is already out.",
+        "club.ask.gone": "That ask isn't there any more.",
+        "club.ask.dup": "You just asked that. No need to send it twice.",
+        "club.ask.limit": (
+            "That's 3 asks in the last hour. Try again in about {n} min."
+        ),
+        "club.ask.off": "That's switched off right now.",
+        "club.ask.global": "This is a feed-only club, so there's nobody to ask.",
+        "club.note.offer": "Add a tasting note for the {wine}?",
+        "club.note.btn_add": "Add a note",
+        "club.note.btn_skip": "Skip",
+        "club.note.btn_edit": "Edit note",
+        "club.note.btn_add_later": "Add note",
+        "club.note.btn_remove": "Remove note",
+        "club.note.prompt": "What did you think? A line or two.",
+        "club.note.edit_prompt": (
+            "Your note now: {note}\n\nWhat did you think? A line or two."
+        ),
+        "club.note.saved": "Saved. {clubs} will see it.",
+        "club.note.saved_none": "Saved.",
+        "club.note.blank": "Write something first.",
+        "club.note.rate": "That's a lot of notes. Try again in about {n} min.",
+        "club.note.no_club": (
+            "There's no club for this bottle, or it already has your note."
+        ),
+        "club.note.removed": "Note removed.",
+        "club.note.off": "Tasting notes are switched off right now.",
+        "club.note.gone": "Couldn't find that bottle any more.",
+        "club.rx.on": "Reacted {emoji}",
+        "club.rx.undone": "Removed {emoji}",
+        "club.rx.retracted": "That bottle was put back, so reactions are closed.",
         "club.list.title": "Club list",
         "club.list.empty": "Nothing on the club list yet.",
         "club.list.add_btn": "Add",
@@ -658,6 +759,42 @@ MESSAGES: dict[str, dict[str, str]] = {
             "{name} is stil. Oops gaan nog na die klub; jy kry nie pings nie. /club dan Unmute."
         ),
         "club.unmuted": "{name} is nie meer stil nie.",
+        "club.notify.btn": "Notifications",
+        "club.notify.btn_instant": "Every update",
+        "club.notify.btn_digest": "Daily recap",
+        "club.notify.btn_muted": "Muted",
+        "club.notify.btn_auto": "Automatic ({mode})",
+        "club.notify.btn_quiet_on": "Quiet hours: turn on",
+        "club.notify.btn_quiet_off": "Quiet hours: turn off",
+        "club.notify.btn_tz_type": "Type one",
+        "club.notify.mode_instant": "elke opdatering",
+        "club.notify.mode_digest": "daaglikse opsomming",
+        "club.notify.mode_muted": "stil",
+        "club.notify.screen": (
+            "Kennisgewings vir {club}\n\n"
+            "Nou: {mode}\n"
+            "{quiet}\n"
+            "Tydsone: {tz}"
+        ),
+        "club.notify.quiet_on": "Stil ure: {span} (geld vir al jou klubs)",
+        "club.notify.quiet_off": "Stil ure: af (geld vir al jou klubs)",
+        "club.notify.auto_digest": (
+            "Klubs met {n} of meer lede kry 'n daaglikse opsomming tensy jy iets anders kies."
+        ),
+        "club.notify.summary_reply": (
+            "Tik Reply of Thread onder die item wat jy antwoord."
+        ),
+        "club.notify.off": "Dit is nou afgeskakel.",
+        "club.notify.kept": "Klaar. Jy kry steeds elke opdatering.",
+        "club.notify.recap_ok": "Klaar. Jy kry 'n daaglikse opsomming.",
+        "club.notify.tz_prompt": (
+            "Tik jou tydsone, soos Africa/Johannesburg of Europe/London."
+        ),
+        "club.notify.tz_bad": (
+            "Ek ken nie daardie tydsone nie. Probeer die vorm Streek/Stad, soos Europe/London."
+        ),
+        "chat.club.missed_none": "Niks wag vir jou in daardie klub nie.",
+        "chat.club.missed": "Wat jy gemis het:\n{list}",
         "club.left": "Jy het {name} verlaat.",
         "club.handover.need": "Gee eers die klub aan iemand anders.",
         "club.handover.btn": "Gee oor",
@@ -753,9 +890,74 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.comment.too_long": "Hou dit onder 280 karakters.",
         "club.comment.again": "Tik Sê iets weer.",
         "club.comment.more": "en nog {n}",
+        "club.thread.btn_reply": "Reply",
+        "club.thread.btn_mute": "Mute thread",
+        "club.thread.btn_unmute": "Unmute thread",
+        "club.thread.btn_view": "Thread ({n})",
+        "club.thread.prompt": (
+            "Tik 'n kort nota (hoogstens 280 karakters) en stuur dit. As jy "
+            "langer as 2 minute wag, vra ek eers voor ek plaas. Jy kan ook op "
+            "enige klubboodskap swiep-antwoord."
+        ),
+        "club.thread.confirm": "Plaas dit in die gesprek oor {wine}?",
+        "club.thread.confirm_wine": "daardie bottel",
+        "club.thread.btn_post": "Post",
+        "club.thread.btn_not_mine": "No, it's for me",
+        "club.thread.post_failed": "Kon dit nie plaas nie, probeer weer.",
+        "club.thread.retracted": (
+            "Daardie bottel is teruggesit, so daar is geen gesprek om op te antwoord nie."
+        ),
+        "club.thread.muted": "Gesprek gedemp. Geen pings meer daaruit nie.",
+        "club.thread.unmuted": "Gesprek nie meer gedemp nie. Jy kry weer pings daaruit.",
+        "club.thread.empty": "Niemand het nog geantwoord nie.",
+        "club.thread.page": "Bladsy {page} van {pages}",
+        "club.thread.gone": "Daai gesprek is nie meer daar nie.",
         "club.td.btn": "To-drink-lys",
         "club.td.added": "Op jou To-drink-lys.",
         "club.td.off": "To-drink-lyste is nog nie aan nie.",
+        "club.rx.off": "Reaksies is nou af.",
+        "club.rx.already": "Reeds op jou lys",
+        "club.ask.btn": "Ask the club",
+        "club.ask.prompt": (
+            "Wat wil jy die klub vra?\n\n"
+            "Tik dit (hoogstens 280 karakters). Elke lid kry dit, en "
+            "antwoorde verskyn hier."
+        ),
+        "club.ask.line": "{name} vra die klub: {text}",
+        "club.ask.sent": "Stuur na {club}: {text}",
+        "club.ask.undo": "Undo",
+        "club.ask.undone": "Teruggetrek. Niks is gestuur nie.",
+        "club.ask.out": "Daardie een is reeds uit.",
+        "club.ask.gone": "Daardie vraag is nie meer daar nie.",
+        "club.ask.dup": "Jy het dit nou net gevra. Dit hoef nie twee keer gestuur te word nie.",
+        "club.ask.limit": (
+            "Dis 3 vrae in die laaste uur. Probeer weer oor ongeveer {n} min."
+        ),
+        "club.ask.off": "Dit is nou af.",
+        "club.ask.global": "Dis 'n klub net vir aktiwiteit, so daar is niemand om te vra nie.",
+        "club.note.offer": "Voeg 'n proenota by vir die {wine}?",
+        "club.note.btn_add": "Add a note",
+        "club.note.btn_skip": "Skip",
+        "club.note.btn_edit": "Edit note",
+        "club.note.btn_add_later": "Add note",
+        "club.note.btn_remove": "Remove note",
+        "club.note.prompt": "Wat het jy daarvan gedink? 'n Reël of twee.",
+        "club.note.edit_prompt": (
+            "Jou nota nou: {note}\n\nWat het jy daarvan gedink? 'n Reël of twee."
+        ),
+        "club.note.saved": "Gestoor. {clubs} sal dit sien.",
+        "club.note.saved_none": "Gestoor.",
+        "club.note.blank": "Skryf eers iets.",
+        "club.note.rate": "Dis baie notas. Probeer weer oor ongeveer {n} min.",
+        "club.note.no_club": (
+            "Daar is geen klub vir hierdie bottel nie, of dit het reeds jou nota."
+        ),
+        "club.note.removed": "Nota verwyder.",
+        "club.note.off": "Proenotas is nou af.",
+        "club.note.gone": "Kon daardie bottel nie meer vind nie.",
+        "club.rx.on": "Gereageer {emoji}",
+        "club.rx.undone": "Reaksie {emoji} verwyder",
+        "club.rx.retracted": "Daardie bottel is teruggesit, so reaksies is toe.",
         "club.list.title": "Klublys",
         "club.list.empty": "Niks op die klublys nie.",
         "club.list.add_btn": "Voeg by",

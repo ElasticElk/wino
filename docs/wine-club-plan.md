@@ -13,6 +13,7 @@ This plan was expanded into an implementation spec:
 | [wine-club/phase-3-social.md](wine-club/phase-3-social.md) | Comments, taste-offs, club-tied lists |
 | [wine-club/phase-4-global.md](wine-club/phase-4-global.md) | Staff-run global clubs |
 | [wine-club/open-questions.md](wine-club/open-questions.md) | Remaining questions with recommended answers |
+| [wine-club/phase-5-social-redesign.md](wine-club/phase-5-social-redesign.md) | Social redesign: threads, reactions, Ask the club, notifications, tasting notes |
 | [wine-club/copy-catalog.md](wine-club/copy-catalog.md) | Every new EN/AF string |
 
 Planning only — no application code in these files.

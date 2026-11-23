@@ -178,3 +178,124 @@ Slash commands and `set_bot_presence` descriptions stay English. Dialogue on mes
 | `/list` | Things to drink or buy |
 | `/club` | Wine clubs |
 | `/clubpost` (staff) | Post to a global club |
+
+---
+
+## Phase 5 — threads (`feature_club_threads`)
+
+Buttons stay English in both languages. Server pings use `wine_cellar/apps/club/copy.py`, the bot uses `scanner-service/integrations/copy.py`.
+
+| key | EN | AF |
+| --- | --- | --- |
+| `club.thread.btn_reply` | Reply | Reply |
+| `club.thread.btn_mute` | Mute thread | Mute thread |
+| `club.thread.btn_unmute` | Unmute thread | Unmute thread |
+| `club.thread.btn_view` | Thread ({n}) | Thread ({n}) |
+| `club.thread.about` (server) | On: {line} | Oor: {line} |
+| `club.thread.prompt` | Type a short note (280 characters max) and send it. If you wait more than 2 minutes, I'll check before posting. You can also swipe-reply to any club message. | Tik 'n kort nota (hoogstens 280 karakters) en stuur dit. As jy langer as 2 minute wag, vra ek eers voor ek plaas. Jy kan ook op enige klubboodskap swiep-antwoord. |
+| `club.thread.confirm` | Post this to the thread on {wine}? | Plaas dit in die gesprek oor {wine}? |
+| `club.thread.confirm_wine` | that bottle | daardie bottel |
+| `club.thread.post_failed` | Couldn't post that, try again. | Kon dit nie plaas nie, probeer weer. |
+| `club.thread.retracted` | That bottle was put back, so there's no thread to reply to. | Daardie bottel is teruggesit, so daar is geen gesprek om op te antwoord nie. |
+| `club.thread.btn_post` / `btn_not_mine` | Post / No, it's for me (English in both) | same |
+| `club.thread.more` (server) | +{n} more. Tap Thread to read them all. | +{n} meer. Tik Thread om almal te lees. |
+| `club.thread.muted` | Thread muted. No more pings from it. | Gesprek gedemp. Geen pings meer daaruit nie. |
+| `club.thread.unmuted` | Thread unmuted. You'll get pings from it again. | Gesprek nie meer gedemp nie. Jy kry weer pings daaruit. |
+| `club.thread.empty` | Nobody has replied yet. | Niemand het nog geantwoord nie. |
+| `club.thread.page` | Page {page} of {pages} | Bladsy {page} van {pages} |
+| `club.thread.gone` | That conversation isn't there any more. | Daai gesprek is nie meer daar nie. |
+
+Swipe-reply too long reuses `club.comment.too_long`; saved reuses `club.comment.saved`. A ping's body lines are `💬 {name}: {text}` (name and text escaped, no catalog key).
+
+## Phase 5 — reactions (`feature_club_reactions`)
+
+Buttons stay English. Server keys live in `wine_cellar/apps/club/copy.py`, bot keys in `scanner-service/integrations/copy.py`.
+
+| key | EN | AF |
+| --- | --- | --- |
+| `club.rx.want_btn` (server) | Want this | Want this |
+| `club.rx.and` / `club.rx.others` (server) | and / {n} others | en / {n} ander |
+| `club.rx.ping` (server) | {names} reacted {emojis} to your {wine} | {names} het {emojis} gestuur op jou {wine} |
+| `club.rx.want_it` (server) | {names} saved it to their To-drink list | {names} het dit op hul To-drink-lys gesit |
+| `club.rx.want_wine` (server) | {names} saved your {wine} to their To-drink list | {names} het jou {wine} op hul To-drink-lys gesit |
+| `club.rx.off` (bot toast) | Reactions are switched off right now. | Reaksies is nou af. |
+| `club.rx.already` (bot toast) | Already on your list | Reeds op jou lys |
+| `club.rx.ping_ask` (server) | {names} reacted {emojis} to your question | {names} het {emojis} gestuur op jou vraag |
+| `club.rx.on` (bot toast) | Reacted {emoji} | Gereageer {emoji} |
+| `club.rx.undone` (bot toast) | Removed {emoji} | Reaksie {emoji} verwyder |
+| `club.rx.retracted` (bot toast) | That bottle was put back, so reactions are closed. | Daardie bottel is teruggesit, so reaksies is toe. |
+
+Want this reuses `club.td.added` and `club.td.off` as toasts.
+
+## Phase 5 — Ask the club (`feature_club_relay`)
+
+Buttons stay English ("Ask the club", "Undo", "Reply"). Server key `club.ask.line` is in `wine_cellar/apps/club/copy.py`; the rest are bot keys in `scanner-service/integrations/copy.py`. Names and text are escaped (`esc()` / `html.escape`) before they reach any template.
+
+| key | EN | AF |
+| --- | --- | --- |
+| `club.ask.btn` (bot) | Ask the club | Ask the club |
+| `club.ask.prompt` (bot) | What would you like to ask the club? Type it (280 characters max). Every member gets it, and replies show up here. | Wat wil jy die klub vra? Tik dit (hoogstens 280 karakters). Elke lid kry dit, en antwoorde verskyn hier. |
+| `club.ask.line` (server and bot) | {name} asks the club: {text} | {name} vra die klub: {text} |
+| `club.ask.sent` (bot) | Sending to {club}: {text} | Stuur na {club}: {text} |
+| `club.ask.sent_copy` (server) | Sent to {club}: {text} | Gestuur na {club}: {text} |
+| `club.ask.undo` (bot) | Undo | Undo |
+| `club.ask.undone` (bot) | Taken back. Nothing was sent. | Teruggetrek. Niks is gestuur nie. |
+| `club.ask.out` (bot) | That one is already out. | Daardie een is reeds uit. |
+| `club.ask.gone` (bot) | That ask isn't there any more. | Daardie vraag is nie meer daar nie. |
+| `club.ask.dup` (bot) | You just asked that. No need to send it twice. | Jy het dit nou net gevra. Dit hoef nie twee keer gestuur te word nie. |
+| `club.ask.limit` (bot) | That's 3 asks in the last hour. Try again in about {n} min. | Dis 3 vrae in die laaste uur. Probeer weer oor ongeveer {n} min. |
+| `club.ask.off` (bot toast) | That's switched off right now. | Dit is nou af. |
+| `club.ask.global` (bot) | This is a feed-only club, so there's nobody to ask. | Dis 'n klub net vir aktiwiteit, so daar is niemand om te vra nie. |
+
+Blank and over-long text reuse `club.comment.too_long`. Replies reuse the thread copy (`club.thread.*`).
+
+## Phase 5 — notifications (`feature_club_notify`)
+
+Buttons are English in both locales. Server keys live in `club/copy.py`, bot keys in `scanner-service/integrations/copy.py`.
+
+| Key | EN | AF |
+|---|---|---|
+| `club.notify.head_quiet` (server) | Good morning. Here is what you missed. | Goeie more. Hier is wat jy gemis het. |
+| `club.notify.head_recap` (server) | Your club recap. | Jou klub-opsomming. |
+| `club.notify.replies` (server) | {n} new replies on {line} | {n} nuwe antwoorde op {line} |
+| `club.notify.more` (server) | +{n} more, open /club | +{n} meer, maak /club oop |
+| `club.notify.tasteoff_open` / `_closed` (server) | 🏆 Taste-off {title} is open / has closed | 🏆 Proe-kompetisie {title} is oop / het gesluit |
+| `club.notify.crossing` (server) | {club} now has {n} members, so you'll get a daily recap instead of every bottle. | {club} het nou {n} lede, so jy kry 'n daaglikse opsomming in plaas van elke bottel. |
+| `club.notify.btn_keep` / `btn_recap` (server buttons) | Keep every update / Recap is fine | same |
+| `club.notify.btn` (bot button) | Notifications | Notifications |
+| `club.notify.btn_instant` / `btn_digest` / `btn_muted` (bot buttons) | Every update / Daily recap / Muted | same |
+| `club.notify.btn_quiet_on` / `btn_quiet_off` / `btn_tz_type` (bot buttons) | Quiet hours: turn on / turn off / Type one | same |
+| `club.notify.mode_instant` / `mode_digest` / `mode_muted` (bot) | every update / daily recap / muted | elke opdatering / daaglikse opsomming / stil |
+| `club.notify.screen` (bot) | Notifications for {club} / Now: {mode} / {quiet} / Time zone: {tz} | Kennisgewings vir {club} / Nou: {mode} / {quiet} / Tydsone: {tz} |
+| `club.notify.quiet_on` / `quiet_off` (bot) | Quiet hours: {span} (applies to all your clubs) / Quiet hours: off (applies to all your clubs) | Stil ure: {span} (geld vir al jou klubs) / Stil ure: af (geld vir al jou klubs) |
+| `club.notify.quiet_line` (server, first summary only) | Quiet hours {span} ({city} time). | Stil ure {span} ({city}-tyd). |
+| `club.notify.btn_change` / `btn` / `btn_score` (server buttons) | Change / Notifications / Score | Change / Notifications / Score |
+| `club.notify.btn_auto` (bot button) | Automatic ({mode}) | same |
+| `club.notify.summary_reply` (bot) | Tap Reply or Thread under the item you're answering. | Tik Reply of Thread onder die item wat jy antwoord. |
+| `club.notify.auto_digest` (bot) | Clubs with {n} or more members get a daily recap unless you pick another option. | Klubs met {n} of meer lede kry 'n daaglikse opsomming tensy jy iets anders kies. |
+| `club.notify.off` (bot) | That's switched off right now. | Dit is nou afgeskakel. |
+| `club.notify.kept` / `recap_ok` (bot) | Done. You'll keep getting every update. / Done. You'll get a daily recap. | Klaar. Jy kry steeds elke opdatering. / Klaar. Jy kry 'n daaglikse opsomming. |
+| `club.notify.tz_prompt` (bot) | Type your time zone, like Africa/Johannesburg or Europe/London. | Tik jou tydsone, soos Africa/Johannesburg of Europe/London. |
+| `club.notify.tz_bad` (bot) | I don't know that time zone. Try the form Region/City, like Europe/London. | Ek ken nie daardie tydsone nie. Probeer die vorm Streek/Stad, soos Europe/London. |
+| `chat.club.missed` / `missed_none` (bot) | What you missed: {list} / Nothing is waiting for you in that club. | Wat jy gemis het: {list} / Niks wag vir jou in daardie klub nie. |
+
+## Phase 5 — tasting notes (`feature_tasting_notes`)
+
+Buttons are English in both locales. Bot keys live in `scanner-service/integrations/copy.py`; the note itself is the member's own words (escaped, never translated). The card, summary and ping quote use curly quotes, no key.
+
+| Key | EN | AF |
+|---|---|---|
+| `club.note.offer` (bot) | Add a tasting note for the {wine}? | Voeg 'n proenota by vir die {wine}? |
+| `club.note.btn_add` / `btn_skip` (bot buttons) | Add a note / Skip | same |
+| `club.note.btn_edit` / `btn_add_later` / `btn_remove` (bot buttons, feed detail) | Edit note / Add note / Remove note | same |
+| `club.note.prompt` (bot) | What did you think? A line or two. | Wat het jy daarvan gedink? 'n Reël of twee. |
+| `club.note.edit_prompt` (bot) | Your note now: {note} / What did you think? A line or two. | Jou nota nou: {note} / Wat het jy daarvan gedink? 'n Reël of twee. |
+| `club.note.saved` (bot) | Saved. {clubs} will see it. | Gestoor. {clubs} sal dit sien. |
+| `club.note.saved_none` (bot) | Saved. | Gestoor. |
+| `club.note.blank` (bot) | Write something first. | Skryf eers iets. |
+| `club.note.rate` (bot) | That's a lot of notes. Try again in about {n} min. | Dis baie notas. Probeer weer oor ongeveer {n} min. |
+| `club.note.no_club` (bot) | There's no club for this bottle, or it already has your note. | Daar is geen klub vir hierdie bottel nie, of dit het reeds jou nota. |
+| `club.note.removed` (bot) | Note removed. | Nota verwyder. |
+| `club.note.off` (bot, toast) | Tasting notes are switched off right now. | Proenotas is nou af. |
+| `club.note.gone` (bot) | Couldn't find that bottle any more. | Kon daardie bottel nie meer vind nie. |
+| `club.comment.too_long` (bot, reused) | Keep it under 280 characters. | Hou dit onder 280 karakters. |

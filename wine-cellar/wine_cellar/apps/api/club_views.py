@@ -23,10 +23,10 @@ from wine_cellar.apps.club.models import (
     VISIBILITY_RANK,
     Club,
     ClubDismantleVote,
-    ClubEvent,
     ClubInvite,
     ClubMembership,
 )
+from wine_cellar.apps.club.notes import notes_enabled
 from wine_cellar.apps.club.peek import (
     effective_badges,
     effective_visibility,
@@ -53,6 +53,7 @@ from wine_cellar.apps.club.services import (
     serialize_invite,
     serialize_vote,
     set_last_used,
+    visible_events,
 )
 from wine_cellar.apps.scanner.flags import flag_on
 from wine_cellar.apps.scanner.households import get_user_household
@@ -118,6 +119,91 @@ class ClubAskView(ClubsEnabledMixin, ScannerAPIView):
     def post(self, request):
         data = request.data if isinstance(request.data, dict) else {}
         return Response(answer_club_ask(request.user, data))
+
+
+class ClubNotifyView(ClubsEnabledMixin, ScannerAPIView):
+    """Notification settings for one club (mode) and for the caller
+    (quiet hours, time zone). Flag feature_club_notify; off -> 404."""
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if not flag_on("feature_club_notify"):
+            raise ClubsDisabled()
+
+    @staticmethod
+    def _body(membership):
+        from wine_cellar.apps.club import notify
+
+        prefs = notify.prefs_for(membership.user_id)
+        count = membership.club.memberships.count()
+        return {
+            "club_id": membership.club_id,
+            "mode": membership.notify_mode,
+            "effective": notify.effective_mode(membership, count),
+            "member_count": count,
+            "digest_members": notify.DIGEST_MEMBERS,
+            "quiet": {
+                "enabled": prefs.enabled,
+                "start": prefs.start.strftime("%H:%M"),
+                "end": prefs.end.strftime("%H:%M"),
+                "tz": prefs.tz,
+            },
+        }
+
+    def get(self, request, pk):
+        membership, error = _member_or_404(request, pk)
+        if error:
+            return error
+        return Response(self._body(membership))
+
+    def patch(self, request, pk):
+        import datetime
+
+        from wine_cellar.apps.club import notify
+        from wine_cellar.apps.user.models import UserSettings
+
+        membership, error = _member_or_404(request, pk)
+        if error:
+            return error
+        data = request.data if isinstance(request.data, dict) else {}
+        bad = lambda code: Response(  # noqa: E731
+            {"error": code}, status=status.HTTP_400_BAD_REQUEST,
+        )
+        if "mode" in data:
+            mode = data.get("mode")
+            if mode in (None, "", "default"):
+                mode = None
+            elif mode not in dict(ClubMembership.NOTIFY_MODES):
+                return bad("invalid_mode")
+        quiet = {}
+        if "quiet_enabled" in data:
+            raw = data.get("quiet_enabled")
+            if isinstance(raw, str):
+                raw = raw.strip().lower() not in ("false", "0", "no", "off", "")
+            quiet["quiet_enabled"] = bool(raw)
+        for key in ("quiet_start", "quiet_end"):
+            if key in data:
+                try:
+                    h, m = str(data.get(key)).split(":")[:2]
+                    quiet[key] = datetime.time(int(h), int(m))
+                except (TypeError, ValueError):
+                    return bad("invalid_time")
+        if "tz" in data:
+            tz = str(data.get("tz") or "").strip()
+            if tz:
+                tz = notify.resolve_tz(tz)  # case-insensitive, or a bare city
+                if tz is None:
+                    return bad("invalid_tz")
+            quiet["quiet_tz"] = tz or ""
+        if "mode" in data:
+            notify.set_mode(membership, mode)
+        if quiet:
+            row, _ = UserSettings.objects.get_or_create(user=request.user)
+            for key, value in quiet.items():
+                setattr(row, key, value)
+            row.save(update_fields=list(quiet))
+        membership.refresh_from_db()
+        return Response(self._body(membership))
 
 
 class ClubCollectionView(ClubsEnabledMixin, ScannerAPIView):
@@ -352,6 +438,14 @@ class ClubHandoverView(ClubsEnabledMixin, ScannerAPIView):
         return Response(serialize_club_home(membership))
 
 
+def _feed_row(event, user) -> dict:
+    body = serialize_event(event, public=False)
+    if notes_enabled() and event.kind == "opened" and not event.retracted_at:
+        # The member's own open: the bot offers [Edit note] on it.
+        body["mine"] = event.actor_id == user.id
+    return body
+
+
 class ClubFeedView(ClubsEnabledMixin, ScannerAPIView):
     def get(self, request, pk):
         membership, error = _member_or_404(request, pk)
@@ -366,7 +460,7 @@ class ClubFeedView(ClubsEnabledMixin, ScannerAPIView):
         except (TypeError, ValueError):
             offset = 0
         qs = (
-            ClubEvent.objects.filter(club=membership.club)
+            visible_events(membership.club)
             .select_related("actor")
             .prefetch_related("actor__telegram_users")
             .annotate(comment_count=Count("comments"))
@@ -384,7 +478,7 @@ class ClubFeedView(ClubsEnabledMixin, ScannerAPIView):
                 "count": count,
                 "offset": offset,
                 "limit": limit,
-                "events": [serialize_event(e, public=False) for e in events],
+                "events": [_feed_row(e, request.user) for e in events],
             }
         )
 

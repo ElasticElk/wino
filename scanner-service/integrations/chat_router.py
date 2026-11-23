@@ -625,6 +625,7 @@ class ChatRouter:
             "clubs": on("feature_clubs"),
             "lists": on("feature_lists"),
             "comments": on("feature_club_comments"),
+            "notify": on("feature_club_notify"),
             "tasteoffs": on("feature_tasteoffs"),
             "global_clubs": on("feature_global_clubs"),
         }

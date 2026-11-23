@@ -23,6 +23,7 @@ from wine_cellar.apps.club.models import (
     TasteOffBottle,
     TasteOffScore,
 )
+from wine_cellar.apps.club.notes import notes_enabled, visible_note
 from wine_cellar.apps.club.peek import (
     FORBIDDEN_PEEK_KEYS,
     collect_keys,
@@ -57,6 +58,7 @@ CLUB_ASK_KINDS = frozenset(
         "badge_progress",
         "list",
         "comments",
+        "missed",
     }
 )
 
@@ -95,6 +97,7 @@ CELLAR_KINDS = frozenset({"cellar", "who_has", "oldest"})
 TASTEOFF_KINDS = frozenset({"tasteoff"})
 LIST_KINDS = frozenset({"list"})
 COMMENT_KINDS = frozenset({"comments"})
+NOTIFY_KINDS = frozenset({"missed"})
 BADGE_KINDS = frozenset({"badges", "badge_progress"})
 
 
@@ -148,6 +151,7 @@ def _flags() -> dict:
         "clubs": flag_on("feature_clubs"),
         "lists": flag_on("feature_lists"),
         "comments": flag_on("feature_club_comments"),
+        "notify": flag_on("feature_club_notify"),
         "tasteoffs": flag_on("feature_tasteoffs"),
         "global_clubs": flag_on("feature_global_clubs"),
     }
@@ -159,6 +163,8 @@ def _gated(kind: str, flags: dict) -> dict | None:
     if kind in LIST_KINDS and not flags["lists"]:
         return {"status": "fallback"}
     if kind in COMMENT_KINDS and not flags["comments"]:
+        return {"status": "fallback"}
+    if kind in NOTIFY_KINDS and not flags["notify"]:
         return {"status": "fallback"}
     return None
 
@@ -267,6 +273,17 @@ def _answer_my_clubs(memberships: list[ClubMembership]) -> dict:
 
 
 def _answer_in_club(user, club: dict, kind: str, data: dict, flags: dict) -> dict:
+    if kind == "missed":
+        from wine_cellar.apps.club.notify import missed_items
+
+        items = missed_items(user, club["club"])
+        return {
+            "status": "ok",
+            "kind": "missed",
+            "club": _club_meta(club),
+            "items": items,
+            "state": items[0]["state"] if items else "none",
+        }
     members = _club_members(club["club"])
     if kind == "members":
         return _answer_members(club, members)
@@ -779,9 +796,10 @@ def _events_qs(club, member, data):
         qs = qs.filter(created__gte=since)
     wine_text = str(data.get("wine_text") or data.get("grape") or "").strip()
     if wine_text:
-        qs = qs.filter(
-            Q(wine_name__icontains=wine_text) | Q(producer__icontains=wine_text)
-        )
+        match = Q(wine_name__icontains=wine_text) | Q(producer__icontains=wine_text)
+        if notes_enabled():
+            match |= Q(note__icontains=wine_text)
+        qs = qs.filter(match)
     vintage = data.get("vintage")
     try:
         if vintage not in (None, ""):
@@ -800,6 +818,7 @@ def _event_row(event: ClubEvent) -> dict:
         "producer": event.producer or "",
         "vote": event.vote or "",
         "created": event.created.isoformat() if event.created else None,
+        **({"tasting_note": visible_note(event)} if visible_note(event) else {}),
     }
 
 
@@ -1209,10 +1228,130 @@ def _answer_list(user, club, members, member) -> dict:
     }
 
 
+def _comment_threads(club, matching, max_events=6) -> list:
+    """Full comment threads (oldest first) for the events that matched."""
+    event_ids = []
+    for event_id in matching.values_list("event_id", flat=True):
+        if event_id not in event_ids:
+            event_ids.append(event_id)
+        if len(event_ids) >= max_events:
+            break
+    out = []
+    for event in ClubEvent.objects.filter(
+        id__in=event_ids, club=club["club"],
+    ).select_related("actor"):
+        out.append({
+            "wine_name": event.wine_name,
+            "vintage": event.vintage,
+            "opened_by": display_name(event.actor) if event.actor_id else "",
+            "comments": [
+                {
+                    "display_name": display_name(c.user) if c.user_id else "",
+                    "text": c.text,
+                }
+                for c in event.comments.select_related("user").order_by("created")
+            ],
+        })
+    return out
+
+
+def _reaction_summary(club, wine_text, max_events=8) -> list:
+    """Reactions and Want this saves per matching opened-wine event."""
+    from wine_cellar.apps.club.reactions import PALETTE
+
+    events = ClubEvent.objects.filter(
+        club=club["club"], kind=ClubEvent.KIND_OPENED, retracted_at__isnull=True,
+    ).select_related("actor")
+    if wine_text:
+        events = events.filter(
+            Q(wine_name__icontains=wine_text) | Q(producer__icontains=wine_text)
+        )
+    out = []
+    for event in events.order_by("-created")[: max_events * 3]:
+        reactions = list(
+            event.reactions.select_related("user").order_by("created", "id")
+        )
+        wants = list(
+            event.wants.select_related("user").order_by("created", "id")
+        )
+        if not reactions and not wants:
+            continue
+        by_emoji = {}
+        for r in reactions:
+            by_emoji.setdefault(r.emoji, []).append(display_name(r.user))
+        out.append({
+            "wine_name": event.wine_name,
+            "vintage": event.vintage,
+            "opened_by": display_name(event.actor) if event.actor_id else "",
+            "reactions": [
+                {"emoji": e, "count": len(by_emoji[e]), "by": by_emoji[e]}
+                for e in PALETTE if e in by_emoji
+            ],
+            "wanted_by": [display_name(w.user) for w in wants],
+        })
+        if len(out) >= max_events:
+            break
+    return out
+
+
+def _asks_summary(club, text_query, max_events=8) -> list:
+    """Ask-the-club messages with their full threads. An ask is not cellar
+    data: every member sees it, and only the text and names are returned."""
+    events = ClubEvent.objects.filter(
+        club=club["club"], kind=ClubEvent.KIND_ASK,
+    ).select_related("actor")
+    if text_query:
+        events = events.filter(payload__text__icontains=text_query)
+    out = []
+    for event in events.order_by("-created")[:max_events]:
+        out.append({
+            "asked_by": display_name(event.actor) if event.actor_id else "",
+            "text": str((event.payload or {}).get("text") or ""),
+            "created": event.created.isoformat() if event.created else None,
+            "replies": [
+                {
+                    "display_name": display_name(c.user) if c.user_id else "",
+                    "text": c.text,
+                }
+                for c in event.comments.select_related("user").order_by("created")
+            ],
+        })
+    return out
+
+
+def _tasting_notes(club, wine_text, max_events=12) -> list:
+    """Members' own tasting notes on open (not retracted) events."""
+    qs = (
+        ClubEvent.objects.filter(
+            club=club["club"], kind=ClubEvent.KIND_OPENED,
+            retracted_at__isnull=True,
+        )
+        .exclude(note="")
+        .select_related("actor")
+        .order_by("-created")
+    )
+    if wine_text:
+        qs = qs.filter(
+            Q(wine_name__icontains=wine_text)
+            | Q(producer__icontains=wine_text)
+            | Q(note__icontains=wine_text)
+        )
+    return [
+        {
+            "wine_name": e.wine_name,
+            "vintage": e.vintage,
+            "by": display_name(e.actor) if e.actor_id else "",
+            "note": visible_note(e),
+        }
+        for e in qs[:max_events]
+    ]
+
+
 def _answer_comments(club, data) -> dict:
     wine_text = str(data.get("wine_text") or data.get("grape") or "").strip()
     qs = (
         ClubComment.objects.filter(event__club=club["club"])
+        .exclude(event__kind=ClubEvent.KIND_ASK)  # asks carry their own thread
         .select_related("event", "user")
         .prefetch_related("user__telegram_users")
         .order_by("-created")
@@ -1224,7 +1363,10 @@ def _answer_comments(club, data) -> dict:
             | Q(text__icontains=wine_text)
         )
     rows = list(qs[:12])
-    return {
+    out_threads = None
+    if flag_on("feature_club_threads"):
+        out_threads = _comment_threads(club, qs)
+    answer = {
         "status": "ok",
         "kind": "comments",
         "club": _club_meta(club),
@@ -1239,3 +1381,14 @@ def _answer_comments(club, data) -> dict:
             for c in rows
         ],
     }
+    if out_threads is not None:
+        answer["threads"] = out_threads
+    if flag_on("feature_club_reactions"):
+        answer["reactions"] = _reaction_summary(club, wine_text)
+    if notes_enabled():
+        answer["tasting_notes"] = _tasting_notes(club, wine_text)
+    from wine_cellar.apps.club.relay import relay_enabled
+
+    if relay_enabled() and club["club"].kind != Club.KIND_GLOBAL:
+        answer["asks"] = _asks_summary(club, wine_text)
+    return answer

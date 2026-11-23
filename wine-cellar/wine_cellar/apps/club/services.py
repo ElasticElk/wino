@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 from django.db import IntegrityError, transaction
@@ -19,6 +20,7 @@ from wine_cellar.apps.club.models import (
     ClubInvite,
     ClubMembership,
 )
+from wine_cellar.apps.club.notes import visible_note
 from wine_cellar.apps.scanner.models import TelegramUser
 
 
@@ -88,6 +90,17 @@ def maybe_clear_share_notice(household) -> None:
         household.save(update_fields=["club_share_notice_sent_at"])
 
 
+def visible_events(club):
+    """The club's events as members may see them: asks only while the relay
+    flag is on."""
+    from wine_cellar.apps.club.relay import relay_enabled
+
+    qs = ClubEvent.objects.filter(club=club)
+    if not relay_enabled():
+        qs = qs.exclude(kind=ClubEvent.KIND_ASK)
+    return qs
+
+
 def serialize_event(event: ClubEvent, *, public=True) -> dict:
     created = event.created.isoformat() if event.created else None
     body = {
@@ -101,8 +114,14 @@ def serialize_event(event: ClubEvent, *, public=True) -> dict:
         "created": created,
         "retracted": event.retracted,
     }
+    note = visible_note(event)
+    if note:
+        body["note"] = note
     if event.kind in (ClubEvent.KIND_TASTEOFF, ClubEvent.KIND_STAFF_NOTE):
         body["payload"] = event.payload or {}
+    elif event.kind == ClubEvent.KIND_ASK:
+        # Only the text: nothing else of the payload leaves the server.
+        body["payload"] = {"text": str((event.payload or {}).get("text") or "")}
     if not public:
         body["actor_id"] = event.actor_id
         body["item_id"] = event.item_id
@@ -136,7 +155,8 @@ def serialize_club_home(membership: ClubMembership, *, events=None) -> dict:
     club = membership.club
     if events is None:
         events = list(
-            ClubEvent.objects.filter(club=club, retracted_at__isnull=True)
+            visible_events(club)
+            .filter(retracted_at__isnull=True)
             .select_related("actor")
             .prefetch_related("actor__telegram_users")
             .order_by("-created")[:8]
@@ -325,7 +345,22 @@ def add_member(club: Club, user, household, *, already_ok=True):
         kind=ClubEvent.KIND_JOINED,
     )
     set_last_used(user, membership)
+    transaction.on_commit(lambda cid=club.id: _announce_crossing(cid))
     return membership, False
+
+
+def _announce_crossing(club_id):
+    try:
+        from wine_cellar.apps.club.notify import DIGEST_MEMBERS, notify_enabled
+        from wine_cellar.apps.club.tasks import club_notify_crossing
+
+        if not notify_enabled():
+            return
+        if ClubMembership.objects.filter(club_id=club_id).count() < DIGEST_MEMBERS:
+            return
+        club_notify_crossing.delay(club_id)
+    except Exception:  # never block a join
+        logging.getLogger(__name__).warning("crossing task failed", exc_info=True)
 
 
 def record_join_event_delivery(club: Club, actor):

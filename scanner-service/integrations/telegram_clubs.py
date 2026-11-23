@@ -33,11 +33,24 @@ STATE_TTL_SECONDS = 30 * 60
 # the same rule as the menu's search prompt (telegram_nav.PENDING_TTL_SECONDS).
 COMMENT_TTL_SECONDS = 2 * 60
 COMMENT_MAX = 280
+# feature_club_threads: the Say something / Reply prompt lasts 15 minutes and
+# lives in a CardStore (Redis when set), so it survives a scanner restart.
+THREAD_PROMPT_TTL_SECONDS = 15 * 60
+# Inside this window (or as a Telegram reply to the prompt/card/ping) the next
+# message is taken as the comment; after it the sender is asked first.
+THREAD_DIRECT_SECONDS = 2 * 60
+THREAD_PAGE_CHARS = 3600
 VOTE_GLYPH = {"down": "\U0001F44E", "up": "\U0001F44D", "meh": ""}
 _MONTHS = (
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 )
+NOTIFY_MODES = ("instant", "digest", "muted")
+NOTIFY_ZONES = (
+    "Africa/Johannesburg", "Europe/London", "Europe/Amsterdam",
+    "America/New_York", "Australia/Sydney",
+)
+NOTIFY_PRESETS = ((22, 8), (23, 7), (21, 7))
 TYPE_LABEL = {
     "RE": "Red", "WH": "White", "RO": "Rosé", "SP": "Sparkling",
     "DE": "Dessert", "FO": "Fortified", "OR": "Orange",
@@ -92,6 +105,23 @@ def club_cb(*parts) -> str:
     return data
 
 
+REACTION_PALETTE = ("\U0001F377", "\U0001F60D", "\U0001F44D", "\U0001F602", "\U0001F914")
+PALETTE = REACTION_PALETTE
+
+
+def reaction_buttons(event_id, counts=None) -> list:
+    """One compact row of emoji buttons ('🍷 3' when the count is > 0).
+    Reusable for cards, comment pings and relay asks."""
+    counts = list(counts or [0] * len(PALETTE))
+    return [
+        InlineKeyboardButton(
+            f"{emoji} {n}" if n else emoji,
+            callback_data=club_cb("rx", event_id, i),
+        )
+        for i, (emoji, n) in enumerate(zip(PALETTE, counts))
+    ]
+
+
 def parse_club_cb(data: str) -> tuple[str, list[str]] | None:
     if not (data or "").startswith("cl:"):
         return None
@@ -114,12 +144,20 @@ def _visibility_label(loc, vis: str) -> str:
 
 
 def _event_action_row(event: dict, loc: str, flags=None) -> list:
+    flags = flags or {}
+    if event.get("kind") == "ask" and event.get("id") and not event.get("retracted"):
+        # An ask has no wine: only Reply (its thread button is added by the feed).
+        if flags.get("feature_club_comments"):
+            return [InlineKeyboardButton(
+                t(loc, "club.thread.btn_reply"),
+                callback_data=club_cb("rp", event["id"]),
+            )]
+        return []
     if (event.get("kind") or "opened") != "opened" or event.get("retracted"):
         return []
     event_id = event.get("id")
     if not event_id:
         return []
-    flags = flags or {}
     row = []
     if flags.get("feature_club_comments"):
         row.append(InlineKeyboardButton(
@@ -130,6 +168,30 @@ def _event_action_row(event: dict, loc: str, flags=None) -> list:
             t(loc, "club.td.btn"), callback_data=club_cb("td", event_id),
         ))
     return row
+
+
+class _HeldTextUpdate:
+    """A callback tap replaying the sender's held text as a normal message.
+    Telegram objects are frozen, so wrap instead of mutating."""
+
+    def __init__(self, update, message, text):
+        self._update = update
+        self.message = _HeldTextMessage(message, text)
+        self.effective_message = self.message
+        self.callback_query = None
+
+    def __getattr__(self, name):
+        return getattr(self._update, name)
+
+
+class _HeldTextMessage:
+    def __init__(self, inner, text):
+        self._inner = inner
+        self.text = text
+        self.reply_to_message = None
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
 
 
 def _cancel_markup() -> InlineKeyboardMarkup:
@@ -156,6 +218,9 @@ def _wine_line(event: dict, loc: str) -> str:
     if kind == "staff_note":
         note = ((event.get("payload") or {}).get("text") or event.get("wine_name") or "")
         return f"\U0001F30D {esc(note)}"
+    if kind == "ask":
+        text = (event.get("payload") or {}).get("text") or ""
+        return "\U0001F4AC " + t(loc, "club.ask.line", name=esc(name), text=esc(text))
     if kind == "tasteoff":
         title = event.get("wine_name") or "Tasting"
         return f"\U0001F3C6 {esc(title)}"
@@ -283,6 +348,14 @@ def build_home(payload: dict, loc: str, flags=None) -> tuple[str, InlineKeyboard
         keyboard.append([InlineKeyboardButton(
             t(loc, "club.list.title"), callback_data=club_cb("li", payload["id"]),
         )])
+    if flags.get("feature_club_notify"):
+        keyboard.append([InlineKeyboardButton(
+            t("en", "club.notify.btn"), callback_data=club_cb("ns", payload["id"]),
+        )])
+    if flags.get("feature_club_relay") and not is_global and not payload.get("frozen"):
+        keyboard.append([InlineKeyboardButton(
+            t("en", "club.ask.btn"), callback_data=club_cb("ak", payload["id"]),
+        )])
     last = []
     if payload.get("role") == "owner" and not is_global:
         last.append(InlineKeyboardButton(
@@ -318,6 +391,94 @@ class ClubFlow:
 
     def locale(self, update=None, chat_id=None) -> str:
         return locale_for(self.handler, update=update, chat_id=chat_id)
+
+    # -- threads (feature_club_threads) ------------------------------------
+    def threads_on(self) -> bool:
+        return bool(
+            self.handler.flag_on("feature_club_comments")
+            and self.handler.flag_on("feature_club_threads")
+        )
+
+    def relay_on(self) -> bool:
+        """Ask the club (needs clubs + threads, since replies are threads)."""
+        return bool(
+            clubs_enabled(self.handler)
+            and self.threads_on()
+            and self.handler.flag_on("feature_club_relay")
+        )
+
+    def notify_on(self) -> bool:
+        """Club notification settings and recap (feature_club_notify)."""
+        return bool(
+            clubs_enabled(self.handler)
+            and self.handler.flag_on("feature_club_notify")
+        )
+
+    def note_on(self) -> bool:
+        """Tasting notes (feature_tasting_notes; needs clubs)."""
+        return bool(
+            clubs_enabled(self.handler)
+            and self.handler.flag_on("feature_tasting_notes")
+        )
+
+    def _prompt_store(self):
+        store = getattr(self.handler, "_club_comment_store", None)
+        if store is None:
+            from integrations.card_store import CardStore
+            store = CardStore(
+                ttl=THREAD_PROMPT_TTL_SECONDS, prefix="whiney:clubcm:",
+            )
+            try:
+                self.handler._club_comment_store = store
+            except Exception:
+                pass
+        return store
+
+    def _prompt_get(self, chat_id) -> dict | None:
+        try:
+            entry = self._prompt_store().get(str(chat_id))
+        except Exception as e:
+            logger.info("[club] prompt store read failed: %s", e)
+            return None
+        if not entry:
+            return None
+        if time.time() - float(entry.get("at") or 0) > THREAD_PROMPT_TTL_SECONDS:
+            self._prompt_drop(chat_id)
+            return None
+        return dict(entry)
+
+    def _prompt_put(self, chat_id, **fields) -> None:
+        try:
+            self._prompt_store()[str(chat_id)] = dict(fields, at=time.time())
+        except Exception as e:
+            logger.info("[club] prompt store write failed: %s", e)
+
+    def _prompt_hold(self, chat_id, prompt: dict, text: str) -> None:
+        """Keep the prompt and remember a held text, with a fresh window so
+        Post / No still works when the user taps a while later."""
+        try:
+            self._prompt_store()[str(chat_id)] = dict(prompt, held=text, at=time.time())
+        except Exception as e:
+            logger.info("[club] prompt store write failed: %s", e)
+
+    def _prompt_drop(self, chat_id) -> None:
+        try:
+            self._prompt_store().pop(str(chat_id))
+        except Exception as e:
+            logger.info("[club] prompt store drop failed: %s", e)
+
+    def thread_prompt(self, chat_id) -> dict | None:
+        if not (self.threads_on() or self.note_on()):
+            return None
+        prompt = self._prompt_get(chat_id)
+        if prompt and prompt.get("kind") == "note" and not self.note_on():
+            return None
+        return prompt
+
+    def drop_comment_prompt(self, chat_id) -> None:
+        """A command, label or other flow takes the one 'next message' slot."""
+        if self.threads_on() or self.note_on():
+            self._prompt_drop(chat_id)
 
     def _api(self, update):
         return self.handler._get_api(update)
@@ -464,6 +625,14 @@ class ClubFlow:
 
     async def on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
         chat_id = str(update.effective_chat.id)
+        if clubs_enabled(self.handler) and (self.threads_on() or self.note_on()):
+            prompt = self._prompt_get(chat_id)
+            if prompt and prompt.get("kind") == "note":
+                return await self._submit_note(update, chat_id, prompt)
+            if prompt and self.threads_on():
+                if prompt.get("kind") == "ask":
+                    return await self._submit_ask(update, chat_id, prompt)
+                return await self._take_or_ask(update, context, chat_id, prompt)
         state = self.state_for(chat_id)
         if not state:
             return False
@@ -492,6 +661,8 @@ class ClubFlow:
             self.clear(chat_id)
             await update.message.reply_text(t(loc, "club.global.off"))
             return True
+        if step == "tz_type":
+            return await self._submit_tz(update, state, text)
         if step == "name":
             err = validate_typed_name(text)
             if err:
@@ -888,7 +1059,18 @@ class ClubFlow:
                 if event.get("retracted"):
                     line = f"<i>{line}</i>"
                 lines.append(line)
+                if event.get("note") and not event.get("retracted"):
+                    lines.append(f"\u201c{esc(event['note'])}\u201d")
                 row = _event_action_row(event, loc, flags)
+                row = list(row) + self._note_edit_button(event, loc)
+                if (
+                    self.threads_on() and event.get("id")
+                    and (event.get("comment_count") or 0) > 0
+                ):
+                    row = list(row) + [InlineKeyboardButton(
+                        t(loc, "club.thread.btn_view", n=event["comment_count"]),
+                        callback_data=club_cb("th", club_id, event["id"], 0),
+                    )]
                 if row:
                     keyboard.append(row)
             text = "\n".join(lines)
@@ -1286,6 +1468,15 @@ class ClubFlow:
         action, rest = parsed
         if action == "tn":
             return await self._tasteoff_name_tap(update, rest)
+        if action in ("ak", "au"):
+            return await self._ask_callback(update, query, action, rest)
+        if action == "nt":
+            return await self._note_callback(update, query, rest)
+        if action in ("ns", "nm", "nq", "nz", "nk", "nr"):
+            return await self._notify_callback(update, query, action, rest)
+        if action in ("rx", "wt"):
+            # These answer the tap themselves, with a toast.
+            return await self._reaction_callback(update, query, action, rest)
         try:
             await query.answer()
         except Exception as e:
@@ -1410,8 +1601,17 @@ class ClubFlow:
             else:
                 self.remember(chat_id, step="join", household_name=name)
                 await self._join_card(update, query=query)
-        elif action == "cm":
+        elif action in ("cm", "rp"):
             await self._start_comment(update, int(rest[0]) if rest else 0, query)
+        elif action in ("pt", "pn") and self.threads_on():
+            await self._confirm_held(update, context, query, post=action == "pt")
+        elif action == "mt" and self.threads_on():
+            await self._toggle_thread_mute(update, int(rest[0]) if rest else 0, query)
+        elif action == "th" and self.threads_on() and len(rest) >= 2:
+            await self._show_thread(
+                update, int(rest[0]), int(rest[1]),
+                int(rest[2]) if len(rest) > 2 else 0, query,
+            )
         elif action == "td":
             await self._event_to_list(update, int(rest[0]) if rest else 0, query)
         elif action == "li":
@@ -1810,6 +2010,8 @@ class ClubFlow:
             "feature_tasteoffs": self.handler.flag_on("feature_tasteoffs"),
             "feature_club_comments": self.handler.flag_on("feature_club_comments"),
             "feature_global_clubs": self.handler.flag_on("feature_global_clubs"),
+            "feature_club_relay": self.relay_on(),
+            "feature_club_notify": self.notify_on(),
         }
 
     def _default_tasteoff_title(self, club_name: str) -> str:
@@ -1881,6 +2083,22 @@ class ClubFlow:
         nav = getattr(self.handler, "_nav", None)
         if callable(nav):
             nav().pending.cancel(chat_id)  # one "next message" slot per chat
+        if self.threads_on():
+            self.clear(chat_id)
+            prompt = t(loc, "club.thread.prompt")
+            event = self._events_seen.pop(event_id, None)
+            wine = ""
+            if event and (event.get("kind") or "opened") == "opened":
+                prompt = f"\U0001F4AC {_wine_line(event, loc)}\n\n{prompt}"
+                wine = f"{event.get('vintage') or ''} {event.get('wine_name') or ''}".strip()
+            sent = await query.message.reply_text(
+                prompt, parse_mode="HTML", reply_markup=_cancel_markup(),
+            )
+            self._prompt_put(
+                chat_id, event_id=event_id, club_id=club_id,
+                prompt_id=getattr(sent, "message_id", None), wine=wine,
+            )
+            return
         # Say what the note goes under: a home-card shortcut is not obviously
         # tied to one bottle.
         prompt = t(loc, "club.comment.prompt")
@@ -1939,6 +2157,277 @@ class ClubFlow:
         )
         return True
 
+    async def _post_thread_comment(
+        self, update, event_id, club_id, text, message=None,
+    ) -> bool:
+        """Post a comment from the typed prompt or a swipe-reply. Never raises.
+        ``message`` is where replies go (a callback has no update.message)."""
+        loc = self.locale(update)
+        message = message or update.message
+        note = (text or "").strip()
+        if not note or len(note) > COMMENT_MAX:
+            await message.reply_text(
+                t(loc, "club.comment.too_long"),
+                reply_markup=self._comment_again_markup(event_id),
+            )
+            return True
+        try:
+            result = self._api(update).add_club_comment(club_id, event_id, note)
+        except Exception as e:
+            logger.info("[club] comment post failed: %s", e)
+            result = {"error": "err"}
+        if result.get("error") == "ask_off":
+            await message.reply_text(t(loc, "club.ask.off"), reply_markup=_menu_markup())
+            return True
+        if result.get("error") == "retracted" or result.get("status_code") == 409:
+            await message.reply_text(t(loc, "club.err"), reply_markup=_menu_markup())
+            return True
+        if result.get("error"):
+            await message.reply_text(
+                t(loc, "club.err"), reply_markup=self._comment_again_markup(event_id),
+            )
+            return True
+        from integrations.telegram_nav import follow_up_rows
+        await message.reply_text(
+            t(loc, "club.comment.saved"),
+            reply_markup=InlineKeyboardMarkup(follow_up_rows("club", {
+                "flags": self._flags(), "club_id": club_id,
+            })),
+        )
+        return True
+
+    async def _take_or_ask(self, update, context, chat_id, prompt) -> bool:
+        """The Reply / Say something prompt lives 15 minutes, but only a message
+        that is plainly the comment is posted without asking."""
+        message = update.message
+        if prompt.get("held") is not None:
+            # They ignored the question and typed something else: it is theirs.
+            self._prompt_drop(chat_id)
+            await self._close_comment_prompt(update, chat_id, prompt.get("prompt_id"))
+            return False
+        fresh = time.time() - float(prompt.get("at") or 0) <= THREAD_DIRECT_SECONDS
+        if fresh or await self._is_reply_to_thread(update, chat_id, prompt):
+            self._prompt_drop(chat_id)
+            await self._close_comment_prompt(update, chat_id, prompt.get("prompt_id"))
+            return await self._post_thread_comment(
+                update, prompt.get("event_id"), prompt.get("club_id"), message.text,
+            )
+        loc = self.locale(update)
+        wine = prompt.get("wine") or t(loc, "club.thread.confirm_wine")
+        self._prompt_hold(chat_id, prompt, message.text or "")
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                t("en", "club.thread.btn_post"), callback_data=club_cb("pt"),
+            ),
+            InlineKeyboardButton(
+                t("en", "club.thread.btn_not_mine"), callback_data=club_cb("pn"),
+            ),
+        ]])
+        await message.reply_text(
+            t(loc, "club.thread.confirm", wine=esc(wine)),
+            parse_mode="HTML", reply_markup=markup,
+        )
+        return True
+
+    async def _is_reply_to_thread(self, update, chat_id, prompt) -> bool:
+        reply = getattr(update.message, "reply_to_message", None)
+        if reply is None:
+            return False
+        if prompt.get("prompt_id") and reply.message_id == prompt.get("prompt_id"):
+            return True
+        try:
+            found = self._api(update).club_thread_resolve(chat_id, reply.message_id)
+        except Exception:
+            return False
+        return bool(
+            not found.get("error") and found.get("event_id") == prompt.get("event_id")
+        )
+
+    async def _confirm_held(self, update, context, query, post: bool) -> None:
+        chat_id = str(update.effective_chat.id)
+        loc = self.locale(update)
+        prompt = self._prompt_get(chat_id)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        held = (prompt or {}).get("held")
+        if not prompt or held is None:
+            await query.message.reply_text(t(loc, "club.thread.gone"))
+            return
+        self._prompt_drop(chat_id)
+        await self._close_comment_prompt(update, chat_id, prompt.get("prompt_id"))
+        if post:
+            await self._post_thread_comment(
+                update, prompt.get("event_id"), prompt.get("club_id"), held,
+                message=query.message,
+            )
+            return
+        # Not a comment: answer it like any other message.
+        shim = _HeldTextUpdate(update, query.message, held)
+        await self.handler._unknown_text(shim, context)
+
+    async def on_reply(self, update, context) -> bool:
+        """A swipe-reply to a club message is a comment on that event.
+        True when it was one; False leaves the message to the normal paths."""
+        if not clubs_enabled(self.handler):
+            return False
+        message = getattr(update, "message", None)
+        reply = getattr(message, "reply_to_message", None)
+        if message is None or reply is None:
+            return False
+        sender = getattr(reply, "from_user", None)
+        if sender is not None and not getattr(sender, "is_bot", True):
+            return False
+        chat_id = str(update.effective_chat.id)
+        loc = self.locale(update)
+        threads = self.threads_on()
+        # A swipe-reply to the tasting-note prompt is the note itself.
+        note_prompt = self._prompt_get(chat_id) if self.note_on() else None
+        if (
+            note_prompt and note_prompt.get("kind") == "note"
+            and note_prompt.get("prompt_id")
+            and reply.message_id == note_prompt.get("prompt_id")
+        ):
+            return await self._submit_note(update, chat_id, note_prompt)
+        if not (threads or self.notify_on() or self.note_on()):
+            return False  # nothing here to resolve: no HTTP call
+        try:
+            found = self._api(update).club_thread_resolve(chat_id, reply.message_id)
+        except Exception as e:
+            logger.info("[club] thread resolve failed: %s", e)
+            found = {"error": "err"}
+        if found.get("error") and found.get("status_code") != 404:
+            if not threads:
+                return False
+            # Network/API trouble is not "not a club message": say so and stop.
+            await message.reply_text(
+                t(loc, "club.thread.post_failed"), reply_markup=_menu_markup(),
+            )
+            return True
+        if found.get("summary"):
+            # A summary or recap message: no single item to reply to. Said
+            # whether or not threads are on.
+            await message.reply_text(
+                t(loc, "club.notify.summary_reply"), reply_markup=_menu_markup(),
+            )
+            return True
+        if not threads:
+            return False
+        if found.get("error") == "ask_off":
+            # A copy of an ask that is switched off: say so rather than let
+            # the chatbot answer a swipe-reply.
+            await message.reply_text(t(loc, "club.ask.off"), reply_markup=_menu_markup())
+            return True
+        if found.get("error") or not found.get("event_id"):
+            return False
+        open_prompt = self._prompt_get(chat_id)
+        self._prompt_drop(chat_id)
+        if open_prompt:
+            await self._close_comment_prompt(
+                update, chat_id, open_prompt.get("prompt_id"),
+            )
+        if found.get("retracted"):
+            await message.reply_text(
+                t(loc, "club.thread.retracted"), reply_markup=_menu_markup(),
+            )
+            return True
+        return await self._post_thread_comment(
+            update, found["event_id"], found["club_id"], message.text,
+        )
+
+    async def _toggle_thread_mute(self, update, event_id, query):
+        loc = self.locale(update)
+        try:
+            result = self._api(update).club_thread_mute(event_id)
+        except Exception as e:
+            logger.info("[club] thread mute failed: %s", e)
+            result = {"error": "err"}
+        if result.get("error"):
+            await query.message.reply_text(t(loc, "club.thread.gone"))
+            return
+        muted = bool(result.get("muted"))
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                t(loc, "club.thread.btn_reply"), callback_data=club_cb("rp", event_id),
+            ),
+            InlineKeyboardButton(
+                t(loc, "club.thread.btn_unmute" if muted else "club.thread.btn_mute"),
+                callback_data=club_cb("mt", event_id),
+            ),
+        ]])
+        try:
+            await query.edit_message_reply_markup(reply_markup=markup)
+        except Exception:
+            pass
+        await query.message.reply_text(
+            t(loc, "club.thread.muted" if muted else "club.thread.unmuted"),
+        )
+
+    @staticmethod
+    def _thread_pages(head: str, comments: list) -> list[str]:
+        """Split head + every comment into messages under THREAD_PAGE_CHARS."""
+        pages, cur = [], head
+        for c in comments:
+            who = esc(c.get("display_name") or "")
+            line = f"{who}: {esc(c.get('text') or '')}"
+            if len(cur) + len(line) + 1 > THREAD_PAGE_CHARS and cur != head:
+                pages.append(cur)
+                cur = head
+            cur = f"{cur}\n{line}"
+        pages.append(cur)
+        return pages
+
+    async def _show_thread(self, update, club_id, event_id, page, query):
+        loc = self.locale(update)
+        from integrations.telegram_bot import _safe_edit
+        api = self._api(update)
+        try:
+            feed = api.club_feed(club_id, limit=1, event_id=event_id)
+            event = next(
+                (e for e in feed.get("events") or [] if e.get("id") == event_id), None,
+            )
+            body = api.club_comments(club_id, event_id)
+        except Exception:
+            event, body = None, {"error": "err"}
+        if event is None or body.get("error"):
+            await _safe_edit(query, t(loc, "club.err"))
+            return
+        comments = body.get("comments") or []
+        head = f"\U0001F4AC {_wine_line(event, loc)}\n"
+        if event.get("note") and not event.get("retracted"):
+            # The member's own tasting note leads the thread.
+            head = f"{head}\u201c{esc(event['note'])}\u201d\n"
+        if not comments:
+            head = f"{head}\n{t(loc, 'club.thread.empty')}"
+        pages = self._thread_pages(head, comments)
+        page = max(0, min(page, len(pages) - 1))
+        text = pages[page]
+        if len(pages) > 1:
+            text += "\n\n" + t(loc, "club.thread.page", page=page + 1, pages=len(pages))
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                t(loc, "club.feed.newer"), callback_data=club_cb("th", club_id, event_id, page - 1),
+            ))
+        if page + 1 < len(pages):
+            nav.append(InlineKeyboardButton(
+                t(loc, "club.feed.older"), callback_data=club_cb("th", club_id, event_id, page + 1),
+            ))
+        rows = [nav] if nav else []
+        note_row = self._note_edit_button(event, loc)
+        if note_row:
+            rows.append(note_row)
+        rows.append([
+            InlineKeyboardButton(
+                t(loc, "club.thread.btn_reply"), callback_data=club_cb("rp", event_id),
+            ),
+            InlineKeyboardButton(t(loc, "club.back"), callback_data=club_cb("fd", club_id, 0)),
+        ])
+        await _safe_edit(
+            query, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows),
+        )
+
     def _comment_again_markup(self, event_id):
         from integrations.telegram_nav import MENU, menu_cb
         row = []
@@ -1952,11 +2441,18 @@ class ClubFlow:
     async def _close_comment_prompt(self, update, chat_id, prompt_id) -> None:
         if not prompt_id:
             return
-        bot = getattr(getattr(update, "message", None), "get_bot", None)
-        try:
-            bot = bot() if callable(bot) else None
-        except Exception:
-            bot = None
+        bot = None
+        for holder in (
+            getattr(update, "message", None),
+            getattr(getattr(update, "callback_query", None), "message", None),
+        ):
+            getter = getattr(holder, "get_bot", None)
+            try:
+                bot = getter() if callable(getter) else None
+            except Exception:
+                bot = None
+            if bot is not None:
+                break
         if bot is None:
             return
         try:
@@ -1965,6 +2461,675 @@ class ClubFlow:
             )
         except Exception:
             pass
+
+    # -- Tasting notes (feature_tasting_notes) -----------------------------
+    def _note_edit_button(self, event: dict, loc: str) -> list:
+        """[Edit note] on the member's own open in feed detail."""
+        if not (self.note_on() and event.get("mine") and event.get("id")):
+            return []
+        if event.get("retracted") or (event.get("kind") or "opened") != "opened":
+            return []
+        key = "club.note.btn_edit" if event.get("note") else "club.note.btn_add_later"
+        return [InlineKeyboardButton(
+            t("en", key), callback_data=club_cb("nt", "e", event["id"]),
+        )]
+
+    async def maybe_offer_note(self, update, query, item_id) -> None:
+        """After the vote on an opened bottle: offer "Add a tasting note?"
+        once per bottle, only when it will post to one of the member's clubs.
+        Never raises: the vote itself is already saved."""
+        try:
+            if not (self.note_on() and item_id and query.message is not None):
+                return
+            seen = getattr(self.handler, "_note_offered", None)
+            if seen is None:
+                seen = self.handler._note_offered = set()
+            if item_id in seen:
+                return
+            result = self._api(update).club_note_offer(item_id)
+            if result.get("error") or not result.get("offer"):
+                return
+            if len(seen) > 500:
+                seen.clear()
+            seen.add(item_id)
+            loc = self.locale(update)
+            markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    t("en", "club.note.btn_add"),
+                    callback_data=club_cb("nt", "a", item_id),
+                ),
+                InlineKeyboardButton(
+                    t("en", "club.note.btn_skip"),
+                    callback_data=club_cb("nt", "s", item_id),
+                ),
+            ]])
+            wine = esc(result.get("wine") or "bottle")
+            await query.message.reply_text(
+                t(loc, "club.note.offer", wine=wine), parse_mode="HTML",
+                reply_markup=markup, reply_to_message_id=query.message.message_id,
+            )
+        except Exception as e:
+            logger.info("[club] note offer failed: %s", e)
+
+    async def _note_callback(self, update, query, rest) -> bool:
+        """cl:nt:a:<item> Add a note, cl:nt:s:<item> Skip, cl:nt:e:<event>
+        Edit note, cl:nt:r:<event> Remove note."""
+        loc = self.locale(update)
+        if not self.note_on():
+            await self._toast(query, t(loc, "club.note.off"))
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            return True
+        try:
+            await query.answer()
+        except Exception as e:
+            logger.info("[club] answer() failed: %s", e)
+        op = rest[0] if rest else ""
+        try:
+            ident = int(rest[1]) if len(rest) > 1 else 0
+        except (TypeError, ValueError):
+            ident = 0
+        chat_id = str(update.effective_chat.id)
+        if op == "s":  # one tap skips: the offer goes away
+            try:
+                await query.message.delete()
+            except Exception:
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+            return True
+        if op == "r":
+            await self._remove_note(update, query, ident)
+            return True
+        if op not in ("a", "e", "v") or not ident:
+            return True
+        if op == "v":  # [Add note] on the vote row: keep the card's buttons
+            try:
+                offer = self._api(update).club_note_offer(ident)
+            except Exception as e:
+                logger.info("[club] note offer failed: %s", e)
+                offer = {"error": "err"}
+            if offer.get("error") or not offer.get("offer"):
+                await query.message.reply_text(
+                    t(loc, "club.note.no_club"), reply_markup=_menu_markup(),
+                )
+                return True
+            op = "n"
+        if op == "a":
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+        nav = getattr(self.handler, "_nav", None)
+        if callable(nav):
+            nav().pending.cancel(chat_id)  # one "next message" slot per chat
+        self.clear(chat_id)
+        prompt_text = t(loc, "club.note.prompt")
+        rows = []
+        fields = {"kind": "note"}
+        if op in ("a", "n"):
+            fields["item_id"] = ident
+        else:
+            fields["event_id"] = ident
+            current = ""
+            try:
+                await self._club_id_for_event(update, ident)
+                event = self._events_seen.pop(ident, None) or {}
+                current = event.get("note") or ""
+            except Exception:
+                current = ""
+            if current:
+                prompt_text = t(loc, "club.note.edit_prompt", note=esc(current))
+                rows.append([InlineKeyboardButton(
+                    t("en", "club.note.btn_remove"),
+                    callback_data=club_cb("nt", "r", ident),
+                )])
+        from integrations.telegram_nav import CANCEL, menu_cb
+        rows.append([InlineKeyboardButton(
+            CANCEL, callback_data=menu_cb("x", "cancel"),
+        )])
+        sent = await query.message.reply_text(
+            prompt_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows),
+        )
+        self._prompt_put(chat_id, prompt_id=getattr(sent, "message_id", None), **fields)
+        return True
+
+    async def _save_note(self, update, text, prompt=None, event_id=None):
+        """Call the API; returns (result dict)."""
+        api = self._api(update)
+        try:
+            if event_id is None and prompt is not None and prompt.get("event_id"):
+                event_id = prompt["event_id"]
+            if event_id:
+                return api.club_note(text, event_id=event_id)
+            return api.club_note(text, item_id=(prompt or {}).get("item_id"))
+        except Exception as e:
+            logger.info("[club] note save failed: %s", e)
+            return {"error": "err"}
+
+    async def _reply_note_result(self, message, loc, result, removed=False):
+        error = result.get("error")
+        if error == "too_long":
+            await message.reply_text(t(loc, "club.comment.too_long"))
+        elif error == "rate_limited":
+            await message.reply_text(
+                t(loc, "club.note.rate", n=result.get("retry_minutes") or 10),
+                reply_markup=_menu_markup(),
+            )
+        elif error == "not_enabled":
+            await message.reply_text(t(loc, "club.note.off"), reply_markup=_menu_markup())
+        elif error in ("not_found", "no_event"):
+            await message.reply_text(t(loc, "club.note.gone"), reply_markup=_menu_markup())
+        elif error:
+            await message.reply_text(t(loc, "club.err"), reply_markup=_menu_markup())
+        else:
+            if removed:
+                text = t(loc, "club.note.removed")
+            elif result.get("clubs"):
+                names = ", ".join(esc(n) for n in result["clubs"])
+                text = t(loc, "club.note.saved", clubs=names)
+            else:
+                text = t(loc, "club.note.saved_none")
+            await message.reply_text(
+                text, parse_mode="HTML", reply_markup=_menu_markup(),
+            )
+
+    async def _remove_note(self, update, query, event_id) -> None:
+        loc = self.locale(update)
+        chat_id = str(update.effective_chat.id)
+        prompt = self._prompt_get(chat_id)
+        if prompt and prompt.get("kind") == "note":
+            self._prompt_drop(chat_id)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        result = await self._save_note(update, "", event_id=event_id)
+        await self._reply_note_result(query.message, loc, result, removed=True)
+
+    async def _submit_note(self, update, chat_id, prompt) -> bool:
+        """The next message (or a swipe-reply to the prompt) is the note. A
+        blank or over-long one keeps the prompt open so it can be retyped."""
+        loc = self.locale(update)
+        message = update.message
+        if not self.note_on():
+            self._prompt_drop(chat_id)
+            await self._close_comment_prompt(update, chat_id, prompt.get("prompt_id"))
+            await message.reply_text(t(loc, "club.note.off"), reply_markup=_menu_markup())
+            return True
+        text = " ".join((message.text or "").split())
+        if not text or len(text) > COMMENT_MAX:
+            self._prompt_put(
+                chat_id, **{k: v for k, v in prompt.items() if k != "at"},
+            )
+            await message.reply_text(
+                t(loc, "club.note.blank" if not text else "club.comment.too_long"),
+            )
+            return True
+        self._prompt_drop(chat_id)
+        await self._close_comment_prompt(update, chat_id, prompt.get("prompt_id"))
+        result = await self._save_note(update, text, prompt=prompt)
+        await self._reply_note_result(message, loc, result)
+        return True
+
+    # -- Ask the club (feature_club_relay) ---------------------------------
+    async def _ask_callback(self, update, query, action, rest) -> bool:
+        """cl:ak:<club> opens the prompt; cl:au:<event> takes an ask back.
+        Answers the tap itself (a toast when the feature is off)."""
+        loc = self.locale(update)
+        if not self.relay_on():
+            await self._toast(query, t(loc, "club.ask.off"))
+            return True
+        if action != "au":  # Undo answers its own tap (toast or edit)
+            try:
+                await query.answer()
+            except Exception as e:
+                logger.info("[club] answer() failed: %s", e)
+        try:
+            ident = int(rest[0]) if rest else 0
+        except (TypeError, ValueError):
+            ident = 0
+        if action == "au":
+            await self._undo_ask(update, query, ident)
+        else:
+            await self._start_ask(update, query, ident)
+        return True
+
+    async def _start_ask(self, update, query, club_id) -> None:
+        loc = self.locale(update)
+        try:
+            club = self._api(update).get_club(club_id)
+        except Exception as e:
+            logger.info("[club] ask club lookup failed: %s", e)
+            club = {"error": "err"}
+        if club.get("error"):
+            await query.message.reply_text(
+                t(loc, "club.not_member" if club.get("status_code") == 404 else "club.err"),
+                reply_markup=_menu_markup(),
+            )
+            return
+        if club.get("kind") == "global":
+            await query.message.reply_text(
+                t(loc, "club.ask.global"), reply_markup=_menu_markup(),
+            )
+            return
+        if club.get("frozen"):
+            await query.message.reply_text(
+                t(loc, "club.global.frozen"), reply_markup=_menu_markup(),
+            )
+            return
+        chat_id = str(update.effective_chat.id)
+        nav = getattr(self.handler, "_nav", None)
+        if callable(nav):
+            nav().pending.cancel(chat_id)  # one "next message" slot per chat
+        self.clear(chat_id)
+        sent = await query.message.reply_text(
+            t(loc, "club.ask.prompt"), reply_markup=_cancel_markup(),
+        )
+        self._prompt_put(
+            chat_id, kind="ask", club_id=club_id,
+            prompt_id=getattr(sent, "message_id", None),
+        )
+
+    async def _submit_ask(self, update, chat_id, prompt) -> bool:
+        """The next message is the ask. A blank or over-long one keeps the
+        prompt open so it can be retyped."""
+        loc = self.locale(update)
+        message = update.message
+        if not self.relay_on():
+            self._prompt_drop(chat_id)
+            await self._close_comment_prompt(update, chat_id, prompt.get("prompt_id"))
+            await message.reply_text(t(loc, "club.ask.off"), reply_markup=_menu_markup())
+            return True
+        text = (message.text or "").strip()
+        if not text or len(text) > COMMENT_MAX:
+            self._prompt_put(
+                chat_id, **{k: v for k, v in prompt.items() if k != "at"},
+            )
+            await message.reply_text(t(loc, "club.comment.too_long"))
+            return True
+        self._prompt_drop(chat_id)
+        await self._close_comment_prompt(update, chat_id, prompt.get("prompt_id"))
+        try:
+            result = self._api(update).club_ask(prompt.get("club_id"), text)
+        except Exception as e:
+            logger.info("[club] ask failed: %s", e)
+            result = {"error": "err"}
+        error = result.get("error")
+        if error == "duplicate":
+            await message.reply_text(t(loc, "club.ask.dup"), reply_markup=_menu_markup())
+        elif error == "rate_limited":
+            await message.reply_text(
+                t(loc, "club.ask.limit", n=result.get("retry_minutes") or 60),
+                reply_markup=_menu_markup(),
+            )
+        elif error == "too_long":
+            await message.reply_text(t(loc, "club.comment.too_long"))
+        elif error == "global":
+            await message.reply_text(t(loc, "club.ask.global"), reply_markup=_menu_markup())
+        elif error == "frozen":
+            await message.reply_text(t(loc, "club.global.frozen"), reply_markup=_menu_markup())
+        elif error == "not_enabled" or result.get("status_code") == 404:
+            await message.reply_text(t(loc, "club.ask.off"), reply_markup=_menu_markup())
+        elif error:
+            await message.reply_text(t(loc, "club.err"), reply_markup=_menu_markup())
+        else:
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+                t("en", "club.ask.undo"),
+                callback_data=club_cb("au", result.get("event_id") or 0),
+            )]])
+            sent = await message.reply_text(
+                t(
+                    loc, "club.ask.sent",
+                    club=esc(result.get("club_name") or ""), text=esc(text),
+                ),
+                parse_mode="HTML", reply_markup=markup,
+            )
+            # This message is the asker's own copy: swipe-replies and reply
+            # pings resolve to the ask through it.
+            mid = getattr(sent, "message_id", None)
+            if mid and result.get("event_id"):
+                try:
+                    self._api(update).club_ask_copy(
+                        result["event_id"], chat_id, mid,
+                    )
+                except Exception as e:
+                    logger.info("[club] ask copy report failed: %s", e)
+        return True
+
+    async def _undo_ask(self, update, query, event_id) -> None:
+        loc = self.locale(update)
+        from integrations.telegram_bot import _safe_edit
+        try:
+            result = self._api(update).club_ask_undo(event_id)
+        except Exception as e:
+            logger.info("[club] ask undo failed: %s", e)
+            result = {"error": "err"}
+        if result.get("error") == "already_out":
+            toast = t(loc, "club.ask.out")
+        elif result.get("status_code") == 404:
+            toast = t(loc, "club.ask.gone")
+        elif result.get("error"):
+            toast = t(loc, "club.err")
+        else:
+            # Taken back: the confirmation says so, with no buttons.
+            await _safe_edit(
+                query, t(loc, "club.ask.undone"), reply_markup=None,
+            )
+            return
+        # The confirmation is the ask's copy now: leave it as it is.
+        await self._toast(query, toast)
+
+    # -- reactions and Want this (feature_club_reactions) -----------------
+    # -- notification settings (feature_club_notify) -----------------------
+    @staticmethod
+    def _quiet_label(quiet: dict) -> str:
+        return f"{quiet.get('start', '22:00')}-{quiet.get('end', '08:00')}"
+
+    def _notify_screen(self, loc, club_name, body):
+        mode = body.get("effective") or "instant"
+        quiet = body.get("quiet") or {}
+        on = bool(quiet.get("enabled"))
+        cid = body.get("club_id")
+        mode_label = t(loc, f"club.notify.mode_{mode}")
+        text = t(
+            loc, "club.notify.screen",
+            club=esc(club_name), mode=mode_label,
+            quiet=(
+                t(loc, "club.notify.quiet_on", span=self._quiet_label(quiet))
+                if on else t(loc, "club.notify.quiet_off")
+            ),
+            tz=esc(quiet.get("tz") or ""),
+        )
+        if body.get("mode") is None and mode == "digest":
+            text += "\n\n" + t(loc, "club.notify.auto_digest", n=body.get("digest_members", 15))
+        current = body.get("mode") or "auto"
+        labels = {
+            "instant": t("en", "club.notify.btn_instant"),
+            "digest": t("en", "club.notify.btn_digest"),
+            "muted": t("en", "club.notify.btn_muted"),
+        }
+        mode_row = [
+            InlineKeyboardButton(
+                ("\u2705 " if m == current else "") + labels[m],
+                callback_data=club_cb("nm", cid, i),
+            )
+            for i, m in enumerate(NOTIFY_MODES)
+        ]
+        auto_row = [InlineKeyboardButton(
+            ("\u2705 " if current == "auto" else "")
+            + t("en", "club.notify.btn_auto", mode=t("en", f"club.notify.mode_{mode}")),
+            callback_data=club_cb("nm", cid, "a"),
+        )]
+        span = self._quiet_label(quiet)
+        presets = [
+            InlineKeyboardButton(
+                ("\u2705 " if on and span == f"{a:02d}:00-{b:02d}:00" else "")
+                + f"{a:02d}-{b:02d}",
+                callback_data=club_cb("nq", cid, i),
+            )
+            for i, (a, b) in enumerate(NOTIFY_PRESETS)
+        ]
+        cur_tz = quiet.get("tz") or ""
+        zone_rows = []
+        for i, zone in enumerate(NOTIFY_ZONES):
+            zone_rows.append(InlineKeyboardButton(
+                ("\u2705 " if zone == cur_tz else "") + zone.split("/")[-1].replace("_", " "),
+                callback_data=club_cb("nz", cid, i),
+            ))
+        keyboard = [
+            auto_row,
+            mode_row,
+            [InlineKeyboardButton(
+                t("en", "club.notify.btn_quiet_off" if on else "club.notify.btn_quiet_on"),
+                callback_data=club_cb("nq", cid, "t"),
+            )],
+            presets,
+            zone_rows[:3], zone_rows[3:] + [InlineKeyboardButton(
+                t("en", "club.notify.btn_tz_type"), callback_data=club_cb("nz", cid, "x"),
+            )],
+            [InlineKeyboardButton(t(loc, "club.back"), callback_data=club_cb("h", cid))],
+        ]
+        return text, InlineKeyboardMarkup(keyboard)
+
+    async def _show_notify(self, update, club_id, query=None, patch=None):
+        loc = self.locale(update)
+        from integrations.telegram_bot import _safe_edit
+        api = self._api(update)
+        try:
+            body = api.club_notify(club_id, patch)
+            home = api.get_club(club_id)
+        except Exception as e:
+            logger.warning("[club] notify screen failed: %s", e)
+            body, home = {"error": str(e)}, {}
+        if body.get("error"):
+            key = "club.not_member" if body.get("status_code") == 404 else "club.err"
+            if body.get("error") == "invalid_tz":
+                key = "club.notify.tz_bad"
+            if query is not None:
+                await _safe_edit(query, t(loc, key))
+            else:
+                await update.message.reply_text(t(loc, key))
+            return
+        text, markup = self._notify_screen(loc, home.get("name") or "club", body)
+        if query is not None:
+            await _safe_edit(query, text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _notify_callback(self, update, query, action, rest) -> bool:
+        loc = self.locale(update)
+        from integrations.telegram_bot import _safe_edit
+        try:
+            await query.answer()
+        except Exception as e:
+            logger.info("[club] answer() failed: %s", e)
+        if not self.notify_on():
+            await _safe_edit(query, t(loc, "club.notify.off"))
+            return True
+        try:
+            club_id = int(rest[0])
+        except (TypeError, ValueError, IndexError):
+            await _safe_edit(query, t(loc, "club.err"))
+            return True
+        arg = rest[1] if len(rest) > 1 else ""
+        patch = None
+        if action == "nm" and arg.isdigit() and int(arg) < len(NOTIFY_MODES):
+            patch = {"mode": NOTIFY_MODES[int(arg)]}
+        elif action == "nm" and arg == "a":
+            patch = {"mode": None}  # back to the automatic default
+        elif action == "nk":
+            patch = {"mode": "instant"}
+        elif action == "nr":
+            patch = {"mode": "digest"}
+        elif action == "nq":
+            if arg == "t":
+                cur = self._api(update).club_notify(club_id) or {}
+                patch = {"quiet_enabled": not (cur.get("quiet") or {}).get("enabled")}
+            elif arg.isdigit() and int(arg) < len(NOTIFY_PRESETS):
+                a, b = NOTIFY_PRESETS[int(arg)]
+                patch = {
+                    "quiet_enabled": True,
+                    "quiet_start": f"{a:02d}:00", "quiet_end": f"{b:02d}:00",
+                }
+        elif action == "nz":
+            if arg == "x":
+                chat_id = str(query.message.chat_id)
+                self.clear(chat_id)
+                self.remember(chat_id, step="tz_type", club_id=club_id)
+                await query.message.reply_text(
+                    t(loc, "club.notify.tz_prompt"), reply_markup=_cancel_markup(),
+                )
+                return True
+            if arg.isdigit() and int(arg) < len(NOTIFY_ZONES):
+                patch = {"tz": NOTIFY_ZONES[int(arg)]}
+        if action in ("nk", "nr"):
+            # The 15-member message: confirm in place, no settings screen.
+            api = self._api(update)
+            body = api.club_notify(club_id, patch)
+            key = "club.notify.kept" if action == "nk" else "club.notify.recap_ok"
+            if body.get("error"):
+                key = "club.err"
+            await _safe_edit(query, t(loc, key))
+            return True
+        await self._show_notify(update, club_id, query=query, patch=patch)
+        return True
+
+    async def _submit_tz(self, update, state, text) -> bool:
+        loc = self.locale(update)
+        chat_id = str(update.effective_chat.id)
+        if not self.notify_on():
+            self.clear(chat_id)
+            await update.message.reply_text(t(loc, "club.notify.off"))
+            return True
+        club_id = state.get("club_id")
+        zone = (text or "").strip()
+        body = {"error": "invalid_tz"}
+        if zone and len(zone) <= 64:
+            # The API accepts any case and bare city names, and normalises.
+            body = self._api(update).club_notify(club_id, {"tz": zone})
+        if body.get("error") == "invalid_tz":
+            await update.message.reply_text(
+                t(loc, "club.notify.tz_bad"), reply_markup=_cancel_markup(),
+            )
+            return True
+        self.clear(chat_id)
+        await self._show_notify(update, club_id)
+        return True
+
+    def reactions_on(self) -> bool:
+        return bool(
+            clubs_enabled(self.handler)
+            and self.handler.flag_on("feature_club_reactions")
+        )
+
+    @staticmethod
+    async def _toast(query, text: str) -> None:
+        try:
+            await query.answer(text[:190])
+        except Exception as e:
+            logger.info("[club] toast failed: %s", e)
+
+    @staticmethod
+    def _with_counts(markup, counts, event_id):
+        """The tapped message's keyboard, with only the emoji row refreshed."""
+        rows = []
+        replaced = False
+        for row in getattr(markup, "inline_keyboard", None) or []:
+            first = getattr(row[0], "callback_data", "") if row else ""
+            if str(first).startswith("cl:rx:"):
+                rows.append(reaction_buttons(event_id, counts))
+                replaced = True
+            else:
+                rows.append(list(row))
+        return InlineKeyboardMarkup(rows) if replaced else None
+
+    async def _reaction_callback(self, update, query, action, rest) -> bool:
+        loc = self.locale(update)
+        if not self.reactions_on():
+            if action == "wt" and clubs_enabled(self.handler):
+                pass  # flag off: fall through to the plain To-drink path
+            else:
+                await self._toast(query, t(loc, "club.rx.off"))
+                await self._drop_palette(query)
+                return True
+        try:
+            event_id = int(rest[0]) if rest else 0
+        except (TypeError, ValueError):
+            event_id = 0
+        if action == "wt":
+            if not self.reactions_on():
+                try:
+                    await query.answer()
+                except Exception:
+                    pass
+                await self._event_to_list(update, event_id, query)
+                return True
+            await self._want_this(update, query, event_id)
+            return True
+        try:
+            index = int(rest[1]) if len(rest) > 1 else -1
+        except (TypeError, ValueError):
+            index = -1
+        if not event_id or not 0 <= index < len(PALETTE):
+            await self._toast(query, t(loc, "club.err"))
+            return True
+        try:
+            result = self._api(update).club_event_react(
+                event_id, index,
+                chat_id=getattr(query.message, "chat_id", None)
+                or update.effective_chat.id,
+                message_id=getattr(query.message, "message_id", None),
+            )
+        except Exception as e:
+            logger.info("[club] react failed: %s", e)
+            result = {"error": "err"}
+        if result.get("error") == "ask_off":
+            await self._toast(query, t(loc, "club.ask.off"))
+            await self._drop_palette(query)
+            return True
+        if result.get("status_code") == 409 or result.get("error") == "retracted":
+            await self._toast(query, t(loc, "club.rx.retracted"))
+            return True
+        if result.get("error"):
+            await self._toast(query, t(loc, "club.err"))
+            return True
+        emoji = PALETTE[index]
+        await self._toast(
+            query, t(loc, "club.rx.on" if result.get("on") else "club.rx.undone", emoji=emoji),
+        )
+        markup = None
+        if result.get("show_counts", True):  # reply pings stay bare
+            markup = self._with_counts(
+                getattr(query.message, "reply_markup", None),
+                result.get("counts") or [0] * len(PALETTE), event_id,
+            )
+        if markup is not None:
+            try:
+                await query.edit_message_reply_markup(reply_markup=markup)
+            except Exception as e:
+                logger.info("[club] reaction markup edit: %s", e)
+        return True
+
+    @staticmethod
+    async def _drop_palette(query) -> None:
+        """Stale tap: take the emoji row off the message, keep other buttons."""
+        markup = getattr(getattr(query, "message", None), "reply_markup", None)
+        rows = []
+        for row in getattr(markup, "inline_keyboard", None) or []:
+            first = getattr(row[0], "callback_data", "") if row else ""
+            if not str(first).startswith("cl:rx:"):
+                rows.append(list(row))
+        try:
+            await query.edit_message_reply_markup(
+                reply_markup=InlineKeyboardMarkup(rows) if rows else None,
+            )
+        except Exception as e:
+            logger.info("[club] palette removal failed: %s", e)
+
+    async def _want_this(self, update, query, event_id) -> None:
+        loc = self.locale(update)
+        if not self.handler.flag_on("feature_lists"):
+            await self._toast(query, t(loc, "club.td.off"))
+            return
+        try:
+            result = self._api(update).club_event_want(event_id)
+        except Exception as e:
+            logger.info("[club] want failed: %s", e)
+            result = {"error": "err"}
+        if result.get("status_code") == 409 or result.get("error") == "retracted":
+            await self._toast(query, t(loc, "club.rx.retracted"))
+        elif result.get("status_code") == 404:
+            await self._toast(query, t(loc, "club.td.off"))
+        elif result.get("error"):
+            await self._toast(query, t(loc, "club.err"))
+        elif result.get("created") is False:
+            await self._toast(query, t(loc, "club.rx.already"))
+        else:
+            await self._toast(query, t(loc, "club.td.added"))
 
     async def _event_to_list(self, update, event_id, query):
         loc = self.locale(update)

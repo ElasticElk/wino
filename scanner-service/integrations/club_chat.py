@@ -74,6 +74,7 @@ def render_club(payload: dict, locale: str) -> str:
         "badge_progress": _render_badge_progress,
         "list": _render_list,
         "comments": _render_comments,
+        "missed": _render_missed,
     }.get(kind)
     if renderer is None:
         return t(locale, "chat.club.nothing")
@@ -342,3 +343,11 @@ def _render_comments(payload, locale):
         for c in rows[:8]
     ]
     return t(locale, "chat.club.comments", query=query, list="\n".join(lines))
+
+
+def _render_missed(payload, locale):
+    rows = payload.get("items") or []
+    if not rows:
+        return t(locale, "chat.club.missed_none")
+    lines = [f"\u2022 {_esc(r.get('text') or '')}" for r in rows[:10]]
+    return t(locale, "chat.club.missed", list="\n".join(lines))

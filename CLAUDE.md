@@ -30,9 +30,9 @@ start.sh / stop.sh    # Service orchestration
 - `Household` / `HouseholdMembership` — Multi-tenant system (owner/member roles)
 - `Scanner` — Registered barcode devices with API keys + notify_users M2M
 - `TelegramUser` — Links Django users to Telegram chat IDs
-- `ServiceConfig` — Key-value config store (bot_token, grok_api_key, web_url, `chat_min_reply_ms`, `feature_lists` / `feature_clubs` / …)
+- `ServiceConfig` — Key-value config store (bot_token, grok_api_key, web_url, `chat_min_reply_ms`, `default_time_zone` (club quiet-hours zone fallback after the member's own zone and country (never language), before `settings.TIME_ZONE`), `feature_lists` / `feature_clubs` / …)
 - `WineList` / `WineListItem` — Personal To-drink list (**user-scoped**, not household). Club lists (`kind=club`, `owner` null, FK to `Club`) share a names-only checklist. Flag `feature_lists` (club lists also need `feature_clubs`).
-- `Club` / `ClubMembership` / `ClubInvite` / `ClubEvent` / `ClubComment` / `TasteOff` — Private wine clubs (own app `wine_cellar.apps.club`). Sharing policy is club-wide. Flag `feature_clubs`. Comments `feature_club_comments`; taste-offs `feature_tasteoffs`. `Club.kind=global` is staff-run, feed-only (`cellar_visibility=none`, no peek/badges/dismantle); flag `feature_global_clubs`.
+- `Club` / `ClubMembership` / `ClubInvite` / `ClubEvent` / `ClubComment` / `TasteOff` — Private wine clubs (own app `wine_cellar.apps.club`). Sharing policy is club-wide. Flag `feature_clubs`. Comments `feature_club_comments`; threads (swipe-reply, reply pings via `ClubNotice` outbox, `ClubThreadMute`, `ClubEventDelivery.kind`) `feature_club_threads` (needs clubs + comments; see docs/wine-club/phase-5-social-redesign.md); reactions + Want this (`ClubReaction`, `ClubWant`, owner pings via `ClubNotice` kind `reaction`) `feature_club_reactions` (needs clubs); Ask the club (`ClubEvent.kind=ask`, `club/relay.py`, delayed delivery with Undo, `ClubEventDelivery.kind=ask`) `feature_club_relay` (needs clubs + threads; not offered in global clubs); notifications (`ClubMembership.notify_mode`, quiet hours on `UserSettings`, `club/notify.py` policy, held `ClubNotice` rows, beat `send_club_summaries`) `feature_club_notify` (needs clubs); tasting notes (`ClubEvent.note` / `note_added_at`, `club/notes.py`, task `refresh_event_note`, offered after the vote on a real open) `feature_tasting_notes` (needs clubs); taste-offs `feature_tasteoffs`. `Club.kind=global` is staff-run, feed-only (`cellar_visibility=none`, no peek/badges/dismantle); flag `feature_global_clubs`.
 
 ### REST API (`/api/`)
 Auth: `Authorization: Token <token>` header. Optional `X-Household: <id>` header.
@@ -80,15 +80,20 @@ Auth: `Authorization: Token <token>` header. Optional `X-Household: <id>` header
 - `POST /api/clubs/<id>/join/` — Self-join a global club (403 `invite_only` on private). No household heads-up
 - `POST /api/clubs/<id>/notes/` — Staff note on a global club → `staff_note` event
 - `POST /api/clubs/<id>/members/<user_id>/kick/` — Staff; cannot kick the owner; does not delete the club
-- `POST /api/clubs/ask/` — Read-only typed club Q&A for the Telegram chat. Body `{kind, club_id?, club_name?, member_name?, member_id?, wine_text?, grape?, vintage?, period?, when?}`. Kinds: `members`, `my_clubs`, `cellar`, `who_has`, `oldest`, `feed`, `top_rated`, `who_drinks`, `avg_rating`, `tasteoff`, `badges`, `badge_progress`, `list`, `comments`. Privacy is enforced here (club membership, peek level, pending Stay/Leave, global clubs never expose cellars). Flag `feature_clubs`; off → 404 `not_enabled`. Taste-offs / comments / lists with their flag off return `{status: fallback}` so the bot does not mention the hidden feature.
+- `POST /api/clubs/ask/` — Read-only typed club Q&A for the Telegram chat. Body `{kind, club_id?, club_name?, member_name?, member_id?, wine_text?, grape?, vintage?, period?, when?}`. Kinds: `members`, `my_clubs`, `cellar`, `who_has`, `oldest`, `feed`, `top_rated`, `who_drinks`, `avg_rating`, `tasteoff`, `badges`, `badge_progress`, `list`, `comments`, `missed` (flag `feature_club_notify`). Privacy is enforced here (club membership, peek level, pending Stay/Leave, global clubs never expose cellars). Flag `feature_clubs`; off → 404 `not_enabled`. Taste-offs / comments / lists with their flag off return `{status: fallback}` so the bot does not mention the hidden feature.
 - `GET/POST /api/clubs/` — User-keyed club list / create (default full cellar + badges). Flag `feature_clubs`; off → 404 `not_enabled`. Never use `X-Household` as the club id
+- `GET /api/clubs/notes/offer/?item_id=` — whether to offer "Add a tasting note?" after an open. `POST /api/clubs/notes/ {item_id|event_id, text}` — set (or clear with empty text) the caller's own note on every opened event of the bottle (max 280; 400 `too_long`, 404 `not_found`, 409 `no_event`). Flag `feature_tasting_notes`; off → 404 `not_enabled`
+- `GET/PATCH /api/clubs/<id>/notify/` — Per-club notify mode (`instant|digest|muted|null`) plus the caller's quiet hours (`quiet_enabled`, `quiet_start`, `quiet_end`, `tz`). Flag `feature_club_notify`; off → 404 `not_enabled`
 - `GET/PATCH /api/clubs/<id>/` — Home card / owner policy. Widening bumps `sharing_version` and DMs Stay/Leave; unacked peek stays at the previous level
 - `PATCH /api/clubs/<id>/membership/` — Mute, switch shared household, Stay (`accepted_sharing_version`)
 - `POST /api/clubs/<id>/leave/` — 409 `hand_over_required` if owner with others; last member deletes the club
 - `GET /api/clubs/<id>/members/<user_id>/cellar/` — Peek (summary/full). Forbidden: prices, drawers, notes, barcodes, critic/Vivino
 - `POST /api/scanner/club-invites/redeem/` — Staff (the bot uses `handler.admin_api`; the member client gets 403). Compound: new cellar + club membership in one call. 409 `dismantle_in_progress` while a unanimous end-vote is open. Someone already in the club gets 200 `already_member` even if the invite is now used up or expired (a double-tapped Join), and no use is counted
 - `POST /api/scanner/invites/preview/` — Household invite first, then club invite (`kind=club`)
-- `GET/POST /api/clubs/<id>/events/<event_id>/comments/` — Club-visible notes, max 280. Flag `feature_club_comments`. 409 `retracted`
+- `GET/POST /api/clubs/<id>/events/<event_id>/comments/` — Club-visible notes, max 280. Flag `feature_club_comments`. 409 `retracted`. With `feature_club_threads` a new comment queues reply pings instead of editing the card
+- `GET /api/clubs/threads/resolve/?chat_id=&message_id=` — Bot message to event (swipe-reply). `GET/POST /api/clubs/events/<event_id>/mute/` — thread mute toggle. Flag `feature_club_threads`; off → 404 `not_enabled`
+- `POST /api/clubs/events/<event_id>/react/` `{i}` toggles a reaction; `POST /api/clubs/events/<event_id>/want/` saves to the caller's To-drink list. Flag `feature_club_reactions`; off → 404 `not_enabled`; retracted → 409
+- `POST /api/clubs/<id>/ask/` `{text}` — Ask the club (max 280, 3 per member per club per hour, dedupe 10 min); delivery 60 s later. `POST /api/clubs/asks/<event_id>/undo/` — asker only, 409 `already_out` after delivery. `POST /api/clubs/asks/<event_id>/copy/ {chat_id, message_id}` — records the asker's confirmation as their copy. Frozen club → 409 `frozen`. Flag `feature_club_relay`; off → 404 `not_enabled`
 - `POST /api/clubs/<id>/events/<event_id>/to-list/` — Snapshot onto the **caller's** personal To-drink list (`source=club_feed`). No `wine_id` of the actor's bottle. Flag `feature_lists`
 - `GET/POST /api/clubs/<id>/list/` and `.../list/items/` — Shared club checklist (names/vintages only). Delete if owner or `added_by`
 - `POST /api/clubs/<id>/tasteoffs/` — Setup a scored tasting (1–5, not `Wine.rating`). One setup/scoring flight per club. Flag `feature_tasteoffs`. Host or owner may close; beat auto-closes after 7 days
@@ -173,7 +178,7 @@ Callers POST to queue, then poll the same URL with `?task_id=`. The Telegram cli
 ## Key Config Files
 - `wine-cellar/wine_cellar/conf/settings.py` — Base Django settings
 - `wine-cellar/wine_cellar/conf/docker_settings.py` — Docker/prod overrides (env vars)
-- `wine-cellar/wine_cellar/conf/celery.py` — Celery + beat schedule (drink_by_reminder at 2:30 AM daily; expire_dismantle_votes every 15 min; close_stale_tasteoffs at 03:15)
+- `wine-cellar/wine_cellar/conf/celery.py` — Celery + beat schedule (drink_by_reminder at 2:30 AM daily; expire_dismantle_votes every 15 min; close_stale_tasteoffs at 03:15; flush_club_notices and send_club_summaries every minute)
 - `scanner-service/config.yaml` — Scanner bootstrap config
 - `wine-cellar/pyproject.toml` — Project metadata, deps, test config (AGPL-3.0 license)
 

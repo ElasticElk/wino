@@ -47,7 +47,22 @@ MESSAGES = {
         "club.end.cancel": "Cancel vote",
         "club.comment.btn": "Say something",
         "club.comment.more": "and {n} more",
+        "club.thread.btn_reply": "Reply",
+        "club.thread.btn_mute": "Mute thread",
+        "club.thread.btn_unmute": "Unmute thread",
+        "club.thread.about": "On: {line}",
+        "club.thread.btn_view": "Thread ({n})",
+        "club.thread.more": "+{n} more. Tap Thread to read them all.",
         "club.td.btn": "To-drink list",
+        "club.ask.line": "{name} asks the club: {text}",
+        "club.ask.sent_copy": "Sent to {club}: {text}",
+        "club.rx.ping_ask": "{names} reacted {emojis} to your question",
+        "club.rx.want_btn": "Want this",
+        "club.rx.and": "and",
+        "club.rx.others": "{n} others",
+        "club.rx.ping": "{names} reacted {emojis} to your {wine}",
+        "club.rx.want_it": "{names} saved it to their To-drink list",
+        "club.rx.want_wine": "{names} saved your {wine} to their To-drink list",
         "club.to.running": (
             "{host} is running a taste-off: {title}. Score 1–5."
         ),
@@ -60,6 +75,22 @@ MESSAGES = {
         ),
         "club.to.reopen": "Reopen scoring",
         "club.global.kicked": "You've been removed from {name}.",
+        "club.notify.head_quiet": "Good morning. Here is what you missed.",
+        "club.notify.head_recap": "Your club recap.",
+        "club.notify.replies": "{n} new replies on {line}",
+        "club.notify.more": "+{n} more, open /club",
+        "club.notify.tasteoff_open": "\U0001F3C6 Taste-off {title} is open",
+        "club.notify.tasteoff_closed": "\U0001F3C6 Taste-off {title} has closed",
+        "club.notify.crossing": (
+            "{club} now has {n} members, so you'll get a daily recap "
+            "instead of every bottle."
+        ),
+        "club.notify.btn_keep": "Keep every update",
+        "club.notify.btn_recap": "Recap is fine",
+        "club.notify.btn_score": "Score",
+        "club.notify.btn_change": "Change",
+        "club.notify.btn": "Notifications",
+        "club.notify.quiet_line": "Quiet hours {span} ({city} time).",
         "club.global.frozen": "This club is paused.",
     },
     "af": {
@@ -102,7 +133,22 @@ MESSAGES = {
         "club.end.cancel": "Kanselleer stemming",
         "club.comment.btn": "Sê iets",
         "club.comment.more": "en nog {n}",
+        "club.thread.btn_reply": "Reply",
+        "club.thread.btn_mute": "Mute thread",
+        "club.thread.btn_unmute": "Unmute thread",
+        "club.thread.about": "Oor: {line}",
+        "club.thread.btn_view": "Thread ({n})",
+        "club.thread.more": "+{n} meer. Tik Thread om almal te lees.",
         "club.td.btn": "To-drink-lys",
+        "club.ask.line": "{name} vra die klub: {text}",
+        "club.ask.sent_copy": "Gestuur na {club}: {text}",
+        "club.rx.ping_ask": "{names} het {emojis} gestuur op jou vraag",
+        "club.rx.want_btn": "Want this",
+        "club.rx.and": "en",
+        "club.rx.others": "{n} ander",
+        "club.rx.ping": "{names} het {emojis} gestuur op jou {wine}",
+        "club.rx.want_it": "{names} het dit op hul To-drink-lys gesit",
+        "club.rx.want_wine": "{names} het jou {wine} op hul To-drink-lys gesit",
         "club.to.running": (
             "{host} hou 'n proe: {title}. Tel 1–5."
         ),
@@ -115,6 +161,22 @@ MESSAGES = {
         ),
         "club.to.reopen": "Heropen telling",
         "club.global.kicked": "Jy is uit {name} verwyder.",
+        "club.notify.head_quiet": "Goeie more. Hier is wat jy gemis het.",
+        "club.notify.head_recap": "Jou klub-opsomming.",
+        "club.notify.replies": "{n} nuwe antwoorde op {line}",
+        "club.notify.more": "+{n} meer, maak /club oop",
+        "club.notify.tasteoff_open": "\U0001F3C6 Proe-kompetisie {title} is oop",
+        "club.notify.tasteoff_closed": "\U0001F3C6 Proe-kompetisie {title} het gesluit",
+        "club.notify.crossing": (
+            "{club} het nou {n} lede, so jy kry 'n daaglikse opsomming "
+            "in plaas van elke bottel."
+        ),
+        "club.notify.btn_keep": "Keep every update",
+        "club.notify.btn_recap": "Recap is fine",
+        "club.notify.btn_score": "Score",
+        "club.notify.btn_change": "Change",
+        "club.notify.btn": "Notifications",
+        "club.notify.quiet_line": "Stil ure {span} ({city}-tyd).",
         "club.global.frozen": "Hierdie klub is gepouseer.",
     },
 }
@@ -152,7 +214,15 @@ def wine_phrase(vintage, wine_name) -> str:
     return name
 
 
-def opened_text(locale, actor_name, vintage, wine_name, vote="") -> str:
+def note_quote(note) -> str:
+    """The member's own words as a quoted line (escaped), or ''."""
+    note = " ".join(str(note or "").split())
+    if not note:
+        return ""
+    return "\u201c" + html.escape(note) + "\u201d"
+
+
+def opened_text(locale, actor_name, vintage, wine_name, vote="", note="") -> str:
     phrase = wine_phrase(vintage, wine_name)
     body = t(
         locale, "club.feed.opened",
@@ -163,6 +233,9 @@ def opened_text(locale, actor_name, vintage, wine_name, vote="") -> str:
     line = f"\U0001F377 {body}"
     if glyph:
         line = f"{line} {glyph}"
+    quote = note_quote(note)
+    if quote:
+        line = f"{line}\n{quote}"
     return line
 
 
@@ -175,9 +248,11 @@ def put_back_text(locale, actor_name, vintage, wine_name) -> str:
     return " ".join(body.split())
 
 
-def comment_card_text(locale, actor_name, vintage, wine_name, vote, comments) -> str:
+def comment_card_text(
+    locale, actor_name, vintage, wine_name, vote, comments, note="",
+) -> str:
     """Opened card plus up to 5 escaped comments. `comments` is [(name, text), ...]."""
-    head = opened_text(locale, actor_name, vintage, wine_name, vote)
+    head = opened_text(locale, actor_name, vintage, wine_name, vote, note=note)
     if not comments:
         return head
     lines = [head, ""]

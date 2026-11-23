@@ -18,6 +18,9 @@ DISMANTLE_TTL = timedelta(hours=48)
 CLUB_INVITE_MAX_USES = 20
 
 
+_UNSET = object()
+
+
 class Club(models.Model):
     KIND_PRIVATE = "private"
     KIND_GLOBAL = "global"
@@ -44,6 +47,8 @@ class Club(models.Model):
     previous_cellar_visibility = models.CharField(max_length=8, blank=True, default="")
     previous_badges_visible = models.BooleanField(null=True, blank=True)
     frozen = models.BooleanField(default=False)
+    # Set once the "now 15 members" recap-switch message has gone out.
+    notify_crossing_sent_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         constraints = [
@@ -90,6 +95,19 @@ class ClubMembership(models.Model):
         related_name="club_memberships",
     )
     feed_muted = models.BooleanField(default=False)
+    # null = "default" (instant, or digest at DIGEST_MEMBERS). feed_muted is
+    # kept in sync with notify_mode == muted in save(); see club/notify.py.
+    NOTIFY_INSTANT = "instant"
+    NOTIFY_DIGEST = "digest"
+    NOTIFY_MUTED = "muted"
+    NOTIFY_MODES = [
+        (NOTIFY_INSTANT, "Every update"),
+        (NOTIFY_DIGEST, "Daily recap"),
+        (NOTIFY_MUTED, "Muted"),
+    ]
+    notify_mode = models.CharField(
+        max_length=8, choices=NOTIFY_MODES, null=True, blank=True, default=None,
+    )
     accepted_sharing_version = models.PositiveIntegerField(default=1)
     is_last_used = models.BooleanField(default=False)
     created = models.DateTimeField(auto_now_add=True)
@@ -115,6 +133,38 @@ class ClubMembership(models.Model):
 
     def __str__(self):
         return f"{self.user} -> {self.club} ({self.role})"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Read from __dict__: touching a deferred field here (.only()) would
+        # trigger a query per instance and recurse back into __init__.
+        self._synced = (
+            self.__dict__.get("feed_muted", _UNSET),
+            self.__dict__.get("notify_mode", _UNSET),
+        )
+
+    def save(self, *args, **kwargs):
+        """One source of truth: notify_mode. feed_muted follows it, and an
+        old-style write to feed_muted alone (the mute button, old code) is
+        mapped onto notify_mode: muted, or back to the default (None) on
+        unmute."""
+        old_muted, old_mode = getattr(self, "_synced", (_UNSET, _UNSET))
+        if _UNSET in (old_muted, old_mode):
+            pass  # loaded with deferred fields: no change to compare against
+        elif self.notify_mode != old_mode:
+            self.feed_muted = self.notify_mode == self.NOTIFY_MUTED
+        elif self.feed_muted != old_muted:
+            self.notify_mode = self.NOTIFY_MUTED if self.feed_muted else None
+        elif self.notify_mode == self.NOTIFY_MUTED and not self.feed_muted:
+            self.feed_muted = True
+        uf = kwargs.get("update_fields")
+        if uf is not None:
+            uf = set(uf)
+            if uf & {"feed_muted", "notify_mode"}:
+                uf |= {"feed_muted", "notify_mode"}
+            kwargs["update_fields"] = list(uf)
+        super().save(*args, **kwargs)
+        self._synced = (self.feed_muted, self.notify_mode)
 
 
 class ClubInvite(models.Model):
@@ -162,6 +212,7 @@ class ClubEvent(models.Model):
     KIND_TASTEOFF = "tasteoff"
     KIND_COMMENT = "comment"
     KIND_STAFF_NOTE = "staff_note"
+    KIND_ASK = "ask"
     KIND = [
         (KIND_OPENED, "Opened"),
         (KIND_VOTED, "Voted"),
@@ -171,6 +222,7 @@ class ClubEvent(models.Model):
         (KIND_TASTEOFF, "Taste-off"),
         (KIND_COMMENT, "Comment"),
         (KIND_STAFF_NOTE, "Staff note"),
+        (KIND_ASK, "Ask the club"),
     ]
     club = models.ForeignKey(Club, on_delete=models.CASCADE, related_name="events")
     actor = models.ForeignKey(
@@ -189,6 +241,10 @@ class ClubEvent(models.Model):
     payload = models.JSONField(default=dict, blank=True)
     created = models.DateTimeField(auto_now_add=True)
     retracted_at = models.DateTimeField(null=True, blank=True)
+    # feature_tasting_notes: the actor's own words about the bottle (opened
+    # events only). Cleared when the open is retracted.
+    note = models.TextField(blank=True, default="")
+    note_added_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         indexes = [
@@ -213,18 +269,163 @@ class ClubEvent(models.Model):
 
 
 class ClubEventDelivery(models.Model):
+    """Every bot message about an event: the card, and reply pings.
+
+    A swipe-reply to any of them (chat_id, message_id) maps back to the event.
+    """
+
+    KIND_CARD = "card"
+    KIND_PING = "ping"
+    KIND_ASK = "ask"
+    # A morning summary / recap message: no event, only there so a swipe-reply
+    # to it is recognised (and answered with a hint) instead of reaching chat.
+    KIND_SUMMARY = "summary"
+    KIND = [
+        (KIND_CARD, "Card"),
+        (KIND_PING, "Ping"),
+        (KIND_ASK, "Ask"),
+        (KIND_SUMMARY, "Summary"),
+    ]
     event = models.ForeignKey(
         ClubEvent, on_delete=models.CASCADE, related_name="deliveries",
+        null=True, blank=True,
     )
+    kind = models.CharField(max_length=8, choices=KIND, default=KIND_CARD)
     chat_id = models.CharField(max_length=50)
     message_id = models.BigIntegerField(null=True, blank=True)
     sent_at = models.DateTimeField(auto_now_add=True)
     error = models.CharField(max_length=200, blank=True, default="")
 
     class Meta:
+        indexes = [
+            models.Index(
+                fields=["chat_id", "message_id"], name="clubdelivery_msg_idx",
+            ),
+        ]
         constraints = [
             models.UniqueConstraint(
-                fields=["event", "chat_id"], name="unique_event_chat"
+                fields=["event", "chat_id"],
+                condition=models.Q(kind="card"),
+                name="unique_event_chat",
+            ),
+        ]
+
+
+class ClubThreadMute(models.Model):
+    """A member who muted one event's thread: no reply pings for it."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="+",
+    )
+    event = models.ForeignKey(
+        ClubEvent, on_delete=models.CASCADE, related_name="thread_mutes",
+    )
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "event"], name="unique_thread_mute",
+            ),
+        ]
+
+
+class ClubNotice(models.Model):
+    """Outbox: one pending ping per (recipient, event), flushed by Celery.
+
+    Replies on the same event inside the batch window merge into one row
+    (payload["comment_ids"]) and go out as one combined ping.
+    """
+
+    KIND_COMMENT = "comment"
+    KIND_REACTION = "reaction"
+    KIND_CARD = "card"
+    KIND_ASK = "ask"
+    KIND_TASTEOFF = "tasteoff"
+    KIND_CROSSING = "crossing"
+    KIND = [
+        (KIND_COMMENT, "Comment"),
+        (KIND_REACTION, "Reaction"),
+        (KIND_CARD, "Feed card"),
+        (KIND_ASK, "Ask"),
+        (KIND_TASTEOFF, "Taste-off"),
+        (KIND_CROSSING, "Recap switch"),
+    ]
+    # Held rows wait for the summary task instead of the instant flush.
+    HOLD_QUIET = "quiet"
+    HOLD_RECAP = "recap"
+    HOLD = [(HOLD_QUIET, "Quiet hours"), (HOLD_RECAP, "Daily recap")]
+    recipient = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="+",
+    )
+    club = models.ForeignKey(
+        Club, on_delete=models.CASCADE, related_name="notices",
+    )
+    event = models.ForeignKey(
+        ClubEvent, on_delete=models.CASCADE, related_name="notices",
+        null=True, blank=True,
+    )
+    kind = models.CharField(max_length=12, choices=KIND, default=KIND_COMMENT)
+    hold = models.CharField(max_length=6, choices=HOLD, blank=True, default="")
+    dedupe_key = models.CharField(max_length=120, unique=True)
+    payload = models.JSONField(default=dict, blank=True)
+    created = models.DateTimeField(auto_now_add=True)
+    due_at = models.DateTimeField()
+    sent_at = models.DateTimeField(null=True, blank=True)
+    error = models.CharField(max_length=200, blank=True, default="")
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["sent_at", "due_at"], name="clubnotice_due_idx"),
+            models.Index(
+                fields=["recipient", "event", "sent_at"],
+                name="clubnotice_rcpt_idx",
+            ),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["recipient", "event", "kind"],
+                condition=models.Q(sent_at__isnull=True),
+                name="clubnotice_one_pending",
+            ),
+        ]
+
+
+class ClubReaction(models.Model):
+    """One member's emoji reaction on a club event (toggle: row = on)."""
+
+    event = models.ForeignKey(
+        ClubEvent, on_delete=models.CASCADE, related_name="reactions",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="+",
+    )
+    emoji = models.CharField(max_length=8)
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["event", "user", "emoji"], name="unique_club_reaction",
+            ),
+        ]
+
+
+class ClubWant(models.Model):
+    """A member tapped Want this on an opened-wine card (saved to their list)."""
+
+    event = models.ForeignKey(
+        ClubEvent, on_delete=models.CASCADE, related_name="wants",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="+",
+    )
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["event", "user"], name="unique_club_want",
             ),
         ]
 

@@ -9,7 +9,7 @@
 | 1 | Household invite TTL | **30 days**, still one-use. Club invites **30 days**, `max_uses=20`. | 0 / 2 |
 | 2 | Taste-off scale | Feed stays 👎/—/👍. Taste-off **1–5**. Do not use `Wine.rating` 0–10. | 3 |
 | 6 | Shared household / veto | No veto. Nameless heads-up once. No club or member names. Sharing only inside clubs. Collapse peek per household. | 2 |
-| 7 | Digest vs per-open | Per-open until a club has **15 members**, then offer a daily digest (separate flag later). **Do not build digest in phase 2.** | 2+ |
+| 7 | Digest vs per-open | **Decided (P4, flag `feature_club_notify`).** Per-club mode: every update / daily recap / muted. Default is every update, or the daily recap once a club has **15 members** (members who never chose get one EN/AF message with Keep / Recap is fine). An explicit choice always wins; `feed_muted` is kept in sync with muted. Quiet hours 22:00-08:00 local by default, held items arrive as one morning summary. | 4 |
 | 11 | Destroying a club | Last member leave **deletes** the club and events. Owner with others who wants to **leave** must hand over. Owner who wants to **end the club** proposes a dismantle; that requires a **unanimous** member vote (flow in [phase-2-clubs.md](phase-2-clubs.md) J2.10). Not unanimous (anyone votes no, or anyone does not vote before expiry) → club stays; owner can only leave via handover. | 2 |
 | 15 | Lists household- vs user-scoped | **User-scoped.** Each person owns their own To-drink list. A household partner does **not** see it. Move-to-cellar still writes stock on the actor’s current household. Club lists (phase 3) stay club-shared, not personal. | 1 |
 | 5 | Owner widens sharing | DM + Stay/Leave. New level only after Stay (`accepted_sharing_version`). Unacked members stay at **previous** level. Narrowing applies immediately and auto-acks. | 2 |
@@ -34,6 +34,6 @@
 | 14 | To-drink if already in stock | **Allow.** Unique open `(list, wine_id)`. | 1 |
 | 18 | Undo restore vs list | Phase 1: move-to-cellar is one-way on the list row. Do not auto-restore To-drink on stock undo. | 1 |
 | 21 | `WineList.club_id` without FK in phase 1 | Integer column now; real FK in phase 3. Avoids importing `club` before it exists. | 1 / 3 |
-| 22 | Comment edits to old DMs | Edit original delivery if ≤3 comments and `message_id` known; otherwise only `/club feed`. | 3 |
+| 22 | Comment edits to old DMs | Edit original delivery if ≤3 comments and `message_id` known; otherwise only `/club feed`. **Superseded when `feature_club_threads` is on:** the card is never edited; each comment pings members as a threaded reply and the full thread is in `/club feed` (see phase-5-social-redesign.md). | 3 / 5 |
 
 When a recommended answer is implemented, tick it in the phase PR description (`Implements open-questions #1, #12`) so review can see the defaults landing.

@@ -27,8 +27,10 @@ from wine_cellar.apps.club.models import (
     ClubEvent,
     ClubEventDelivery,
     ClubMembership,
+    ClubNotice,
     TasteOff,
 )
+from wine_cellar.apps.club.notes import visible_note
 from wine_cellar.apps.scanner.flags import flag_on
 from wine_cellar.apps.scanner.models import Household, TelegramUser
 from wine_cellar.apps.storage.models import StorageItem
@@ -68,9 +70,57 @@ def _send(
     )
 
 
+@shared_task(name="flush_club_notices")
+def flush_club_notices():
+    """Send every due ClubNotice (batched comment pings). Never raises."""
+    from wine_cellar.apps.club.relay import deliver_stuck_asks
+    from wine_cellar.apps.club.threads import flush_due_notices
+
+    try:
+        sent = flush_due_notices()
+    except Exception:  # pragma: no cover - last-resort guard
+        logger.exception("flush_club_notices failed")
+        sent = 0
+    try:
+        deliver_stuck_asks()  # a lost deliver_club_ask countdown
+    except Exception:  # pragma: no cover - last-resort guard
+        logger.exception("deliver_stuck_asks failed")
+    return sent
+
+
+@shared_task(name="send_club_summaries")
+def send_club_summaries():
+    """Beat (every minute): morning summaries and daily recaps. One message
+    per member holding every due row; idempotent (rows are stamped sent
+    before posting). Never raises."""
+    from wine_cellar.apps.club.notify import send_due_summaries
+
+    try:
+        return send_due_summaries()
+    except Exception:  # pragma: no cover - last-resort guard
+        logger.exception("send_club_summaries failed")
+        return 0
+
+
+@shared_task(name="club_notify_crossing")
+def club_notify_crossing(club_id):
+    """A join took the club to 15 members: one recap-switch message each."""
+    from wine_cellar.apps.club.notify import announce_crossing
+
+    try:
+        return announce_crossing(club_id)
+    except Exception:  # pragma: no cover - last-resort guard
+        logger.exception("club_notify_crossing failed")
+        return 0
+
+
 def _opened_markup(event, loc):
     if event.kind != ClubEvent.KIND_OPENED or event.retracted:
         return None
+    from wine_cellar.apps.club.reactions import reaction_rows
+
+    rows = list(reaction_rows(event))
+    reactions = bool(rows)
     row = []
     if flag_on("feature_club_comments"):
         row.append(
@@ -80,15 +130,108 @@ def _opened_markup(event, loc):
             }
         )
     if flag_on("feature_lists"):
+        # With reactions on, Want this replaces the To-drink button.
         row.append(
             {
-                "text": t(loc, "club.td.btn"),
-                "callback_data": f"cl:td:{event.id}",
+                "text": t(loc, "club.rx.want_btn" if reactions else "club.td.btn"),
+                "callback_data": (
+                    f"cl:wt:{event.id}" if reactions else f"cl:td:{event.id}"
+                ),
             }
         )
-    if not row:
+    if row:
+        rows.append(row)
+    if not rows:
         return None
-    return {"inline_keyboard": [row]}
+    return {"inline_keyboard": rows}
+
+
+def _edit_markup(token, chat_id, message_id, markup) -> str:
+    """editMessageReplyMarkup. '' when fine or harmless, else an error."""
+    import requests
+
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "reply_markup": markup or {"inline_keyboard": []},
+    }
+    url = f"https://api.telegram.org/bot{token}/editMessageReplyMarkup"
+    try:
+        response = requests.post(url, json=payload, timeout=15)
+    except requests.RequestException as exc:
+        return f"network:{type(exc).__name__}"
+    if response.status_code == 200:
+        return ""
+    try:
+        description = str((response.json() or {}).get("description") or "")
+    except ValueError:
+        description = ""
+    low = description.lower()
+    if "message is not modified" in low or "message to edit not found" in low:
+        return ""
+    return f"{response.status_code}:{description}"[:200]
+
+
+def _ask_card_markup(event, loc):
+    from wine_cellar.apps.club.relay import ask_markup
+
+    return ask_markup(event, loc)
+
+
+@shared_task(name="deliver_club_ask")
+def deliver_club_ask(event_id):
+    """Send an ask to the club once its Undo window has passed."""
+    from wine_cellar.apps.club.relay import deliver_ask
+
+    try:
+        return deliver_ask(event_id)
+    except Exception:  # pragma: no cover - last-resort guard
+        logger.exception("deliver_club_ask failed")
+        return 0
+
+
+@shared_task(name="refresh_event_reactions")
+def refresh_event_reactions(event_id):
+    """One debounced pass: put the current counts on members' card copies."""
+    from wine_cellar.apps.club.reactions import clear_refresh_key, reactions_enabled
+
+    clear_refresh_key(event_id)
+    if not reactions_enabled():
+        return 0
+    event = (
+        ClubEvent.objects.select_related("club", "actor").filter(id=event_id).first()
+    )
+    if event is None or event.retracted or event.kind not in (
+        ClubEvent.KIND_OPENED, ClubEvent.KIND_ASK,
+    ):
+        return 0
+    token = _bot_token()
+    if not token:
+        return 0
+    edited = 0
+    is_ask = event.kind == ClubEvent.KIND_ASK
+    cards = event.deliveries.filter(
+        kind=ClubEventDelivery.KIND_ASK if is_ask else ClubEventDelivery.KIND_CARD,
+        message_id__isnull=False,
+    )
+    for delivery in cards:
+        tu = TelegramUser.objects.filter(
+            chat_id=delivery.chat_id, is_active=True,
+        ).select_related("user").first()
+        loc = locale_for_user(tu.user) if tu is not None else "en"
+        try:
+            error = _edit_markup(
+                token, delivery.chat_id, delivery.message_id,
+                _ask_card_markup(event, loc) if is_ask else _opened_markup(event, loc),
+            )
+        except Exception:
+            logger.warning("reaction edit failed", exc_info=True)
+            continue
+        if error:
+            logger.info("reaction edit %s: %s", delivery.chat_id, error)
+        else:
+            edited += 1
+    return edited
 
 
 @shared_task(name="publish_club_event")
@@ -148,6 +291,8 @@ def publish_club_event(item_id, actor_id, kind):
                 event.producer = producer
                 event.wine_id = wine_id
                 event.vote = vote
+                event.note = ""  # a re-open is a new open: a new note
+                event.note_added_at = None
                 event.created = timezone.now()
                 event.save()
                 deliver_club_event.delay(event.id)
@@ -167,8 +312,53 @@ def publish_club_event(item_id, actor_id, kind):
             if event is None or event.retracted_at:
                 continue
             event.retracted_at = timezone.now()
-            event.save(update_fields=["retracted_at"])
+            event.note = ""  # the note goes with the open
+            event.note_added_at = None
+            event.save(update_fields=["retracted_at", "note", "note_added_at"])
             deliver_club_event.delay(event.id)
+
+
+def _card_policy(notify, event, membership, chat_id) -> str:
+    """'skip' or 'send' for one chat's feed card under feature_club_notify.
+
+    This task re-runs for vote changes, retracts, restores and notes, so a
+    chat that already has the card gets an in-place (silent) edit, whatever
+    the quiet hours say. A chat without one (a member's second chat, or the
+    first card) goes through decide(). A member who has the card only as a
+    held summary line never gets a second push (the summary reads the event
+    as it now is), unless that line was dropped while the bottle was put back
+    and the event has since been restored: then it is a new card."""
+    if ClubEventDelivery.objects.filter(
+        event=event, kind=ClubEventDelivery.KIND_CARD,
+        chat_id=chat_id, message_id__isnull=False,
+    ).exists():
+        return "send"
+    key = f"card:{event.id}:{membership.user_id}"
+    held = ClubNotice.objects.filter(dedupe_key=key).first()
+    if held is not None and held.hold:
+        if held.sent_at is not None and event.created > held.created:
+            # Summarised in an earlier life of this event (put back, then
+            # restored, which re-stamps created): the line was dropped.
+            held.delete()
+        else:
+            return "skip"  # waiting, or already summarised
+    if event.retracted:
+        return "skip"  # never saw the bottle: no "put back" either
+    # Joins skip the digest and mute-of-thread but still wait out quiet hours.
+    decision = notify.decide(
+        membership.user_id, event.club_id,
+        event=None if event.kind == ClubEvent.KIND_JOINED else event,
+        membership=membership, join=event.kind == ClubEvent.KIND_JOINED,
+    )
+    if decision.action == notify.DROP:
+        return "skip"
+    if decision.action != notify.SEND:
+        notify.hold_notice(
+            membership.user_id, event.club, event, ClubNotice.KIND_CARD,
+            decision, key,
+        )
+        return "skip"
+    return "send"
 
 
 @shared_task(name="deliver_club_event")
@@ -182,7 +372,10 @@ def deliver_club_event(event_id):
     )
     if event is None:
         return
-    if event.kind in (ClubEvent.KIND_TASTEOFF, ClubEvent.KIND_COMMENT):
+    if event.kind in (
+        ClubEvent.KIND_TASTEOFF, ClubEvent.KIND_COMMENT, ClubEvent.KIND_ASK,
+    ):
+        # Asks go out through deliver_club_ask (delayed, with Undo).
         return
     if event.club.frozen and event.kind != ClubEvent.KIND_STAFF_NOTE:
         return
@@ -196,6 +389,9 @@ def deliver_club_event(event_id):
         .select_related("user")
     )
     seen = set()
+    from wine_cellar.apps.club import notify
+
+    policy_on = notify.notify_enabled()
     for membership in members:
         chats = TelegramUser.objects.filter(
             user=membership.user, is_active=True,
@@ -204,6 +400,9 @@ def deliver_club_event(event_id):
             if tu.chat_id in actor_chats or tu.chat_id in seen:
                 continue
             seen.add(tu.chat_id)
+            if policy_on and membership.user_id != event.actor_id:
+                if _card_policy(notify, event, membership, tu.chat_id) == "skip":
+                    continue
             loc = locale_for_user(membership.user)
             actor = ""
             if event.actor_id:
@@ -219,16 +418,20 @@ def deliver_club_event(event_id):
                     f"\U0001F30D {html_mod.escape(event.club.name)}\n\n{note}"
                 )
             elif event.kind == ClubEvent.KIND_JOINED:
-                text = t(loc, "club.feed.joined", name=actor)
+                text = t(loc, "club.feed.joined", name=escape(actor))
             elif event.retracted:
-                text = put_back_text(loc, actor, event.vintage, event.wine_name)
+                text = put_back_text(
+                    loc, escape(actor), event.vintage, escape(event.wine_name),
+                )
             else:
                 text = opened_text(
-                    loc, actor, event.vintage, event.wine_name, event.vote,
+                    loc, escape(actor), event.vintage, escape(event.wine_name),
+                    event.vote,
+                    note=visible_note(event),
                 )
                 markup = _opened_markup(event, loc)
             delivery = ClubEventDelivery.objects.filter(
-                event=event, chat_id=tu.chat_id,
+                event=event, chat_id=tu.chat_id, kind=ClubEventDelivery.KIND_CARD,
             ).first()
             message_id = delivery.message_id if delivery else None
             result = _send(
@@ -257,6 +460,7 @@ def deliver_club_event(event_id):
                 except IntegrityError:
                     ClubEventDelivery.objects.filter(
                         event=event, chat_id=tu.chat_id,
+                        kind=ClubEventDelivery.KIND_CARD,
                     ).update(message_id=new_mid, error=error)
             else:
                 delivery.message_id = new_mid
@@ -324,7 +528,7 @@ def club_widen_notice(club_id):
         text = t(
             loc,
             "club.widen.body",
-            club=club.name,
+            club=escape(club.name),
             level=_level_label(loc, club.cellar_visibility),
             old=_level_label(loc, club.previous_cellar_visibility or "none"),
         )
@@ -352,8 +556,8 @@ def _vote_status_text(vote, locale, club_name=None):
     from wine_cellar.apps.club.services import serialize_vote
 
     body = serialize_vote(vote)
-    name = club_name or (vote.club.name if vote.club_id else "")
-    waiting = ", ".join(body["waiting_names"]) or "—"
+    name = escape(club_name or (vote.club.name if vote.club_id else ""))
+    waiting = ", ".join(escape(n) for n in body["waiting_names"]) or "—"
     when = format_until(vote.expires_at) or body.get("expires_at") or ""
     return t(
         locale,
@@ -404,7 +608,7 @@ def deliver_dismantle_ballots(vote_id):
         else:
             text = t(
                 loc, "club.end.ballot",
-                name=proposer_name, club=club_name,
+                name=escape(proposer_name), club=escape(club_name),
             )
             markup = {
                 "inline_keyboard": [[
@@ -511,7 +715,9 @@ def notify_dismantle_resolved(
             continue
         user = User.objects.filter(id=user_id).first() if user_id else None
         loc = locale_for_user(user) if user is not None else "en"
-        text = t(loc, key, name=rejector_name, club=club_name)
+        text = t(
+            loc, key, name=escape(rejector_name), club=escape(club_name),
+        )
         _send(
             token, chat_id, text,
             purpose="club_dismantle_done",
@@ -544,16 +750,74 @@ def _comment_pairs(event):
     return pairs
 
 
+@shared_task(name="refresh_event_note")
+def refresh_event_note(event_id):
+    """A tasting note was added, changed or removed: edit the delivered card
+    copies in place (silent). Only existing cards are touched; nobody gets a
+    new message because of a note."""
+    from wine_cellar.apps.club.notes import clear_refresh_key, notes_enabled
+
+    clear_refresh_key(event_id)
+    if not notes_enabled():
+        return 0
+    event = (
+        ClubEvent.objects.select_related("club", "actor").filter(id=event_id).first()
+    )
+    if event is None or event.retracted or event.kind != ClubEvent.KIND_OPENED:
+        return 0
+    token = _bot_token()
+    if not token:
+        return 0
+    from wine_cellar.apps.club.services import display_name
+
+    actor = display_name(event.actor) if event.actor_id else ""
+    comments = []
+    if flag_on("feature_club_comments") and not flag_on("feature_club_threads"):
+        comments = _comment_pairs(event)
+        if len(comments) > 3:
+            comments = []  # the old edit-the-card path stops showing them
+    edited = 0
+    cards = event.deliveries.filter(
+        kind=ClubEventDelivery.KIND_CARD, message_id__isnull=False,
+    )
+    for delivery in cards:
+        tu = TelegramUser.objects.filter(
+            chat_id=delivery.chat_id, is_active=True,
+        ).select_related("user").first()
+        loc = locale_for_user(tu.user) if tu is not None else "en"
+        text = comment_card_text(
+            loc, escape(actor), event.vintage, escape(event.wine_name),
+            event.vote, comments,
+            note=visible_note(event),
+        )
+        try:
+            result = _send(
+                token, delivery.chat_id, text,
+                purpose="club_note",
+                reply_markup=_opened_markup(event, loc),
+                message_id=delivery.message_id,
+            )
+        except Exception:
+            logger.warning("note edit failed", exc_info=True)
+            continue
+        if result not in (False, None):
+            edited += 1
+    return edited
+
+
 @shared_task(name="refresh_event_comment_card")
 def refresh_event_comment_card(event_id):
     if not flag_on("feature_clubs") or not flag_on("feature_club_comments"):
+        return
+    if flag_on("feature_club_threads"):
+        # Threads replace the edit-the-card path: comments ping instead.
         return
     event = (
         ClubEvent.objects.select_related("club", "actor")
         .filter(id=event_id)
         .first()
     )
-    if event is None or event.retracted:
+    if event is None or event.retracted or event.kind != ClubEvent.KIND_OPENED:
         return
     comments = _comment_pairs(event)
     if len(comments) > 3:
@@ -564,13 +828,16 @@ def refresh_event_comment_card(event_id):
     from wine_cellar.apps.club.services import display_name
 
     actor = display_name(event.actor) if event.actor_id else ""
-    for delivery in event.deliveries.exclude(message_id__isnull=True):
+    cards = event.deliveries.filter(kind=ClubEventDelivery.KIND_CARD)
+    for delivery in cards.exclude(message_id__isnull=True):
         tu = TelegramUser.objects.filter(
             chat_id=delivery.chat_id, is_active=True,
         ).select_related("user").first()
         loc = locale_for_user(tu.user) if tu is not None else "en"
         text = comment_card_text(
-            loc, actor, event.vintage, event.wine_name, event.vote, comments,
+            loc, escape(actor), event.vintage, escape(event.wine_name),
+            event.vote, comments,
+            note=visible_note(event),
         )
         markup = _opened_markup(event, loc)
         _send(
@@ -633,7 +900,27 @@ def deliver_tasteoff_open(tasteoff_id):
         .select_related("user")
     )
     seen = set()
+    from wine_cellar.apps.club import notify
+
+    policy_on = notify.notify_enabled()
     for membership in members:
+        if policy_on and membership.user_id != tasteoff.host_id:
+            decision = notify.decide(
+                membership.user_id, tasteoff.club_id, membership=membership,
+            )
+            if decision.action == notify.DROP:
+                continue
+            if decision.action != notify.SEND:
+                notify.hold_notice(
+                    membership.user_id, tasteoff.club, None,
+                    ClubNotice.KIND_TASTEOFF, decision,
+                    f"to:{tasteoff.id}:{membership.user_id}:open",
+                    {
+                        "tasteoff_id": tasteoff.id, "phase": "open",
+                        "title": tasteoff.title,
+                    },
+                )
+                continue
         for tu in TelegramUser.objects.filter(user=membership.user, is_active=True):
             if tu.chat_id in seen:
                 continue
@@ -691,7 +978,27 @@ def deliver_tasteoff_closed(tasteoff_id):
         club=tasteoff.club, feed_muted=False,
     ).select_related("user")
     seen = set()
+    from wine_cellar.apps.club import notify
+
+    policy_on = notify.notify_enabled()
     for membership in members:
+        if policy_on and membership.user_id != tasteoff.host_id:
+            decision = notify.decide(
+                membership.user_id, tasteoff.club_id, membership=membership,
+            )
+            if decision.action == notify.DROP:
+                continue
+            if decision.action != notify.SEND:
+                notify.hold_notice(
+                    membership.user_id, tasteoff.club, None,
+                    ClubNotice.KIND_TASTEOFF, decision,
+                    f"to:{tasteoff.id}:{membership.user_id}:closed",
+                    {
+                        "tasteoff_id": tasteoff.id, "phase": "closed",
+                        "title": tasteoff.title,
+                    },
+                )
+                continue
         for tu in TelegramUser.objects.filter(user=membership.user, is_active=True):
             if tu.chat_id in seen:
                 continue
@@ -724,7 +1031,7 @@ def notify_kicked(club_name, chat_ids):
         ).select_related("user").first()
         loc = locale_for_user(tu.user) if tu is not None else "en"
         _send(
-            token, chat_id, t(loc, "club.global.kicked", name=club_name),
+            token, chat_id, t(loc, "club.global.kicked", name=escape(club_name)),
             purpose="club_kicked",
         )
 

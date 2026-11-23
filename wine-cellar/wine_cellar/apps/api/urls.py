@@ -152,6 +152,11 @@ urlpatterns = [
         name="api-club-membership",
     ),
     path(
+        "clubs/<int:pk>/notify/",
+        club_views.ClubNotifyView.as_view(),
+        name="api-club-notify",
+    ),
+    path(
         "clubs/<int:pk>/leave/",
         club_views.ClubLeaveView.as_view(),
         name="api-club-leave",
@@ -205,6 +210,51 @@ urlpatterns = [
         "clubs/<int:pk>/dismantle/<int:vote_id>/cancel/",
         club_views.ClubDismantleCancelView.as_view(),
         name="api-club-dismantle-cancel",
+    ),
+    path(
+        "clubs/threads/resolve/",
+        social_views.ClubThreadResolveView.as_view(),
+        name="api-club-thread-resolve",
+    ),
+    path(
+        "clubs/notes/offer/",
+        social_views.ClubNoteOfferView.as_view(),
+        name="api-club-note-offer",
+    ),
+    path(
+        "clubs/notes/",
+        social_views.ClubNoteView.as_view(),
+        name="api-club-note",
+    ),
+    path(
+        "clubs/events/<int:event_id>/mute/",
+        social_views.ClubThreadMuteView.as_view(),
+        name="api-club-thread-mute",
+    ),
+    path(
+        "clubs/events/<int:event_id>/react/",
+        social_views.ClubEventReactView.as_view(),
+        name="api-club-event-react",
+    ),
+    path(
+        "clubs/events/<int:event_id>/want/",
+        social_views.ClubEventWantView.as_view(),
+        name="api-club-event-want",
+    ),
+    path(
+        "clubs/<int:pk>/ask/",
+        social_views.ClubRelayAskView.as_view(),
+        name="api-club-ask",
+    ),
+    path(
+        "clubs/asks/<int:event_id>/undo/",
+        social_views.ClubAskUndoView.as_view(),
+        name="api-club-ask-undo",
+    ),
+    path(
+        "clubs/asks/<int:event_id>/copy/",
+        social_views.ClubAskCopyView.as_view(),
+        name="api-club-ask-copy",
     ),
     path(
         "clubs/<int:pk>/events/<int:event_id>/comments/",

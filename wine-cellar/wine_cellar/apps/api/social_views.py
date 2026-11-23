@@ -17,17 +17,57 @@ from wine_cellar.apps.api.views import ScannerAPIView
 from wine_cellar.apps.club.models import (
     ClubComment,
     ClubEvent,
+    ClubEventDelivery,
     ClubMembership,
     TasteOff,
     TasteOffBottle,
     TasteOffScore,
 )
+from wine_cellar.apps.club.notes import (
+    NOTE_MAX,
+    SAVE_MAX,
+    SAVE_WINDOW,
+    can_offer,
+    notes_enabled,
+    save_allowed,
+    set_note_for_event,
+    set_note_for_item,
+    wine_label,
+)
 from wine_cellar.apps.club.peek import effective_visibility, tighter_visibility
+from wine_cellar.apps.club.reactions import (
+    PALETTE,
+    counts_for,
+    kind_reactable,
+    mine_for,
+    reactions_enabled,
+    record_want,
+    toggle_reaction,
+)
+from wine_cellar.apps.club.relay import (
+    ASK_MAX,
+    RATE_MAX,
+    UNDO_SECONDS,
+    create_ask,
+    record_asker_copy,
+    relay_enabled,
+    retry_minutes,
+    schedule_delivery,
+    undo_ask,
+)
 from wine_cellar.apps.club.services import (
     TASTEOFF_REOPEN_WINDOW,
     close_tasteoff,
     display_name,
     reopen_tasteoff,
+)
+from wine_cellar.apps.club.threads import (
+    SUMMARY,
+    enqueue_comment_notices,
+    is_thread_muted,
+    resolve_message,
+    threads_enabled,
+    toggle_thread_mute,
 )
 from wine_cellar.apps.scanner.flags import flag_on
 from wine_cellar.apps.wine.models import (
@@ -81,6 +121,15 @@ def _event_in_club(club, event_id):
     return ClubEvent.objects.filter(club=club, id=event_id).first()
 
 
+def _ask_hidden(event) -> bool:
+    """An ask while Ask the club is off: old copies must not ping anyone."""
+    return event.kind == ClubEvent.KIND_ASK and not relay_enabled()
+
+
+def _ask_off_response():
+    return Response({"error": "ask_off"}, status=status.HTTP_404_NOT_FOUND)
+
+
 def serialize_comment(comment: ClubComment) -> dict:
     return {
         "id": comment.id,
@@ -99,6 +148,8 @@ class ClubCommentCollectionView(CommentsEnabledMixin, ScannerAPIView):
         event = _event_in_club(membership.club, event_id)
         if event is None:
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        if _ask_hidden(event):
+            return _ask_off_response()
         rows = list(event.comments.select_related("user"))
         return Response(
             {"comments": [serialize_comment(c) for c in rows], "count": len(rows)}
@@ -111,6 +162,8 @@ class ClubCommentCollectionView(CommentsEnabledMixin, ScannerAPIView):
         event = _event_in_club(membership.club, event_id)
         if event is None:
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        if _ask_hidden(event):
+            return _ask_off_response()
         if event.retracted:
             return Response({"error": "retracted"}, status=status.HTTP_409_CONFLICT)
         text = str((request.data or {}).get("text") or "").strip()
@@ -124,12 +177,182 @@ class ClubCommentCollectionView(CommentsEnabledMixin, ScannerAPIView):
         comment = ClubComment.objects.create(
             event=event, user=request.user, text=text,
         )
-        from wine_cellar.apps.club.tasks import refresh_event_comment_card
+        if threads_enabled():
+            transaction.on_commit(
+                lambda cid=comment.id: enqueue_comment_notices(cid)
+            )
+        else:
+            from wine_cellar.apps.club.tasks import refresh_event_comment_card
 
-        transaction.on_commit(
-            lambda eid=event.id: refresh_event_comment_card.delay(eid)
-        )
+            transaction.on_commit(
+                lambda eid=event.id: refresh_event_comment_card.delay(eid)
+            )
         return Response(serialize_comment(comment), status=status.HTTP_201_CREATED)
+
+
+class ThreadsEnabledMixin(ClubsEnabledMixin):
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if not threads_enabled():
+            raise CommentsDisabled()
+
+    def handle_exception(self, exc):
+        if isinstance(exc, CommentsDisabled):
+            return Response({"error": "not_enabled"}, status=status.HTTP_404_NOT_FOUND)
+        return super().handle_exception(exc)
+
+
+class ClubThreadResolveView(ClubsEnabledMixin, ScannerAPIView):
+    """Which event does a bot message (swipe-reply target) belong to?
+
+    A summary or recap message is recognised even with threads off (so the
+    swipe-reply gets the "Tap Reply or Thread" hint); an event needs the
+    threads flag."""
+
+    def get(self, request):
+        try:
+            message_id = int(request.query_params.get("message_id") or 0)
+        except (TypeError, ValueError):
+            message_id = 0
+        event = resolve_message(
+            request.user, request.query_params.get("chat_id") or "", message_id,
+        )
+        if event is None:
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        if event is SUMMARY:
+            return Response({"summary": True})
+        if not threads_enabled():
+            return Response({"error": "not_enabled"}, status=status.HTTP_404_NOT_FOUND)
+        if _ask_hidden(event):
+            return _ask_off_response()
+        return Response(
+            {
+                "event_id": event.id,
+                "club_id": event.club_id,
+                "retracted": event.retracted,
+                "muted": is_thread_muted(request.user.id, event.id),
+            }
+        )
+
+
+class NotesDisabled(Exception):
+    pass
+
+
+class NotesEnabledMixin(ClubsEnabledMixin):
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if not notes_enabled():
+            raise NotesDisabled()
+
+    def handle_exception(self, exc):
+        if isinstance(exc, NotesDisabled):
+            return Response({"error": "not_enabled"}, status=status.HTTP_404_NOT_FOUND)
+        return super().handle_exception(exc)
+
+
+class ClubNoteOfferView(NotesEnabledMixin, ScannerAPIView):
+    """After the vote on a bottle just opened: is "Add a tasting note?" worth
+    asking (a real open, a club to post to, no note yet)?"""
+
+    def get(self, request):
+        try:
+            item_id = int(request.query_params.get("item_id") or 0)
+        except (TypeError, ValueError):
+            item_id = 0
+        offer = bool(item_id) and can_offer(request.user, item_id)
+        body = {"offer": offer}
+        if offer:
+            body["wine"] = wine_label(request.user, item_id)
+        return Response(body)
+
+
+class ClubNoteView(NotesEnabledMixin, ScannerAPIView):
+    """Add, change or remove (empty text) the caller's own tasting note, by
+    ``item_id`` (just opened) or ``event_id`` (feed detail)."""
+
+    def post(self, request):
+        data = request.data or {}
+        text = data.get("text")
+        if not isinstance(text, str):
+            return Response({"error": "invalid"}, status=status.HTTP_400_BAD_REQUEST)
+        if len(" ".join(text.split())) > NOTE_MAX:
+            return Response(
+                {"error": "too_long", "max": NOTE_MAX},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not save_allowed(request.user):
+            return Response(
+                {"error": "rate_limited", "max": SAVE_MAX,
+                 "retry_minutes": SAVE_WINDOW // 60},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        if data.get("event_id"):
+            try:
+                event = ClubEvent.objects.filter(id=int(data["event_id"])).first()
+            except (TypeError, ValueError):
+                event = None
+            if event is None or not ClubMembership.objects.filter(
+                user=request.user, club_id=event.club_id,
+            ).exists():
+                return Response(
+                    {"error": "not_found"}, status=status.HTTP_404_NOT_FOUND,
+                )
+            events, error = set_note_for_event(request.user, event, text)
+        else:
+            try:
+                item_id = int(data.get("item_id") or 0)
+            except (TypeError, ValueError):
+                item_id = 0
+            if not item_id:
+                return Response(
+                    {"error": "invalid"}, status=status.HTTP_400_BAD_REQUEST,
+                )
+            events, error = set_note_for_item(request.user, item_id, text)
+        if error == "no_event":
+            return Response({"error": error}, status=status.HTTP_409_CONFLICT)
+        if error:
+            code = (
+                status.HTTP_400_BAD_REQUEST if error == "too_long"
+                else status.HTTP_404_NOT_FOUND
+            )
+            return Response({"error": error}, status=code)
+        return Response(
+            {
+                "saved": True,
+                "count": len(events),
+                "clubs": [e.club.name for e in events],
+                "removed": not text.strip(),
+            }
+        )
+
+
+class ClubThreadMuteView(ThreadsEnabledMixin, ScannerAPIView):
+    def _event(self, request, event_id):
+        event = ClubEvent.objects.filter(id=event_id).first()
+        if event is None:
+            return None
+        if not ClubMembership.objects.filter(
+            user=request.user, club_id=event.club_id,
+        ).exists():
+            return None
+        return event
+
+    def get(self, request, event_id):
+        event = self._event(request, event_id)
+        if event is None:
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"muted": is_thread_muted(request.user.id, event.id)})
+
+    def post(self, request, event_id):
+        event = self._event(request, event_id)
+        if event is None:
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        wanted = (request.data or {}).get("muted")
+        muted = toggle_thread_mute(
+            request.user, event, None if wanted is None else bool(wanted),
+        )
+        return Response({"muted": muted})
 
 
 class ClubEventToListView(ClubListsEnabledMixin, ScannerAPIView):
@@ -142,27 +365,215 @@ class ClubEventToListView(ClubListsEnabledMixin, ScannerAPIView):
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
         if event.retracted:
             return Response({"error": "retracted"}, status=status.HTTP_409_CONFLICT)
-        lst = get_or_create_personal_list(request.user)
-        existing = WineListItem.objects.filter(
-            list=lst,
-            moved_at__isnull=True,
-            name=event.wine_name,
-            producer=event.producer or "",
-            vintage=event.vintage,
-        ).first()
-        if existing:
-            body = serialize_item(existing)
+        if event.kind != ClubEvent.KIND_OPENED:
+            # An ask (or any non-bottle event) has no wine to save.
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        item, created = add_event_to_list(request.user, event)
+        body = serialize_item(item)
+        if not created:
             body["status_code"] = 200
             return Response(body)
-        item = WineListItem.objects.create(
-            list=lst,
-            name=event.wine_name or "wine",
-            producer=event.producer or "",
-            vintage=event.vintage,
-            source="club_feed",
-            added_by=request.user,
+        return Response(body, status=status.HTTP_201_CREATED)
+
+
+def add_event_to_list(user, event):
+    """Snapshot an opened-wine event onto the user's personal To-drink list.
+    Idempotent. Returns (item, created)."""
+    lst = get_or_create_personal_list(user)
+    existing = WineListItem.objects.filter(
+        list=lst,
+        moved_at__isnull=True,
+        name=event.wine_name,
+        producer=event.producer or "",
+        vintage=event.vintage,
+    ).first()
+    if existing:
+        return existing, False
+    item = WineListItem.objects.create(
+        list=lst,
+        name=event.wine_name or "wine",
+        producer=event.producer or "",
+        vintage=event.vintage,
+        source="club_feed",
+        added_by=user,
+    )
+    return item, True
+
+
+class ReactionsEnabledMixin(ClubsEnabledMixin):
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if not reactions_enabled():
+            raise CommentsDisabled()
+
+    def handle_exception(self, exc):
+        if isinstance(exc, CommentsDisabled):
+            return Response({"error": "not_enabled"}, status=status.HTTP_404_NOT_FOUND)
+        return super().handle_exception(exc)
+
+
+def _member_event(request, event_id):
+    """The event, only when the caller is a member of its club (the same
+    audience that was sent the card)."""
+    event = (
+        ClubEvent.objects.select_related("club", "actor").filter(id=event_id).first()
+    )
+    if event is None or not ClubMembership.objects.filter(
+        user=request.user, club_id=event.club_id,
+    ).exists():
+        return None
+    return event
+
+
+class ClubEventReactView(ReactionsEnabledMixin, ScannerAPIView):
+    """POST {"i": 0-4}: toggle the caller's reaction."""
+
+    def post(self, request, event_id):
+        event = _member_event(request, event_id)
+        if event is None:
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        if event.retracted:
+            return Response({"error": "retracted"}, status=status.HTTP_409_CONFLICT)
+        if _ask_hidden(event):
+            return _ask_off_response()
+        if not kind_reactable(event):
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            index = int((request.data or {}).get("i"))
+            if not 0 <= index < len(PALETTE):
+                raise ValueError
+        except (TypeError, ValueError):
+            return Response({"error": "bad_index"}, status=status.HTTP_400_BAD_REQUEST)
+        on = toggle_reaction(request.user, event, index)
+        # Reply pings stay bare: only card copies show counts.
+        show_counts = True
+        message_id = (request.data or {}).get("message_id")
+        chat_id = (request.data or {}).get("chat_id")
+        if message_id and chat_id:
+            try:
+                show_counts = not ClubEventDelivery.objects.filter(
+                    event=event, chat_id=str(chat_id), message_id=int(message_id),
+                    kind=ClubEventDelivery.KIND_PING,
+                ).exists()
+            except (TypeError, ValueError):
+                pass
+        return Response(
+            {
+                "show_counts": show_counts,
+                "on": on,
+                "emoji": PALETTE[index],
+                "counts": counts_for(event),
+                "mine": mine_for(event, request.user),
+            }
         )
-        return Response(serialize_item(item), status=status.HTTP_201_CREATED)
+
+
+class ClubEventWantView(ReactionsEnabledMixin, ScannerAPIView):
+    """Want this: save the wine to the caller's own To-drink list."""
+
+    def post(self, request, event_id):
+        if not flag_on("feature_lists"):
+            return Response({"error": "not_enabled"}, status=status.HTTP_404_NOT_FOUND)
+        event = _member_event(request, event_id)
+        if event is None:
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        if event.retracted:
+            return Response({"error": "retracted"}, status=status.HTTP_409_CONFLICT)
+        if event.kind != ClubEvent.KIND_OPENED:
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        item, created = add_event_to_list(request.user, event)
+        first = record_want(request.user, event)
+        return Response(
+            {"saved": True, "created": created, "notified": first},
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class RelayEnabledMixin(ClubsEnabledMixin):
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if not relay_enabled():
+            raise CommentsDisabled()
+
+    def handle_exception(self, exc):
+        if isinstance(exc, CommentsDisabled):
+            return Response({"error": "not_enabled"}, status=status.HTTP_404_NOT_FOUND)
+        return super().handle_exception(exc)
+
+
+class ClubRelayAskView(RelayEnabledMixin, ScannerAPIView):
+    """POST {"text"}: Ask the club. Delivery follows after the Undo window."""
+
+    def post(self, request, pk):
+        membership, error = _member_or_404(request, pk)
+        if error:
+            return error
+        text = str((request.data or {}).get("text") or "")
+        event, err = create_ask(request.user, membership.club, text)
+        if err == "duplicate":
+            return Response(
+                {"error": "duplicate", "event_id": event.id},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if err == "rate_limited":
+            return Response(
+                {
+                    "error": "rate_limited",
+                    "max": RATE_MAX,
+                    "retry_minutes": retry_minutes(event),
+                },
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        if err == "too_long":
+            return Response(
+                {"error": "too_long", "max": ASK_MAX},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if err == "frozen":
+            return Response({"error": "frozen"}, status=status.HTTP_409_CONFLICT)
+        if err in ("blank", "global"):
+            return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
+        if err:
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        transaction.on_commit(lambda eid=event.id: schedule_delivery(eid))
+        return Response(
+            {
+                "event_id": event.id,
+                "club_name": membership.club.name,
+                "undo_seconds": UNDO_SECONDS,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class ClubAskUndoView(RelayEnabledMixin, ScannerAPIView):
+    def post(self, request, event_id):
+        result = undo_ask(request.user, event_id)
+        if result == "already_out":
+            return Response({"error": "already_out"}, status=status.HTTP_409_CONFLICT)
+        if result == "not_found":
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"undone": True})
+
+
+class ClubAskCopyView(RelayEnabledMixin, ScannerAPIView):
+    """POST {"chat_id", "message_id"}: the asker's confirmation message is
+    their own copy of the ask (swipe-replies and reply pings thread under it)."""
+
+    def post(self, request, event_id):
+        try:
+            message_id = int((request.data or {}).get("message_id"))
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "bad_message"}, status=status.HTTP_400_BAD_REQUEST,
+            )
+        result = record_asker_copy(
+            request.user, event_id, (request.data or {}).get("chat_id") or "",
+            message_id,
+        )
+        if result == "not_found":
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"recorded": True, "already_out": result == "already_out"})
 
 
 def _club_list(club):
