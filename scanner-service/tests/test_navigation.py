@@ -790,6 +790,26 @@ async def test_existing_users_get_the_bar_once_after_a_deploy():
     assert len(intros) == 1
 
 
+@pytest.mark.asyncio
+async def test_club_swipe_reply_skips_the_bar_intro():
+    """A reply in a club thread gets only its own confirmation, even when the
+    chat is due a bar repair; the bar returns on the next ordinary message."""
+    handler = _handler()
+    handler._bar_rollout = True
+    handler._router = None
+    flow = MagicMock()
+    flow.on_reply = AsyncMock(return_value=True)
+    handler._club_flow = MagicMock(return_value=flow)
+    update = _update("lovely one")
+    update.message.reply_to_message = MagicMock(message_id=555)
+    context = _context()
+    await handler._unknown_text(update, context)
+    flow.on_reply.assert_awaited_once()
+    intros = [c for c in context.bot.send_message.await_args_list
+              if isinstance(c.kwargs.get("reply_markup"), ReplyKeyboardMarkup)]
+    assert intros == []
+
+
 # --------------------------------------------------------------------------
 # Round-2 regressions
 

@@ -2187,13 +2187,8 @@ class ClubFlow:
                 t(loc, "club.err"), reply_markup=self._comment_again_markup(event_id),
             )
             return True
-        from integrations.telegram_nav import follow_up_rows
-        await message.reply_text(
-            t(loc, "club.comment.saved"),
-            reply_markup=InlineKeyboardMarkup(follow_up_rows("club", {
-                "flags": self._flags(), "club_id": club_id,
-            })),
-        )
+        # A thread reply is chat, not a menu action: one quiet line, no buttons.
+        await message.reply_text(t(loc, "club.comment.sent"))
         return True
 
     async def _take_or_ask(self, update, context, chat_id, prompt) -> bool:

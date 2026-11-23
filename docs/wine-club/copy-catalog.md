@@ -135,6 +135,7 @@ Policy-of fragments for `club.join.known`: `a type-and-count summary of` / `'n t
 | `club.comment.btn` | Say something | Sê iets |
 | `club.comment.prompt` | Reply to this message with a short note. | Antwoord op hierdie boodskap met 'n kort nota. |
 | `club.comment.saved` | Noted. | Genoteer. |
+| `club.comment.sent` | ✓ Sent to the club. | ✓ Na die klub gestuur. |
 | `club.comment.too_long` | Keep it under 280 characters. | Hou dit onder 280 karakters. |
 | `club.comment.again` | Tap Say something again. | Tik Sê iets weer. |
 | `club.comment.more` | and {n} more | en nog {n} |
@@ -205,7 +206,7 @@ Buttons stay English in both languages. Server pings use `wine_cellar/apps/club/
 | `club.thread.page` | Page {page} of {pages} | Bladsy {page} van {pages} |
 | `club.thread.gone` | That conversation isn't there any more. | Daai gesprek is nie meer daar nie. |
 
-Swipe-reply too long reuses `club.comment.too_long`; saved reuses `club.comment.saved`. A ping's body lines are `💬 {name}: {text}` (name and text escaped, no catalog key).
+Swipe-reply too long reuses `club.comment.too_long`; a saved thread reply (swipe-reply, Reply prompt) answers `club.comment.sent` with no buttons, and is handled before the bottom-bar repair so nothing else is sent with it. A ping's body lines are `💬 {name}: {text}` (name and text escaped, no catalog key).
 
 ## Phase 5 — reactions (`feature_club_reactions`)
 
