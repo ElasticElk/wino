@@ -176,7 +176,10 @@ class ClubNotifyView(ClubsEnabledMixin, ScannerAPIView):
                 return bad("invalid_mode")
         quiet = {}
         if "quiet_enabled" in data:
-            quiet["quiet_enabled"] = bool(data.get("quiet_enabled"))
+            raw = data.get("quiet_enabled")
+            if isinstance(raw, str):
+                raw = raw.strip().lower() not in ("false", "0", "no", "off", "")
+            quiet["quiet_enabled"] = bool(raw)
         for key in ("quiet_start", "quiet_end"):
             if key in data:
                 try:
@@ -186,9 +189,11 @@ class ClubNotifyView(ClubsEnabledMixin, ScannerAPIView):
                     return bad("invalid_time")
         if "tz" in data:
             tz = str(data.get("tz") or "").strip()
-            if tz and not notify.valid_tz(tz):
-                return bad("invalid_tz")
-            quiet["quiet_tz"] = tz
+            if tz:
+                tz = notify.resolve_tz(tz)  # case-insensitive, or a bare city
+                if tz is None:
+                    return bad("invalid_tz")
+            quiet["quiet_tz"] = tz or ""
         if "mode" in data:
             notify.set_mode(membership, mode)
         if quiet:

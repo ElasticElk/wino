@@ -267,7 +267,11 @@ Buttons are English in both locales. Server keys live in `club/copy.py`, bot key
 | `club.notify.btn_quiet_on` / `btn_quiet_off` / `btn_tz_type` (bot buttons) | Quiet hours: turn on / turn off / Type one | same |
 | `club.notify.mode_instant` / `mode_digest` / `mode_muted` (bot) | every update / daily recap / muted | elke opdatering / daaglikse opsomming / stil |
 | `club.notify.screen` (bot) | Notifications for {club} / Now: {mode} / {quiet} / Time zone: {tz} | Kennisgewings vir {club} / Nou: {mode} / {quiet} / Tydsone: {tz} |
-| `club.notify.quiet_on` / `quiet_off` (bot) | Quiet hours: {span} / Quiet hours: off | Stil ure: {span} / Stil ure: af |
+| `club.notify.quiet_on` / `quiet_off` (bot) | Quiet hours: {span} (applies to all your clubs) / Quiet hours: off (applies to all your clubs) | Stil ure: {span} (geld vir al jou klubs) / Stil ure: af (geld vir al jou klubs) |
+| `club.notify.quiet_line` (server, first summary only) | Quiet hours {span} ({city} time). | Stil ure {span} ({city}-tyd). |
+| `club.notify.btn_change` / `btn` / `btn_score` (server buttons) | Change / Notifications / Score | Change / Notifications / Punt |
+| `club.notify.btn_auto` (bot button) | Automatic ({mode}) | same |
+| `club.notify.summary_reply` (bot) | Tap Reply or Thread under the item you're answering. | Tik Reply of Thread onder die item wat jy antwoord. |
 | `club.notify.auto_digest` (bot) | Clubs with {n} or more members get a daily recap unless you pick another option. | Klubs met {n} of meer lede kry 'n daaglikse opsomming tensy jy iets anders kies. |
 | `club.notify.off` (bot) | That's switched off right now. | Dit is nou afgeskakel. |
 | `club.notify.kept` / `recap_ok` (bot) | Done. You'll keep getting every update. / Done. You'll get a daily recap. | Klaar. Jy kry steeds elke opdatering. / Klaar. Jy kry 'n daaglikse opsomming. |

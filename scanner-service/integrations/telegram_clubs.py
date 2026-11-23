@@ -2275,6 +2275,12 @@ class ClubFlow:
                 t(loc, "club.thread.post_failed"), reply_markup=_menu_markup(),
             )
             return True
+        if found.get("summary"):
+            # A summary or recap message: no single item to reply to.
+            await message.reply_text(
+                t(loc, "club.notify.summary_reply"), reply_markup=_menu_markup(),
+            )
+            return True
         if found.get("error") == "ask_off":
             # A copy of an ask that is switched off: say so rather than let
             # the chatbot answer a swipe-reply.
@@ -2588,7 +2594,7 @@ class ClubFlow:
         )
         if body.get("mode") is None and mode == "digest":
             text += "\n\n" + t(loc, "club.notify.auto_digest", n=body.get("digest_members", 15))
-        current = body.get("mode") or mode
+        current = body.get("mode") or "auto"
         labels = {
             "instant": t("en", "club.notify.btn_instant"),
             "digest": t("en", "club.notify.btn_digest"),
@@ -2601,6 +2607,11 @@ class ClubFlow:
             )
             for i, m in enumerate(NOTIFY_MODES)
         ]
+        auto_row = [InlineKeyboardButton(
+            ("\u2705 " if current == "auto" else "")
+            + t("en", "club.notify.btn_auto", mode=t("en", f"club.notify.mode_{mode}")),
+            callback_data=club_cb("nm", cid, "a"),
+        )]
         span = self._quiet_label(quiet)
         presets = [
             InlineKeyboardButton(
@@ -2618,6 +2629,7 @@ class ClubFlow:
                 callback_data=club_cb("nz", cid, i),
             ))
         keyboard = [
+            auto_row,
             mode_row,
             [InlineKeyboardButton(
                 t("en", "club.notify.btn_quiet_off" if on else "club.notify.btn_quiet_on"),
@@ -2675,6 +2687,8 @@ class ClubFlow:
         patch = None
         if action == "nm" and arg.isdigit() and int(arg) < len(NOTIFY_MODES):
             patch = {"mode": NOTIFY_MODES[int(arg)]}
+        elif action == "nm" and arg == "a":
+            patch = {"mode": None}  # back to the automatic default
         elif action == "nk":
             patch = {"mode": "instant"}
         elif action == "nr":
@@ -2721,19 +2735,17 @@ class ClubFlow:
             return True
         club_id = state.get("club_id")
         zone = (text or "").strip()
-        try:
-            from zoneinfo import ZoneInfo
-            ZoneInfo(zone)
-            valid = 0 < len(zone) <= 64
-        except Exception:
-            valid = False
-        if not valid:
+        body = {"error": "invalid_tz"}
+        if zone and len(zone) <= 64:
+            # The API accepts any case and bare city names, and normalises.
+            body = self._api(update).club_notify(club_id, {"tz": zone})
+        if body.get("error") == "invalid_tz":
             await update.message.reply_text(
                 t(loc, "club.notify.tz_bad"), reply_markup=_cancel_markup(),
             )
             return True
         self.clear(chat_id)
-        await self._show_notify(update, club_id, patch={"tz": zone})
+        await self._show_notify(update, club_id)
         return True
 
     def reactions_on(self) -> bool:

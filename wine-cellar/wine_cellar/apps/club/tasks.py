@@ -313,6 +313,44 @@ def publish_club_event(item_id, actor_id, kind):
             deliver_club_event.delay(event.id)
 
 
+def _card_policy(notify, event, membership) -> str:
+    """'skip' or 'send' for one member's feed card under feature_club_notify.
+
+    This task re-runs for vote changes, retracts and restores, so only a
+    member's first card goes through the policy. A member who already has the
+    card gets an in-place (silent) edit, whatever the quiet hours say; one who
+    only has it as a held summary line never gets a second push (the summary
+    reads the event as it now is)."""
+    chat_ids = list(
+        TelegramUser.objects.filter(user=membership.user, is_active=True)
+        .values_list("chat_id", flat=True)
+    )
+    if ClubEventDelivery.objects.filter(
+        event=event, kind=ClubEventDelivery.KIND_CARD,
+        chat_id__in=chat_ids, message_id__isnull=False,
+    ).exists():
+        return "send"
+    if notify.has_held(membership.user_id, event.id, ClubNotice.KIND_CARD):
+        return "skip"  # held or already summarised; retracted rows are dropped
+    if event.retracted:
+        return "skip"  # never saw the bottle: no "put back" either
+    # Joins skip the digest and mute-of-thread but still wait out quiet hours.
+    decision = notify.decide(
+        membership.user_id, event.club_id,
+        event=None if event.kind == ClubEvent.KIND_JOINED else event,
+        membership=membership, join=event.kind == ClubEvent.KIND_JOINED,
+    )
+    if decision.action == notify.DROP:
+        return "skip"
+    if decision.action != notify.SEND:
+        notify.hold_notice(
+            membership.user_id, event.club, event, ClubNotice.KIND_CARD,
+            decision, f"card:{event.id}:{membership.user_id}",
+        )
+        return "skip"
+    return "send"
+
+
 @shared_task(name="deliver_club_event")
 def deliver_club_event(event_id):
     if not flag_on("feature_clubs"):
@@ -345,29 +383,10 @@ def deliver_club_event(event_id):
 
     policy_on = notify.notify_enabled()
     for membership in members:
-        if (
-            policy_on
-            and event.kind != ClubEvent.KIND_JOINED  # joins are governance
-            and membership.user_id != event.actor_id
-        ):
-            decision = notify.decide(
-                membership.user_id, event.club_id, event=event,
-                membership=membership,
-            )
-            if decision.action == notify.DROP:
+        if policy_on and membership.user_id != event.actor_id:
+            outcome = _card_policy(notify, event, membership)
+            if outcome == "skip":
                 continue
-            if decision.action != notify.SEND:
-                if not event.retracted:
-                    notify.hold_notice(
-                        membership.user_id, event.club, event,
-                        ClubNotice.KIND_CARD, decision,
-                        f"card:{event.id}:{membership.user_id}",
-                    )
-                continue
-            if event.retracted and notify.has_held(
-                membership.user_id, event.id, ClubNotice.KIND_CARD,
-            ):
-                continue  # never saw the bottle: no "put back" either
         chats = TelegramUser.objects.filter(
             user=membership.user, is_active=True,
         )

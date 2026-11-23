@@ -18,6 +18,9 @@ DISMANTLE_TTL = timedelta(hours=48)
 CLUB_INVITE_MAX_USES = 20
 
 
+_UNSET = object()
+
+
 class Club(models.Model):
     KIND_PRIVATE = "private"
     KIND_GLOBAL = "global"
@@ -133,19 +136,25 @@ class ClubMembership(models.Model):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._synced = (self.feed_muted, self.notify_mode)
+        # Read from __dict__: touching a deferred field here (.only()) would
+        # trigger a query per instance and recurse back into __init__.
+        self._synced = (
+            self.__dict__.get("feed_muted", _UNSET),
+            self.__dict__.get("notify_mode", _UNSET),
+        )
 
     def save(self, *args, **kwargs):
         """One source of truth: notify_mode. feed_muted follows it, and an
         old-style write to feed_muted alone (the mute button, old code) is
-        mapped onto notify_mode (muted / instant)."""
-        old_muted, old_mode = getattr(self, "_synced", (None, None))
-        if self.notify_mode != old_mode:
+        mapped onto notify_mode: muted, or back to the default (None) on
+        unmute."""
+        old_muted, old_mode = getattr(self, "_synced", (_UNSET, _UNSET))
+        if _UNSET in (old_muted, old_mode):
+            pass  # loaded with deferred fields: no change to compare against
+        elif self.notify_mode != old_mode:
             self.feed_muted = self.notify_mode == self.NOTIFY_MUTED
         elif self.feed_muted != old_muted:
-            self.notify_mode = (
-                self.NOTIFY_MUTED if self.feed_muted else self.NOTIFY_INSTANT
-            )
+            self.notify_mode = self.NOTIFY_MUTED if self.feed_muted else None
         elif self.notify_mode == self.NOTIFY_MUTED and not self.feed_muted:
             self.feed_muted = True
         uf = kwargs.get("update_fields")
@@ -264,15 +273,20 @@ class ClubEventDelivery(models.Model):
     KIND_CARD = "card"
     KIND_PING = "ping"
     KIND_ASK = "ask"
+    # A morning summary / recap message: no event, only there so a swipe-reply
+    # to it is recognised (and answered with a hint) instead of reaching chat.
+    KIND_SUMMARY = "summary"
     KIND = [
         (KIND_CARD, "Card"),
         (KIND_PING, "Ping"),
         (KIND_ASK, "Ask"),
+        (KIND_SUMMARY, "Summary"),
     ]
     event = models.ForeignKey(
         ClubEvent, on_delete=models.CASCADE, related_name="deliveries",
+        null=True, blank=True,
     )
-    kind = models.CharField(max_length=6, choices=KIND, default=KIND_CARD)
+    kind = models.CharField(max_length=8, choices=KIND, default=KIND_CARD)
     chat_id = models.CharField(max_length=50)
     message_id = models.BigIntegerField(null=True, blank=True)
     sent_at = models.DateTimeField(auto_now_add=True)
@@ -324,12 +338,14 @@ class ClubNotice(models.Model):
     KIND_CARD = "card"
     KIND_ASK = "ask"
     KIND_TASTEOFF = "tasteoff"
+    KIND_CROSSING = "crossing"
     KIND = [
         (KIND_COMMENT, "Comment"),
         (KIND_REACTION, "Reaction"),
         (KIND_CARD, "Feed card"),
         (KIND_ASK, "Ask"),
         (KIND_TASTEOFF, "Taste-off"),
+        (KIND_CROSSING, "Recap switch"),
     ]
     # Held rows wait for the summary task instead of the instant flush.
     HOLD_QUIET = "quiet"

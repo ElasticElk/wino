@@ -134,6 +134,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.notify.btn_instant": "Every update",
         "club.notify.btn_digest": "Daily recap",
         "club.notify.btn_muted": "Muted",
+        "club.notify.btn_auto": "Automatic ({mode})",
         "club.notify.btn_quiet_on": "Quiet hours: turn on",
         "club.notify.btn_quiet_off": "Quiet hours: turn off",
         "club.notify.btn_tz_type": "Type one",
@@ -146,10 +147,13 @@ MESSAGES: dict[str, dict[str, str]] = {
             "{quiet}\n"
             "Time zone: {tz}"
         ),
-        "club.notify.quiet_on": "Quiet hours: {span}",
-        "club.notify.quiet_off": "Quiet hours: off",
+        "club.notify.quiet_on": "Quiet hours: {span} (applies to all your clubs)",
+        "club.notify.quiet_off": "Quiet hours: off (applies to all your clubs)",
         "club.notify.auto_digest": (
             "Clubs with {n} or more members get a daily recap unless you pick another option."
+        ),
+        "club.notify.summary_reply": (
+            "Tap Reply or Thread under the item you're answering."
         ),
         "club.notify.off": "That's switched off right now.",
         "club.notify.kept": "Done. You'll keep getting every update.",
@@ -739,6 +743,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.notify.btn_instant": "Every update",
         "club.notify.btn_digest": "Daily recap",
         "club.notify.btn_muted": "Muted",
+        "club.notify.btn_auto": "Automatic ({mode})",
         "club.notify.btn_quiet_on": "Quiet hours: turn on",
         "club.notify.btn_quiet_off": "Quiet hours: turn off",
         "club.notify.btn_tz_type": "Type one",
@@ -751,10 +756,13 @@ MESSAGES: dict[str, dict[str, str]] = {
             "{quiet}\n"
             "Tydsone: {tz}"
         ),
-        "club.notify.quiet_on": "Stil ure: {span}",
-        "club.notify.quiet_off": "Stil ure: af",
+        "club.notify.quiet_on": "Stil ure: {span} (geld vir al jou klubs)",
+        "club.notify.quiet_off": "Stil ure: af (geld vir al jou klubs)",
         "club.notify.auto_digest": (
             "Klubs met {n} of meer lede kry 'n daaglikse opsomming tensy jy iets anders kies."
+        ),
+        "club.notify.summary_reply": (
+            "Tik Reply of Thread onder die item wat jy antwoord."
         ),
         "club.notify.off": "Dit is nou afgeskakel.",
         "club.notify.kept": "Klaar. Jy kry steeds elke opdatering.",

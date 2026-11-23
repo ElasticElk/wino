@@ -117,7 +117,7 @@ async def test_default_digest_is_explained_and_marked():
     query = _query("cl:ns:3")
     with patch(SAFE_EDIT, new=AsyncMock()) as edit:
         await _handler(api)._club_flow().on_callback(_update(query), MagicMock())
-    assert "✅ Daily recap" in _labels(edit.call_args.kwargs["reply_markup"])
+    assert "✅ Automatic (daily recap)" in _labels(edit.call_args.kwargs["reply_markup"])
     assert "15 or more members" in edit.call_args.args[1]
 
 
@@ -148,21 +148,56 @@ async def test_quiet_toggle_flips_current_state():
 
 
 @pytest.mark.asyncio
-async def test_type_one_validates_with_zoneinfo():
+async def test_type_one_is_validated_by_the_api_and_keeps_the_prompt_open():
     api = _api()
     handler = _handler(api)
     flow = handler._club_flow()
     query = _query("cl:nz:3:x")
     await flow.on_callback(_update(query), MagicMock())
     assert query.message.reply_text.call_args.args[0] == t("en", "club.notify.tz_prompt")
+    api.club_notify.return_value = {"error": "invalid_tz", "status_code": 400}
     bad = _update(text="Mars/Base")
     assert await flow.on_text(bad, MagicMock()) is True
     assert bad.message.reply_text.call_args.args[0] == t("en", "club.notify.tz_bad")
-    api.club_notify.assert_not_called()
-    good = _update(text="Europe/Paris")
+    assert flow.state_for("4242") is not None
+    # Case and bare cities are the API's business: the text goes through as typed.
+    api.club_notify.return_value = _body(tz="Europe/Paris")
+    good = _update(text="paris")
     assert await flow.on_text(good, MagicMock()) is True
-    api.club_notify.assert_any_call(3, {"tz": "Europe/Paris"})
+    api.club_notify.assert_any_call(3, {"tz": "paris"})
     assert flow.state_for("4242") is None
+
+
+@pytest.mark.asyncio
+async def test_automatic_option_clears_the_mode_and_shows_what_it_resolves_to():
+    api = _api(_body(mode=None, effective="digest"))
+    with patch(SAFE_EDIT, new=AsyncMock()) as edit:
+        await _handler(api)._club_flow().on_callback(
+            _update(_query("cl:nm:3:a")), MagicMock(),
+        )
+    api.club_notify.assert_any_call(3, {"mode": None})
+    labels = _labels(edit.call_args.kwargs["reply_markup"])
+    assert "\u2705 Automatic (daily recap)" in labels
+    assert "Every update" in labels  # nothing else is ticked
+    assert "all your clubs" in edit.call_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_swipe_reply_to_a_summary_is_answered_not_chatted():
+    api = _api()
+    api.club_thread_resolve.return_value = {"summary": True}
+    handler = _handler(api, {
+        "feature_clubs": "on", "feature_club_comments": "on",
+        "feature_club_threads": "on", "feature_club_notify": "on",
+    })
+    update = _update(text="what a lovely wine")
+    update.message.reply_to_message = MagicMock(message_id=33)
+    update.message.reply_to_message.from_user.is_bot = True
+    assert await handler._club_flow().on_reply(update, MagicMock()) is True
+    assert update.message.reply_text.call_args.args[0] == (
+        "Tap Reply or Thread under the item you're answering."
+    )
+    api.add_club_comment.assert_not_called()
 
 
 @pytest.mark.asyncio

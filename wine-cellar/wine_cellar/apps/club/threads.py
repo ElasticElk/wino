@@ -70,6 +70,9 @@ def toggle_thread_mute(user, event, muted=None) -> bool:
     return want
 
 
+SUMMARY = object()  # resolve_message result for a summary/recap message
+
+
 def resolve_message(user, chat_id, message_id):
     """Event a bot message in ``chat_id`` belongs to, if ``user`` may see it."""
     if not chat_id or not message_id:
@@ -88,6 +91,8 @@ def resolve_message(user, chat_id, message_id):
     )
     if delivery is None:
         return None
+    if delivery.event is None:
+        return SUMMARY  # a summary or recap message: no single event
     if not ClubMembership.objects.filter(
         user=user, club_id=delivery.event.club_id,
     ).exists():
@@ -438,6 +443,12 @@ def _apply_policy(notice, now) -> bool:
 
     decision = notify.decide(
         notice.recipient_id, notice.club_id, event=notice.event, now=now,
+        # Replies in the member's own threads skip the digest (quiet hours and
+        # thread mutes still apply).
+        bypass_digest=(
+            notice.kind == ClubNotice.KIND_COMMENT
+            and notify.is_own_content_reply(notice.recipient_id, notice.event)
+        ),
     )
     if decision.action == notify.SEND:
         return False

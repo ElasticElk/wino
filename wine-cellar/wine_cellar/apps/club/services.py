@@ -352,7 +352,7 @@ def _announce_crossing(club_id):
 
         if not notify_enabled():
             return
-        if ClubMembership.objects.filter(club_id=club_id).count() != DIGEST_MEMBERS:
+        if ClubMembership.objects.filter(club_id=club_id).count() < DIGEST_MEMBERS:
             return
         club_notify_crossing.delay(club_id)
     except Exception:  # never block a join

@@ -87,6 +87,10 @@ MESSAGES = {
         ),
         "club.notify.btn_keep": "Keep every update",
         "club.notify.btn_recap": "Recap is fine",
+        "club.notify.btn_score": "Score",
+        "club.notify.btn_change": "Change",
+        "club.notify.btn": "Notifications",
+        "club.notify.quiet_line": "Quiet hours {span} ({city} time).",
         "club.global.frozen": "This club is paused.",
     },
     "af": {
@@ -169,6 +173,10 @@ MESSAGES = {
         ),
         "club.notify.btn_keep": "Keep every update",
         "club.notify.btn_recap": "Recap is fine",
+        "club.notify.btn_score": "Punt",
+        "club.notify.btn_change": "Change",
+        "club.notify.btn": "Notifications",
+        "club.notify.quiet_line": "Stil ure {span} ({city}-tyd).",
         "club.global.frozen": "Hierdie klub is gepouseer.",
     },
 }

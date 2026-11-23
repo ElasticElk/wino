@@ -122,10 +122,10 @@ def test_feed_muted_and_notify_mode_stay_in_sync(club):
     m.save(update_fields=["feed_muted"])
     m.refresh_from_db()
     assert m.notify_mode == "muted" and m.feed_muted
-    m.feed_muted = False  # unmute maps to instant
+    m.feed_muted = False  # unmute goes back to the default, not instant
     m.save(update_fields=["feed_muted"])
     m.refresh_from_db()
-    assert m.notify_mode == "instant" and not m.feed_muted
+    assert m.notify_mode is None and not m.feed_muted
     m.notify_mode = "muted"
     m.save()
     m.refresh_from_db()
@@ -328,17 +328,106 @@ def test_instant_awake_sends_digest_member_gets_recap(club):
     assert "recap" in post.call_args.kwargs["json"]["text"].lower()
 
 
-def test_governance_joined_card_is_not_held(club):
+def test_join_card_skips_digest_but_waits_out_quiet_hours(club):
     club_, users = club
     _enable(*FLAGS)
     _mode(users["sam"], club_, "digest")
     event = ClubEvent.objects.create(club=club_, actor=users["riley"], kind="joined")
     with patch(SEND, return_value=11) as send, patch(
-        "wine_cellar.apps.club.notify.timezone.now", return_value=NIGHT,
+        "wine_cellar.apps.club.notify.timezone.now", return_value=NOON,
     ):
         deliver_club_event(event.id)
     assert {c.args[1] for c in send.call_args_list} == {"200", "300", "400"}
     assert ClubNotice.objects.count() == 0
+
+
+def test_join_card_is_held_in_quiet_hours(club):
+    club_, users = club
+    _enable(*FLAGS)
+    _mode(users["lee"], club_, "muted")
+    event = ClubEvent.objects.create(club=club_, actor=users["riley"], kind="joined")
+    with patch(SEND, return_value=11) as send, patch(
+        "wine_cellar.apps.club.notify.timezone.now", return_value=NIGHT,
+    ):
+        deliver_club_event(event.id)
+    assert send.call_count == 0
+    held = ClubNotice.objects.filter(kind="card", hold="quiet")
+    assert {n.recipient.username for n in held} == {"sam", "pat"}
+    with patch(POST, side_effect=_Mids()) as post:
+        notify.send_due_summaries(now=utc(2026, 6, 11, 7, 1))
+    assert "Riley joined" in post.call_args_list[0].kwargs["json"]["text"]
+
+
+def _deliver_at(event, now, mid=11):
+    with patch(SEND, return_value=mid) as send, patch(
+        "wine_cellar.apps.club.notify.timezone.now", return_value=now,
+    ):
+        deliver_club_event(event.id)
+    return send
+
+
+def test_retract_in_quiet_hours_edits_the_card_in_place(club):
+    club_, users = club
+    _enable(*FLAGS)
+    event = _event(club_, users["riley"])
+    _deliver_at(event, NOON)  # everyone has the card
+    event.retracted_at = NIGHT
+    event.save()
+    send = _deliver_at(event, NIGHT)
+    assert {c.args[1] for c in send.call_args_list} == {"200", "300", "400"}
+    assert all(c.kwargs["message_id"] == 11 for c in send.call_args_list)
+    assert ClubNotice.objects.count() == 0
+
+
+def test_vote_change_in_quiet_hours_edits_card_and_adds_no_summary_line(club):
+    club_, users = club
+    _enable(*FLAGS)
+    event = _event(club_, users["riley"])
+    _deliver_at(event, NOON)  # sam, lee, pat have the card
+    event.vote = "down"
+    event.save()
+    send = _deliver_at(event, NIGHT)
+    assert all(c.kwargs["message_id"] == 11 for c in send.call_args_list)
+    assert ClubNotice.objects.count() == 0
+    # A member who only has it as a held line: vote change adds nothing.
+    other = _event(club_, users["riley"], wine="Pinotage")
+    _deliver_at(other, NIGHT)
+    assert ClubNotice.objects.filter(kind="card").count() == 3
+    other.vote = "down"
+    other.save()
+    send = _deliver_at(other, NIGHT)
+    assert send.call_count == 0 and ClubNotice.objects.filter(kind="card").count() == 3
+    # Even after the quiet hours end, the row stays the only mention.
+    send = _deliver_at(other, utc(2026, 6, 11, 9, 0))
+    assert send.call_count == 0
+
+
+def test_digest_member_gets_own_content_replies_promptly(club):
+    club_, users = club
+    _enable(*FLAGS)
+    for name in ("riley", "sam", "lee", "pat"):
+        _mode(users[name], club_, "digest")
+    event = _event(club_, users["riley"])  # riley's bottle
+    ClubComment.objects.create(event=event, user=users["sam"], text="first")
+    c = ClubComment.objects.create(event=event, user=users["lee"], text="more")
+    enqueue_comment_notices(c.id)
+    ClubNotice.objects.update(due_at=NOON)
+    with patch(POST, side_effect=_Mids()) as post:
+        flush_due_notices(now=NOON)
+    chats = {x.kwargs["json"]["chat_id"] for x in post.call_args_list}
+    # riley (owner) and sam (commented in the thread) are pinged; pat (digest,
+    # not involved) is not.
+    assert chats == {"100", "200"}
+    assert ClubNotice.objects.get(recipient=users["pat"]).hold == "recap"
+    # Still respects quiet hours.
+    c2 = ClubComment.objects.create(event=event, user=users["lee"], text="late")
+    enqueue_comment_notices(c2.id)
+    ClubNotice.objects.filter(sent_at__isnull=True).update(due_at=NIGHT)
+    with patch(POST, side_effect=_Mids()) as post:
+        flush_due_notices(now=NIGHT)
+    assert post.call_count == 0
+    held = ClubNotice.objects.get(recipient=users["riley"], sent_at__isnull=True)
+    assert held.hold == "quiet"
 
 
 # -- reply pings, asks, reactions, taste-offs ------------------------------------
@@ -499,7 +588,9 @@ def test_summary_buttons_cap_and_busiest_first(club):
     with patch(POST, side_effect=_Mids()) as post:
         notify.send_due_summaries(now=utc(2026, 6, 11, 7, 1))
     rows = post.call_args.kwargs["json"]["reply_markup"]["inline_keyboard"]
-    buttons = [b for r in rows for b in r]
+    buttons = [
+        b for r in rows for b in r if not b["callback_data"].startswith("cl:ns:")
+    ]
     assert len(buttons) == 6
     assert buttons[0]["text"].startswith("Thread (9)")
     assert all(len(b["callback_data"].encode()) < 64 for b in buttons)
@@ -584,21 +675,199 @@ def test_crossing_15_messages_only_default_members_once(club):
     assert Club.objects.get(id=club_.id).notify_crossing_sent_at is not None
 
 
-def test_crossing_not_at_14_or_16_or_flag_off(club):
+def test_crossing_not_at_14_or_flag_off(club):
     club_, users = club
     _grow(club_, 10)
     with patch(POST, side_effect=_Mids()) as post:
         assert notify.announce_crossing(club_.id) == 0  # flag off
         _enable(*FLAGS)
         assert notify.announce_crossing(club_.id) == 0  # 14 members
-        User = get_user_model()
-        for name in ("z1", "z2"):
-            ClubMembership.objects.create(
-                club=club_, user=User.objects.create_user(username=name, password="p"),
-                accepted_sharing_version=1,
-            )
-        assert notify.announce_crossing(club_.id) == 0  # 16
     assert post.call_count == 0
+    assert Club.objects.get(id=club_.id).notify_crossing_sent_at is None
+
+
+def test_crossing_fires_at_16_once_and_the_default_stays_digest(club):
+    club_, users = club
+    _enable(*FLAGS)
+    _grow(club_, 12)  # 16: a batch join skipped exactly 15
+    with patch(POST, side_effect=_Mids()) as post:
+        assert notify.announce_crossing(club_.id) == 16
+        assert notify.announce_crossing(club_.id) == 0
+    assert post.call_count == 16
+    # Sticky: the club shrinks below 15 and the default is still digest.
+    ClubMembership.objects.filter(club=club_, user__username__startswith="m").delete()
+    assert club_.memberships.count() == 4
+    m = ClubMembership.objects.get(user=users["sam"], club=club_)
+    assert notify.effective_mode(m) == "digest"
+    other = Club.objects.create(name="Small", cellar_visibility="none")
+    m2 = ClubMembership.objects.create(
+        club=other, user=users["sam"], accepted_sharing_version=1,
+    )
+    assert notify.effective_mode(m2) == "instant"
+
+
+def test_crossing_is_held_in_quiet_hours(club):
+    club_, users = club
+    _enable(*FLAGS)
+    _grow(club_, 11)
+    with patch(POST, side_effect=_Mids()) as post, patch(
+        "wine_cellar.apps.club.notify.timezone.now", return_value=NIGHT,
+    ):
+        assert notify.announce_crossing(club_.id) == 0
+    assert post.call_count == 0
+    assert ClubNotice.objects.filter(kind="crossing", hold="quiet").count() == 15
+    with patch(POST, side_effect=_Mids()) as post:
+        notify.send_due_summaries(now=utc(2026, 6, 11, 7, 1))
+    body = post.call_args_list[0].kwargs["json"]
+    assert "now has 15 members" in body["text"]
+    kb = body["reply_markup"]["inline_keyboard"]
+    cbs = [b["callback_data"] for r in kb for b in r]
+    assert f"cl:nk:{club_.id}" in cbs and f"cl:nr:{club_.id}" in cbs
+
+
+# -- time zone resolution -----------------------------------------------------------
+def test_default_tz_resolution_order(club):
+    club_, users = club
+    sam = users["sam"]
+
+    def zone():
+        return notify.prefs_for(sam.id).tz
+
+    assert zone() == "Europe/London"  # settings.TIME_ZONE
+    ServiceConfig.objects.update_or_create(
+        key="default_time_zone", defaults={"value": "Australia/Perth"},
+    )
+    assert zone() == "Australia/Perth"
+    row, _ = UserSettings.objects.get_or_create(user=sam)
+    row.language = "af"
+    row.save()
+    assert zone() == "Africa/Johannesburg"  # locale beats the config key
+    row.country = "NL"
+    row.save()
+    assert zone() == "Europe/Amsterdam"  # country beats locale
+    for country, name in (
+        ("ZA", "Africa/Johannesburg"), ("GB", "Europe/London"),
+        ("US", "America/New_York"), ("AU", "Australia/Sydney"),
+        ("DE", "Europe/Berlin"), ("FR", "Europe/Paris"),
+    ):
+        row.country = country
+        row.save()
+        assert zone() == name
+    row.quiet_tz = "Asia/Tokyo"  # explicit beats everything
+    row.save()
+    assert zone() == "Asia/Tokyo"
+
+
+def test_typed_zone_is_case_insensitive_and_accepts_cities():
+    assert notify.resolve_tz("europe/london") == "Europe/London"
+    assert notify.resolve_tz("Johannesburg") == "Africa/Johannesburg"
+    assert notify.resolve_tz("new york") == "America/New_York"
+    assert notify.resolve_tz("SYDNEY") == "Australia/Sydney"
+    assert notify.resolve_tz("Mars/Base") is None and notify.resolve_tz("") is None
+
+
+def test_equal_quiet_start_and_end_is_off(club):
+    club_, users = club
+    UserSettings.objects.create(
+        user=users["sam"],
+        quiet_start=datetime.time(8, 0), quiet_end=datetime.time(8, 0),
+    )
+    prefs = notify.prefs_for(users["sam"].id)
+    assert prefs.enabled is False and notify.in_quiet(prefs, NIGHT) is False
+
+
+def test_first_summary_has_the_quiet_hours_line_once(club):
+    club_, users = club
+    _enable(*FLAGS)
+    UserSettings.objects.create(user=users["sam"], country="ZA")
+    event = _event(club_, users["riley"])
+    for n in range(2):
+        notify.hold_notice(
+            users["sam"].id, club_, event, "card",
+            notify.Decision(notify.HOLD, utc(2026, 6, 11, 5, 0)), f"card:first{n}",
+        )
+        with patch(POST, side_effect=_Mids()) as post:
+            notify.send_due_summaries(now=utc(2026, 6, 11, 7, 0 + n))
+        body = post.call_args.kwargs["json"]
+        labels = [b["text"] for r in body["reply_markup"]["inline_keyboard"] for b in r]
+        if n == 0:
+            assert "Quiet hours 22:00-08:00 (Johannesburg time)." in body["text"]
+            assert "Change" in labels
+        else:
+            assert "Quiet hours" not in body["text"] and "Change" not in labels
+        assert "Notifications" in labels
+        kb = body["reply_markup"]["inline_keyboard"]
+        cbs = [b["callback_data"] for r in kb for b in r]
+        assert f"cl:ns:{club_.id}" in cbs
+
+
+def test_summary_swipe_reply_is_recognised(client, club):
+    club_, users = club
+    _enable(*FLAGS)
+    event = _event(club_, users["riley"])
+    notify.hold_notice(
+        users["sam"].id, club_, event, "card",
+        notify.Decision(notify.HOLD, utc(2026, 6, 11, 5, 0)), "card:sw",
+    )
+    with patch(POST, side_effect=_Mids()):
+        notify.send_due_summaries(now=utc(2026, 6, 11, 7, 0))
+    from wine_cellar.apps.club.models import ClubEventDelivery
+
+    row = ClubEventDelivery.objects.get(kind="summary", chat_id="200")
+    assert row.event is None and row.message_id
+    url = reverse("api-club-thread-resolve")
+    query = {"chat_id": "200", "message_id": row.message_id}
+    r = _auth(client, users["sam"]).get(url, query)
+    assert r.status_code == 200 and r.json() == {"summary": True}
+    # Someone else's chat does not resolve it.
+    assert _auth(client, users["lee"]).get(
+        url, {"chat_id": "200", "message_id": row.message_id},
+    ).status_code == 404
+
+
+def test_held_tasteoff_line_gets_a_score_button_only_while_open(club):
+    club_, users = club
+    _enable(*FLAGS)
+    to = TasteOff.objects.create(
+        club=club_, host=users["riley"], title="Blind Syrah",
+        status=TasteOff.STATUS_SCORING,
+    )
+    with patch(SEND, return_value=11), patch(
+        "wine_cellar.apps.club.notify.timezone.now", return_value=NIGHT,
+    ):
+        deliver_tasteoff_open(to.id)
+    with patch(POST, side_effect=_Mids()) as post:
+        notify.send_due_summaries(now=utc(2026, 6, 11, 7, 1))
+    kb = post.call_args_list[0].kwargs["json"]["reply_markup"]["inline_keyboard"]
+    assert any(b["callback_data"] == f"cl:to:{club_.id}" for r in kb for b in r)
+
+
+def test_reverse_migration_helper_drops_eventless_rows(club):
+    import importlib
+
+    from django.apps import apps as live_apps
+
+    mig = importlib.import_module("wine_cellar.apps.club.migrations.0008_club_notify")
+    club_, users = club
+    ev = _event(club_, users["riley"])
+    ClubNotice.objects.create(
+        recipient=users["sam"], club=club_, event=None, kind="crossing",
+        hold="quiet", dedupe_key="a", due_at=NOON,
+    )
+    ClubNotice.objects.create(
+        recipient=users["sam"], club=club_, event=ev, kind="card",
+        hold="quiet", dedupe_key="b", due_at=NOON,
+    )
+    mig.drop_eventless_rows(live_apps, None)
+    assert list(ClubNotice.objects.values_list("dedupe_key", flat=True)) == ["b"]
+
+
+def test_membership_loaded_with_only_does_not_recurse(club):
+    club_, users = club
+    m = ClubMembership.objects.only("id", "role").get(user=users["sam"], club=club_)
+    m.role = "member"
+    m.save(update_fields=["role"])
+    assert ClubMembership.objects.only("id").get(id=m.id).id == m.id
 
 
 # -- API -------------------------------------------------------------------------
@@ -628,6 +897,15 @@ def test_notify_api_flag_off_404_and_on_roundtrip(client, club):
     body = r.json()
     assert body["mode"] == "digest" and body["quiet"]["tz"] == "Africa/Johannesburg"
     assert body["quiet"]["enabled"] is False and body["quiet"]["start"] == "23:00"
+    r = client.patch(
+        url, data={"quiet_enabled": "true", "tz": "sydney"},
+        content_type="application/json",
+    ).json()
+    assert r["quiet"]["enabled"] is True and r["quiet"]["tz"] == "Australia/Sydney"
+    r = client.patch(
+        url, data={"quiet_enabled": "false"}, content_type="application/json",
+    ).json()
+    assert r["quiet"]["enabled"] is False
     bad = client.patch(url, data={"tz": "Mars/Base"}, content_type="application/json")
     assert bad.status_code == 400 and bad.json()["error"] == "invalid_tz"
     bad = client.patch(url, data={"mode": "loud"}, content_type="application/json")
@@ -649,7 +927,7 @@ def test_old_mute_button_maps_to_muted_and_instant(client, club):
     assert m.notify_mode == "muted"
     client.patch(url, data={"feed_muted": False}, content_type="application/json")
     m.refresh_from_db()
-    assert m.notify_mode == "instant" and not m.feed_muted
+    assert m.notify_mode is None and not m.feed_muted
 
 
 # -- what did I miss ---------------------------------------------------------------
@@ -668,8 +946,11 @@ def test_ask_missed_needs_the_flag_and_lists_held_items(club):
     out = answer_club_ask(users["sam"], {"kind": "missed", "club_id": club_.id})
     assert out["status"] == "ok" and out["state"] == "held"
     assert "Syrah" in out["items"][0]["text"]
-    empty = answer_club_ask(users["pat"], {"kind": "missed", "club_id": club_.id})
-    assert empty["items"] == [] and empty["state"] == "none"
+    # Nothing held and no recap: the last 24 h of feed activity answers.
+    feed = answer_club_ask(users["pat"], {"kind": "missed", "club_id": club_.id})
+    assert feed["state"] == "feed" and "Syrah" in feed["items"][0]["text"]
+    own = answer_club_ask(users["riley"], {"kind": "missed", "club_id": club_.id})
+    assert own["items"] == [] and own["state"] == "none"  # only their own bottle
     # After the summary goes out, the recap is what answers.
     with patch(POST, side_effect=_Mids()):
         notify.send_due_summaries(now=utc(2026, 6, 11, 7, 1))

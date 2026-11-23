@@ -51,6 +51,7 @@ from wine_cellar.apps.club.services import (
     reopen_tasteoff,
 )
 from wine_cellar.apps.club.threads import (
+    SUMMARY,
     enqueue_comment_notices,
     is_thread_muted,
     resolve_message,
@@ -203,6 +204,8 @@ class ClubThreadResolveView(ThreadsEnabledMixin, ScannerAPIView):
         )
         if event is None:
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        if event is SUMMARY:
+            return Response({"summary": True})
         if _ask_hidden(event):
             return _ask_off_response()
         return Response(

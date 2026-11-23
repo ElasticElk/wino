@@ -7,6 +7,14 @@ def feed_muted_to_mode(apps, schema_editor):
     Membership.objects.filter(feed_muted=True).update(notify_mode="muted")
 
 
+def drop_eventless_rows(apps, schema_editor):
+    """Reverse: event goes back to NOT NULL, so rows without one must go."""
+    apps.get_model("club", "ClubNotice").objects.filter(event__isnull=True).delete()
+    apps.get_model("club", "ClubEventDelivery").objects.filter(
+        event__isnull=True,
+    ).delete()
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -56,6 +64,34 @@ class Migration(migrations.Migration):
             ),
         ),
         migrations.AlterField(
+            model_name="clubeventdelivery",
+            name="event",
+            field=models.ForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name="deliveries",
+                to="club.clubevent",
+            ),
+        ),
+        migrations.AlterField(
+            model_name="clubeventdelivery",
+            name="kind",
+            field=models.CharField(
+                choices=[
+                    ("card", "Card"),
+                    ("ping", "Ping"),
+                    ("ask", "Ask"),
+                    ("summary", "Summary"),
+                ],
+                default="card",
+                max_length=8,
+            ),
+        ),
+        # Listed after the nullable AlterFields so that, reversed, it runs
+        # before they turn NOT NULL again.
+        migrations.RunPython(migrations.RunPython.noop, drop_eventless_rows),
+        migrations.AlterField(
             model_name="clubnotice",
             name="kind",
             field=models.CharField(
@@ -65,6 +101,7 @@ class Migration(migrations.Migration):
                     ("card", "Feed card"),
                     ("ask", "Ask"),
                     ("tasteoff", "Taste-off"),
+                    ("crossing", "Recap switch"),
                 ],
                 default="comment",
                 max_length=12,
