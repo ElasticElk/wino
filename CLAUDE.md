@@ -32,7 +32,7 @@ start.sh / stop.sh    # Service orchestration
 - `TelegramUser` — Links Django users to Telegram chat IDs
 - `ServiceConfig` — Key-value config store (bot_token, grok_api_key, web_url, `chat_min_reply_ms`, `feature_lists` / `feature_clubs` / …)
 - `WineList` / `WineListItem` — Personal To-drink list (**user-scoped**, not household). Club lists (`kind=club`, `owner` null, FK to `Club`) share a names-only checklist. Flag `feature_lists` (club lists also need `feature_clubs`).
-- `Club` / `ClubMembership` / `ClubInvite` / `ClubEvent` / `ClubComment` / `TasteOff` — Private wine clubs (own app `wine_cellar.apps.club`). Sharing policy is club-wide. Flag `feature_clubs`. Comments `feature_club_comments`; taste-offs `feature_tasteoffs`. `Club.kind=global` is staff-run, feed-only (`cellar_visibility=none`, no peek/badges/dismantle); flag `feature_global_clubs`.
+- `Club` / `ClubMembership` / `ClubInvite` / `ClubEvent` / `ClubComment` / `TasteOff` — Private wine clubs (own app `wine_cellar.apps.club`). Sharing policy is club-wide. Flag `feature_clubs`. Comments `feature_club_comments`; threads (swipe-reply, reply pings via `ClubNotice` outbox, `ClubThreadMute`, `ClubEventDelivery.kind`) `feature_club_threads` (needs clubs + comments; see docs/wine-club/phase-5-social-redesign.md); taste-offs `feature_tasteoffs`. `Club.kind=global` is staff-run, feed-only (`cellar_visibility=none`, no peek/badges/dismantle); flag `feature_global_clubs`.
 
 ### REST API (`/api/`)
 Auth: `Authorization: Token <token>` header. Optional `X-Household: <id>` header.
@@ -88,7 +88,8 @@ Auth: `Authorization: Token <token>` header. Optional `X-Household: <id>` header
 - `GET /api/clubs/<id>/members/<user_id>/cellar/` — Peek (summary/full). Forbidden: prices, drawers, notes, barcodes, critic/Vivino
 - `POST /api/scanner/club-invites/redeem/` — Staff (the bot uses `handler.admin_api`; the member client gets 403). Compound: new cellar + club membership in one call. 409 `dismantle_in_progress` while a unanimous end-vote is open. Someone already in the club gets 200 `already_member` even if the invite is now used up or expired (a double-tapped Join), and no use is counted
 - `POST /api/scanner/invites/preview/` — Household invite first, then club invite (`kind=club`)
-- `GET/POST /api/clubs/<id>/events/<event_id>/comments/` — Club-visible notes, max 280. Flag `feature_club_comments`. 409 `retracted`
+- `GET/POST /api/clubs/<id>/events/<event_id>/comments/` — Club-visible notes, max 280. Flag `feature_club_comments`. 409 `retracted`. With `feature_club_threads` a new comment queues reply pings instead of editing the card
+- `GET /api/clubs/threads/resolve/?chat_id=&message_id=` — Bot message to event (swipe-reply). `GET/POST /api/clubs/events/<event_id>/mute/` — thread mute toggle. Flag `feature_club_threads`; off → 404 `not_enabled`
 - `POST /api/clubs/<id>/events/<event_id>/to-list/` — Snapshot onto the **caller's** personal To-drink list (`source=club_feed`). No `wine_id` of the actor's bottle. Flag `feature_lists`
 - `GET/POST /api/clubs/<id>/list/` and `.../list/items/` — Shared club checklist (names/vintages only). Delete if owner or `added_by`
 - `POST /api/clubs/<id>/tasteoffs/` — Setup a scored tasting (1–5, not `Wine.rating`). One setup/scoring flight per club. Flag `feature_tasteoffs`. Host or owner may close; beat auto-closes after 7 days
@@ -173,7 +174,7 @@ Callers POST to queue, then poll the same URL with `?task_id=`. The Telegram cli
 ## Key Config Files
 - `wine-cellar/wine_cellar/conf/settings.py` — Base Django settings
 - `wine-cellar/wine_cellar/conf/docker_settings.py` — Docker/prod overrides (env vars)
-- `wine-cellar/wine_cellar/conf/celery.py` — Celery + beat schedule (drink_by_reminder at 2:30 AM daily; expire_dismantle_votes every 15 min; close_stale_tasteoffs at 03:15)
+- `wine-cellar/wine_cellar/conf/celery.py` — Celery + beat schedule (drink_by_reminder at 2:30 AM daily; expire_dismantle_votes every 15 min; close_stale_tasteoffs at 03:15; flush_club_notices every minute)
 - `scanner-service/config.yaml` — Scanner bootstrap config
 - `wine-cellar/pyproject.toml` — Project metadata, deps, test config (AGPL-3.0 license)
 

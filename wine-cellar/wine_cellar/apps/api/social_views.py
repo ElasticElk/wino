@@ -29,6 +29,13 @@ from wine_cellar.apps.club.services import (
     display_name,
     reopen_tasteoff,
 )
+from wine_cellar.apps.club.threads import (
+    enqueue_comment_notices,
+    is_thread_muted,
+    resolve_message,
+    threads_enabled,
+    toggle_thread_mute,
+)
 from wine_cellar.apps.scanner.flags import flag_on
 from wine_cellar.apps.wine.models import (
     Wine,
@@ -124,12 +131,80 @@ class ClubCommentCollectionView(CommentsEnabledMixin, ScannerAPIView):
         comment = ClubComment.objects.create(
             event=event, user=request.user, text=text,
         )
-        from wine_cellar.apps.club.tasks import refresh_event_comment_card
+        if threads_enabled():
+            transaction.on_commit(
+                lambda cid=comment.id: enqueue_comment_notices(cid)
+            )
+        else:
+            from wine_cellar.apps.club.tasks import refresh_event_comment_card
 
-        transaction.on_commit(
-            lambda eid=event.id: refresh_event_comment_card.delay(eid)
-        )
+            transaction.on_commit(
+                lambda eid=event.id: refresh_event_comment_card.delay(eid)
+            )
         return Response(serialize_comment(comment), status=status.HTTP_201_CREATED)
+
+
+class ThreadsEnabledMixin(ClubsEnabledMixin):
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if not threads_enabled():
+            raise CommentsDisabled()
+
+    def handle_exception(self, exc):
+        if isinstance(exc, CommentsDisabled):
+            return Response({"error": "not_enabled"}, status=status.HTTP_404_NOT_FOUND)
+        return super().handle_exception(exc)
+
+
+class ClubThreadResolveView(ThreadsEnabledMixin, ScannerAPIView):
+    """Which event does a bot message (swipe-reply target) belong to?"""
+
+    def get(self, request):
+        try:
+            message_id = int(request.query_params.get("message_id") or 0)
+        except (TypeError, ValueError):
+            message_id = 0
+        event = resolve_message(
+            request.user, request.query_params.get("chat_id") or "", message_id,
+        )
+        if event is None:
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(
+            {
+                "event_id": event.id,
+                "club_id": event.club_id,
+                "retracted": event.retracted,
+                "muted": is_thread_muted(request.user.id, event.id),
+            }
+        )
+
+
+class ClubThreadMuteView(ThreadsEnabledMixin, ScannerAPIView):
+    def _event(self, request, event_id):
+        event = ClubEvent.objects.filter(id=event_id).first()
+        if event is None:
+            return None
+        if not ClubMembership.objects.filter(
+            user=request.user, club_id=event.club_id,
+        ).exists():
+            return None
+        return event
+
+    def get(self, request, event_id):
+        event = self._event(request, event_id)
+        if event is None:
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"muted": is_thread_muted(request.user.id, event.id)})
+
+    def post(self, request, event_id):
+        event = self._event(request, event_id)
+        if event is None:
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        wanted = (request.data or {}).get("muted")
+        muted = toggle_thread_mute(
+            request.user, event, None if wanted is None else bool(wanted),
+        )
+        return Response({"muted": muted})
 
 
 class ClubEventToListView(ClubListsEnabledMixin, ScannerAPIView):

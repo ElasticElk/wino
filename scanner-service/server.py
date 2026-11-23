@@ -554,6 +554,10 @@ async def lifespan(app: FastAPI):
         bot_handler._bar_store = CardStore.from_url(
             redis_url, ttl=180 * 24 * 3600, prefix="whiney:bar:",
         )
+        # Club "Say something" / Reply prompt (feature_club_threads): 15 min.
+        bot_handler._club_comment_store = CardStore.from_url(
+            redis_url, ttl=15 * 60, prefix="whiney:clubcm:",
+        )
         bot_handler.set_local_barcode_reader(read_barcode_local)
         bot_handler.set_flags(svc)
         for cid, ccy in chat_id_to_currency.items():

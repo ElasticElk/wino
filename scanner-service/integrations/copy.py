@@ -225,6 +225,20 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.comment.too_long": "Keep it under 280 characters.",
         "club.comment.again": "Tap Say something again.",
         "club.comment.more": "and {n} more",
+        "club.thread.btn_reply": "Reply",
+        "club.thread.btn_mute": "Mute thread",
+        "club.thread.btn_unmute": "Unmute thread",
+        "club.thread.btn_view": "Thread ({n})",
+        "club.thread.prompt": (
+            "Type a short note (280 characters max). Your next message in the "
+            "next 15 minutes is the comment. You can also swipe-reply to any "
+            "club message."
+        ),
+        "club.thread.muted": "Thread muted. No more pings from it.",
+        "club.thread.unmuted": "Thread unmuted. You'll get pings from it again.",
+        "club.thread.empty": "Nobody has replied yet.",
+        "club.thread.page": "Page {page} of {pages}",
+        "club.thread.gone": "That conversation isn't there any more.",
         "club.td.btn": "To-drink list",
         "club.td.added": "On your To-drink list.",
         "club.td.off": "To-drink lists aren't on yet.",
@@ -753,6 +767,20 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.comment.too_long": "Hou dit onder 280 karakters.",
         "club.comment.again": "Tik Sê iets weer.",
         "club.comment.more": "en nog {n}",
+        "club.thread.btn_reply": "Reply",
+        "club.thread.btn_mute": "Mute thread",
+        "club.thread.btn_unmute": "Unmute thread",
+        "club.thread.btn_view": "Thread ({n})",
+        "club.thread.prompt": (
+            "Tik 'n kort nota (hoogstens 280 karakters). Jou volgende boodskap "
+            "binne die volgende 15 minute is die opmerking. Jy kan ook op enige "
+            "klubboodskap swiep-antwoord."
+        ),
+        "club.thread.muted": "Gesprek gedemp. Geen pings meer daaruit nie.",
+        "club.thread.unmuted": "Gesprek nie meer gedemp nie. Jy kry weer pings daaruit.",
+        "club.thread.empty": "Niemand het nog geantwoord nie.",
+        "club.thread.page": "Bladsy {page} van {pages}",
+        "club.thread.gone": "Daai gesprek is nie meer daar nie.",
         "club.td.btn": "To-drink-lys",
         "club.td.added": "Op jou To-drink-lys.",
         "club.td.off": "To-drink-lyste is nog nie aan nie.",

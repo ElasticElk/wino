@@ -207,6 +207,16 @@ urlpatterns = [
         name="api-club-dismantle-cancel",
     ),
     path(
+        "clubs/threads/resolve/",
+        social_views.ClubThreadResolveView.as_view(),
+        name="api-club-thread-resolve",
+    ),
+    path(
+        "clubs/events/<int:event_id>/mute/",
+        social_views.ClubThreadMuteView.as_view(),
+        name="api-club-thread-mute",
+    ),
+    path(
         "clubs/<int:pk>/events/<int:event_id>/comments/",
         social_views.ClubCommentCollectionView.as_view(),
         name="api-club-event-comments",

@@ -767,8 +767,11 @@ class NavFlow:
         club = self.handler._club_flow()
         state = club.state_for(str(chat_id)) or {}
         comment = state if state.get("step") == "comment" else None
+        stored = club.thread_prompt(chat_id)
         if entry is not None and entry.get("prompt_id") == tapped:
             self.pending.cancel(chat_id)
+        elif stored is not None and stored.get("prompt_id") == tapped:
+            club.drop_comment_prompt(str(chat_id))
         elif comment is not None and comment.get("prompt_id") == tapped:
             club.clear(str(chat_id))
         else:
@@ -795,6 +798,10 @@ class NavFlow:
         if state.get("step") == "comment":
             prompts.append(state.get("prompt_id"))
             club.clear(str(chat_id))
+        stored = club.thread_prompt(chat_id)
+        if stored is not None:
+            prompts.append(stored.get("prompt_id"))
+            club.drop_comment_prompt(str(chat_id))
         if bot is None:
             return
         for prompt_id in prompts:

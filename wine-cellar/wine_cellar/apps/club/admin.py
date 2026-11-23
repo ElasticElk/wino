@@ -63,7 +63,7 @@ class ClubEventAdmin(admin.ModelAdmin):
 
 @admin.register(ClubEventDelivery)
 class ClubEventDeliveryAdmin(admin.ModelAdmin):
-    list_display = ("event", "chat_id", "message_id", "sent_at", "error")
+    list_display = ("event", "kind", "chat_id", "message_id", "sent_at", "error")
 
 
 class ClubDismantleBallotInline(admin.TabularInline):

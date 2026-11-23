@@ -34,6 +34,6 @@
 | 14 | To-drink if already in stock | **Allow.** Unique open `(list, wine_id)`. | 1 |
 | 18 | Undo restore vs list | Phase 1: move-to-cellar is one-way on the list row. Do not auto-restore To-drink on stock undo. | 1 |
 | 21 | `WineList.club_id` without FK in phase 1 | Integer column now; real FK in phase 3. Avoids importing `club` before it exists. | 1 / 3 |
-| 22 | Comment edits to old DMs | Edit original delivery if ≤3 comments and `message_id` known; otherwise only `/club feed`. | 3 |
+| 22 | Comment edits to old DMs | Edit original delivery if ≤3 comments and `message_id` known; otherwise only `/club feed`. **Superseded when `feature_club_threads` is on:** the card is never edited; each comment pings members as a threaded reply and the full thread is in `/club feed` (see phase-5-social-redesign.md). | 3 / 5 |
 
 When a recommended answer is implemented, tick it in the phase PR description (`Implements open-questions #1, #12`) so review can see the defaults landing.

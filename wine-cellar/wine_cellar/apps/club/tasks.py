@@ -68,6 +68,18 @@ def _send(
     )
 
 
+@shared_task(name="flush_club_notices")
+def flush_club_notices():
+    """Send every due ClubNotice (batched comment pings). Never raises."""
+    from wine_cellar.apps.club.threads import flush_due_notices
+
+    try:
+        return flush_due_notices()
+    except Exception:  # pragma: no cover - last-resort guard
+        logger.exception("flush_club_notices failed")
+        return 0
+
+
 def _opened_markup(event, loc):
     if event.kind != ClubEvent.KIND_OPENED or event.retracted:
         return None
@@ -228,7 +240,7 @@ def deliver_club_event(event_id):
                 )
                 markup = _opened_markup(event, loc)
             delivery = ClubEventDelivery.objects.filter(
-                event=event, chat_id=tu.chat_id,
+                event=event, chat_id=tu.chat_id, kind=ClubEventDelivery.KIND_CARD,
             ).first()
             message_id = delivery.message_id if delivery else None
             result = _send(
@@ -257,6 +269,7 @@ def deliver_club_event(event_id):
                 except IntegrityError:
                     ClubEventDelivery.objects.filter(
                         event=event, chat_id=tu.chat_id,
+                        kind=ClubEventDelivery.KIND_CARD,
                     ).update(message_id=new_mid, error=error)
             else:
                 delivery.message_id = new_mid
@@ -548,6 +561,9 @@ def _comment_pairs(event):
 def refresh_event_comment_card(event_id):
     if not flag_on("feature_clubs") or not flag_on("feature_club_comments"):
         return
+    if flag_on("feature_club_threads"):
+        # Threads replace the edit-the-card path: comments ping instead.
+        return
     event = (
         ClubEvent.objects.select_related("club", "actor")
         .filter(id=event_id)
@@ -564,7 +580,8 @@ def refresh_event_comment_card(event_id):
     from wine_cellar.apps.club.services import display_name
 
     actor = display_name(event.actor) if event.actor_id else ""
-    for delivery in event.deliveries.exclude(message_id__isnull=True):
+    cards = event.deliveries.filter(kind=ClubEventDelivery.KIND_CARD)
+    for delivery in cards.exclude(message_id__isnull=True):
         tu = TelegramUser.objects.filter(
             chat_id=delivery.chat_id, is_active=True,
         ).select_related("user").first()

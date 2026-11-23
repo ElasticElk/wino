@@ -178,3 +178,25 @@ Slash commands and `set_bot_presence` descriptions stay English. Dialogue on mes
 | `/list` | Things to drink or buy |
 | `/club` | Wine clubs |
 | `/clubpost` (staff) | Post to a global club |
+
+---
+
+## Phase 5 — threads (`feature_club_threads`)
+
+Buttons stay English in both languages. Server pings use `wine_cellar/apps/club/copy.py`, the bot uses `scanner-service/integrations/copy.py`.
+
+| key | EN | AF |
+| --- | --- | --- |
+| `club.thread.btn_reply` | Reply | Reply |
+| `club.thread.btn_mute` | Mute thread | Mute thread |
+| `club.thread.btn_unmute` | Unmute thread | Unmute thread |
+| `club.thread.btn_view` | Thread ({n}) | Thread ({n}) |
+| `club.thread.about` (server) | On: {line} | Oor: {line} |
+| `club.thread.prompt` | Type a short note (280 characters max). Your next message in the next 15 minutes is the comment. You can also swipe-reply to any club message. | Tik 'n kort nota (hoogstens 280 karakters). Jou volgende boodskap binne die volgende 15 minute is die opmerking. Jy kan ook op enige klubboodskap swiep-antwoord. |
+| `club.thread.muted` | Thread muted. No more pings from it. | Gesprek gedemp. Geen pings meer daaruit nie. |
+| `club.thread.unmuted` | Thread unmuted. You'll get pings from it again. | Gesprek nie meer gedemp nie. Jy kry weer pings daaruit. |
+| `club.thread.empty` | Nobody has replied yet. | Niemand het nog geantwoord nie. |
+| `club.thread.page` | Page {page} of {pages} | Bladsy {page} van {pages} |
+| `club.thread.gone` | That conversation isn't there any more. | Daai gesprek is nie meer daar nie. |
+
+Swipe-reply too long reuses `club.comment.too_long`; saved reuses `club.comment.saved`. A ping's body lines are `💬 {name}: {text}` (name and text escaped, no catalog key).

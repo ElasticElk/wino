@@ -47,6 +47,10 @@ MESSAGES = {
         "club.end.cancel": "Cancel vote",
         "club.comment.btn": "Say something",
         "club.comment.more": "and {n} more",
+        "club.thread.btn_reply": "Reply",
+        "club.thread.btn_mute": "Mute thread",
+        "club.thread.btn_unmute": "Unmute thread",
+        "club.thread.about": "On: {line}",
         "club.td.btn": "To-drink list",
         "club.to.running": (
             "{host} is running a taste-off: {title}. Score 1–5."
@@ -102,6 +106,10 @@ MESSAGES = {
         "club.end.cancel": "Kanselleer stemming",
         "club.comment.btn": "Sê iets",
         "club.comment.more": "en nog {n}",
+        "club.thread.btn_reply": "Reply",
+        "club.thread.btn_mute": "Mute thread",
+        "club.thread.btn_unmute": "Unmute thread",
+        "club.thread.about": "Oor: {line}",
         "club.td.btn": "To-drink-lys",
         "club.to.running": (
             "{host} hou 'n proe: {title}. Tel 1–5."

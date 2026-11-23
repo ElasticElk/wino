@@ -939,6 +939,32 @@ class WineCellarAPI:
             body["status_code"] = resp.status_code
         return body
 
+    def club_thread_resolve(self, chat_id, message_id) -> dict:
+        resp = self.session.get(
+            f"{self.base_url}/api/clubs/threads/resolve/",
+            params={"chat_id": str(chat_id), "message_id": message_id},
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json()
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
+    def club_thread_mute(self, event_id: int, muted=None) -> dict:
+        payload = {} if muted is None else {"muted": bool(muted)}
+        resp = self.session.post(
+            f"{self.base_url}/api/clubs/events/{event_id}/mute/",
+            json=payload, timeout=10,
+        )
+        if resp.status_code >= 400:
+            return self._list_response(resp)
+        body = resp.json()
+        if isinstance(body, dict):
+            body["status_code"] = resp.status_code
+        return body
+
     def event_to_list(self, club_id: int, event_id: int) -> dict:
         resp = self.session.post(
             f"{self.base_url}/api/clubs/{club_id}/events/{event_id}/to-list/",

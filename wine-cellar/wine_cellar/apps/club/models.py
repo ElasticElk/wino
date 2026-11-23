@@ -213,18 +213,94 @@ class ClubEvent(models.Model):
 
 
 class ClubEventDelivery(models.Model):
+    """Every bot message about an event: the card, and reply pings.
+
+    A swipe-reply to any of them (chat_id, message_id) maps back to the event.
+    """
+
+    KIND_CARD = "card"
+    KIND_PING = "ping"
+    KIND_ASK = "ask"
+    KIND = [
+        (KIND_CARD, "Card"),
+        (KIND_PING, "Ping"),
+        (KIND_ASK, "Ask"),
+    ]
     event = models.ForeignKey(
         ClubEvent, on_delete=models.CASCADE, related_name="deliveries",
     )
+    kind = models.CharField(max_length=6, choices=KIND, default=KIND_CARD)
     chat_id = models.CharField(max_length=50)
     message_id = models.BigIntegerField(null=True, blank=True)
     sent_at = models.DateTimeField(auto_now_add=True)
     error = models.CharField(max_length=200, blank=True, default="")
 
     class Meta:
+        indexes = [
+            models.Index(
+                fields=["chat_id", "message_id"], name="clubdelivery_msg_idx",
+            ),
+        ]
         constraints = [
             models.UniqueConstraint(
-                fields=["event", "chat_id"], name="unique_event_chat"
+                fields=["event", "chat_id"],
+                condition=models.Q(kind="card"),
+                name="unique_event_chat",
+            ),
+        ]
+
+
+class ClubThreadMute(models.Model):
+    """A member who muted one event's thread: no reply pings for it."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="+",
+    )
+    event = models.ForeignKey(
+        ClubEvent, on_delete=models.CASCADE, related_name="thread_mutes",
+    )
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "event"], name="unique_thread_mute",
+            ),
+        ]
+
+
+class ClubNotice(models.Model):
+    """Outbox: one pending ping per (recipient, event), flushed by Celery.
+
+    Replies on the same event inside the batch window merge into one row
+    (payload["comment_ids"]) and go out as one combined ping.
+    """
+
+    KIND_COMMENT = "comment"
+    KIND = [(KIND_COMMENT, "Comment")]
+    recipient = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="+",
+    )
+    club = models.ForeignKey(
+        Club, on_delete=models.CASCADE, related_name="notices",
+    )
+    event = models.ForeignKey(
+        ClubEvent, on_delete=models.CASCADE, related_name="notices",
+    )
+    kind = models.CharField(max_length=12, choices=KIND, default=KIND_COMMENT)
+    dedupe_key = models.CharField(max_length=120, unique=True)
+    payload = models.JSONField(default=dict, blank=True)
+    created = models.DateTimeField(auto_now_add=True)
+    due_at = models.DateTimeField()
+    sent_at = models.DateTimeField(null=True, blank=True)
+    error = models.CharField(max_length=200, blank=True, default="")
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["sent_at", "due_at"], name="clubnotice_due_idx"),
+            models.Index(
+                fields=["recipient", "event", "sent_at"],
+                name="clubnotice_rcpt_idx",
             ),
         ]
 

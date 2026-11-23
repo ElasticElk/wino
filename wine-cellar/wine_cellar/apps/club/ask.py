@@ -1209,6 +1209,33 @@ def _answer_list(user, club, members, member) -> dict:
     }
 
 
+def _comment_threads(club, matching, max_events=6) -> list:
+    """Full comment threads (oldest first) for the events that matched."""
+    event_ids = []
+    for event_id in matching.values_list("event_id", flat=True):
+        if event_id not in event_ids:
+            event_ids.append(event_id)
+        if len(event_ids) >= max_events:
+            break
+    out = []
+    for event in ClubEvent.objects.filter(
+        id__in=event_ids, club=club["club"],
+    ).select_related("actor"):
+        out.append({
+            "wine_name": event.wine_name,
+            "vintage": event.vintage,
+            "opened_by": display_name(event.actor) if event.actor_id else "",
+            "comments": [
+                {
+                    "display_name": display_name(c.user) if c.user_id else "",
+                    "text": c.text,
+                }
+                for c in event.comments.select_related("user").order_by("created")
+            ],
+        })
+    return out
+
+
 def _answer_comments(club, data) -> dict:
     wine_text = str(data.get("wine_text") or data.get("grape") or "").strip()
     qs = (
@@ -1224,9 +1251,13 @@ def _answer_comments(club, data) -> dict:
             | Q(text__icontains=wine_text)
         )
     rows = list(qs[:12])
+    threads = []
+    if flag_on("feature_club_threads"):
+        threads = _comment_threads(club, qs)
     return {
         "status": "ok",
         "kind": "comments",
+        "threads": threads,
         "club": _club_meta(club),
         "query": wine_text,
         "comments": [

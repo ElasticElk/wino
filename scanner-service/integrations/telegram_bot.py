@@ -3392,6 +3392,7 @@ class TelegramBotHandler:
             naming = True
         await self._nav().drop_pending(chat_id, bot)
         club = self._club_flow()
+        club.drop_comment_prompt(chat_id)
         club_state = club.state_for(chat_id)
         if club_state and club_state.get("step") in (
             "name", "share", "compound_name", "compound_consent", "pick_hh", "join",
@@ -3679,6 +3680,19 @@ class TelegramBotHandler:
                 await pacer.wait()
                 await self._nav().on_label(update, context, label)
                 return
+
+            # Swipe-reply to a club card or ping is a comment on that event
+            # (feature_club_threads); no Say something step needed.
+            if getattr(update.message, "reply_to_message", None) is not None:
+                try:
+                    replied = await self._club_flow().on_reply(update, context)
+                except Exception as e:
+                    logger.info("[club] swipe-reply failed: %s", e)
+                    replied = False
+                if replied:
+                    handled_by = "club"
+                    self._text_meta["outcome"] = self._text_meta.get("outcome") or "answered"
+                    return
 
             # A "near me" ask only survives an area name; anything else (even
             # a message the router never sees) drops it and the bar returns.

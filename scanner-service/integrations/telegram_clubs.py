@@ -33,6 +33,10 @@ STATE_TTL_SECONDS = 30 * 60
 # the same rule as the menu's search prompt (telegram_nav.PENDING_TTL_SECONDS).
 COMMENT_TTL_SECONDS = 2 * 60
 COMMENT_MAX = 280
+# feature_club_threads: the Say something / Reply prompt lasts 15 minutes and
+# lives in a CardStore (Redis when set), so it survives a scanner restart.
+THREAD_PROMPT_TTL_SECONDS = 15 * 60
+THREAD_PAGE_CHARS = 3600
 VOTE_GLYPH = {"down": "\U0001F44E", "up": "\U0001F44D", "meh": ""}
 _MONTHS = (
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -319,6 +323,61 @@ class ClubFlow:
     def locale(self, update=None, chat_id=None) -> str:
         return locale_for(self.handler, update=update, chat_id=chat_id)
 
+    # -- threads (feature_club_threads) ------------------------------------
+    def threads_on(self) -> bool:
+        return bool(
+            self.handler.flag_on("feature_club_comments")
+            and self.handler.flag_on("feature_club_threads")
+        )
+
+    def _prompt_store(self):
+        store = getattr(self.handler, "_club_comment_store", None)
+        if store is None:
+            from integrations.card_store import CardStore
+            store = CardStore(
+                ttl=THREAD_PROMPT_TTL_SECONDS, prefix="whiney:clubcm:",
+            )
+            try:
+                self.handler._club_comment_store = store
+            except Exception:
+                pass
+        return store
+
+    def _prompt_get(self, chat_id) -> dict | None:
+        try:
+            entry = self._prompt_store().get(str(chat_id))
+        except Exception as e:
+            logger.info("[club] prompt store read failed: %s", e)
+            return None
+        if not entry:
+            return None
+        if time.time() - float(entry.get("at") or 0) > THREAD_PROMPT_TTL_SECONDS:
+            self._prompt_drop(chat_id)
+            return None
+        return dict(entry)
+
+    def _prompt_put(self, chat_id, **fields) -> None:
+        try:
+            self._prompt_store()[str(chat_id)] = dict(fields, at=time.time())
+        except Exception as e:
+            logger.info("[club] prompt store write failed: %s", e)
+
+    def _prompt_drop(self, chat_id) -> None:
+        try:
+            self._prompt_store().pop(str(chat_id))
+        except Exception as e:
+            logger.info("[club] prompt store drop failed: %s", e)
+
+    def thread_prompt(self, chat_id) -> dict | None:
+        if not self.threads_on():
+            return None
+        return self._prompt_get(chat_id)
+
+    def drop_comment_prompt(self, chat_id) -> None:
+        """A command, label or other flow takes the one 'next message' slot."""
+        if self.threads_on():
+            self._prompt_drop(chat_id)
+
     def _api(self, update):
         return self.handler._get_api(update)
 
@@ -464,6 +523,10 @@ class ClubFlow:
 
     async def on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
         chat_id = str(update.effective_chat.id)
+        if clubs_enabled(self.handler) and self.threads_on():
+            prompt = self._prompt_get(chat_id)
+            if prompt:
+                return await self._submit_prompt_comment(update, chat_id, prompt)
         state = self.state_for(chat_id)
         if not state:
             return False
@@ -889,6 +952,14 @@ class ClubFlow:
                     line = f"<i>{line}</i>"
                 lines.append(line)
                 row = _event_action_row(event, loc, flags)
+                if (
+                    self.threads_on() and event.get("id")
+                    and (event.get("comment_count") or 0) > 0
+                ):
+                    row = list(row) + [InlineKeyboardButton(
+                        t(loc, "club.thread.btn_view", n=event["comment_count"]),
+                        callback_data=club_cb("th", club_id, event["id"], 0),
+                    )]
                 if row:
                     keyboard.append(row)
             text = "\n".join(lines)
@@ -1410,8 +1481,15 @@ class ClubFlow:
             else:
                 self.remember(chat_id, step="join", household_name=name)
                 await self._join_card(update, query=query)
-        elif action == "cm":
+        elif action in ("cm", "rp"):
             await self._start_comment(update, int(rest[0]) if rest else 0, query)
+        elif action == "mt" and self.threads_on():
+            await self._toggle_thread_mute(update, int(rest[0]) if rest else 0, query)
+        elif action == "th" and self.threads_on() and len(rest) >= 2:
+            await self._show_thread(
+                update, int(rest[0]), int(rest[1]),
+                int(rest[2]) if len(rest) > 2 else 0, query,
+            )
         elif action == "td":
             await self._event_to_list(update, int(rest[0]) if rest else 0, query)
         elif action == "li":
@@ -1881,6 +1959,20 @@ class ClubFlow:
         nav = getattr(self.handler, "_nav", None)
         if callable(nav):
             nav().pending.cancel(chat_id)  # one "next message" slot per chat
+        if self.threads_on():
+            self.clear(chat_id)
+            prompt = t(loc, "club.thread.prompt")
+            event = self._events_seen.pop(event_id, None)
+            if event and (event.get("kind") or "opened") == "opened":
+                prompt = f"\U0001F4AC {_wine_line(event, loc)}\n\n{prompt}"
+            sent = await query.message.reply_text(
+                prompt, parse_mode="HTML", reply_markup=_cancel_markup(),
+            )
+            self._prompt_put(
+                chat_id, event_id=event_id, club_id=club_id,
+                prompt_id=getattr(sent, "message_id", None),
+            )
+            return
         # Say what the note goes under: a home-card shortcut is not obviously
         # tied to one bottle.
         prompt = t(loc, "club.comment.prompt")
@@ -1938,6 +2030,162 @@ class ClubFlow:
             })),
         )
         return True
+
+    async def _post_thread_comment(self, update, event_id, club_id, text) -> bool:
+        """Post a comment from the typed prompt or a swipe-reply. Never raises."""
+        loc = self.locale(update)
+        note = (text or "").strip()
+        if not note or len(note) > COMMENT_MAX:
+            await update.message.reply_text(
+                t(loc, "club.comment.too_long"),
+                reply_markup=self._comment_again_markup(event_id),
+            )
+            return True
+        try:
+            result = self._api(update).add_club_comment(club_id, event_id, note)
+        except Exception as e:
+            logger.info("[club] comment post failed: %s", e)
+            result = {"error": "err"}
+        if result.get("error") == "retracted" or result.get("status_code") == 409:
+            await update.message.reply_text(t(loc, "club.err"), reply_markup=_menu_markup())
+            return True
+        if result.get("error"):
+            await update.message.reply_text(
+                t(loc, "club.err"), reply_markup=self._comment_again_markup(event_id),
+            )
+            return True
+        from integrations.telegram_nav import follow_up_rows
+        await update.message.reply_text(
+            t(loc, "club.comment.saved"),
+            reply_markup=InlineKeyboardMarkup(follow_up_rows("club", {
+                "flags": self._flags(), "club_id": club_id,
+            })),
+        )
+        return True
+
+    async def _submit_prompt_comment(self, update, chat_id, prompt) -> bool:
+        self._prompt_drop(chat_id)
+        await self._close_comment_prompt(update, chat_id, prompt.get("prompt_id"))
+        return await self._post_thread_comment(
+            update, prompt.get("event_id"), prompt.get("club_id"),
+            update.message.text,
+        )
+
+    async def on_reply(self, update, context) -> bool:
+        """A swipe-reply to a club message is a comment on that event.
+        True when it was one; False leaves the message to the normal paths."""
+        if not (clubs_enabled(self.handler) and self.threads_on()):
+            return False
+        message = getattr(update, "message", None)
+        reply = getattr(message, "reply_to_message", None)
+        if message is None or reply is None:
+            return False
+        sender = getattr(reply, "from_user", None)
+        if sender is not None and not getattr(sender, "is_bot", True):
+            return False
+        chat_id = str(update.effective_chat.id)
+        try:
+            found = self._api(update).club_thread_resolve(chat_id, reply.message_id)
+        except Exception as e:
+            logger.info("[club] thread resolve failed: %s", e)
+            return False
+        if found.get("error") or not found.get("event_id"):
+            return False
+        self._prompt_drop(chat_id)
+        if found.get("retracted"):
+            await message.reply_text(
+                t(self.locale(update), "club.err"), reply_markup=_menu_markup(),
+            )
+            return True
+        return await self._post_thread_comment(
+            update, found["event_id"], found["club_id"], message.text,
+        )
+
+    async def _toggle_thread_mute(self, update, event_id, query):
+        loc = self.locale(update)
+        try:
+            result = self._api(update).club_thread_mute(event_id)
+        except Exception as e:
+            logger.info("[club] thread mute failed: %s", e)
+            result = {"error": "err"}
+        if result.get("error"):
+            await query.message.reply_text(t(loc, "club.thread.gone"))
+            return
+        muted = bool(result.get("muted"))
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                t(loc, "club.thread.btn_reply"), callback_data=club_cb("rp", event_id),
+            ),
+            InlineKeyboardButton(
+                t(loc, "club.thread.btn_unmute" if muted else "club.thread.btn_mute"),
+                callback_data=club_cb("mt", event_id),
+            ),
+        ]])
+        try:
+            await query.edit_message_reply_markup(reply_markup=markup)
+        except Exception:
+            pass
+        await query.message.reply_text(
+            t(loc, "club.thread.muted" if muted else "club.thread.unmuted"),
+        )
+
+    @staticmethod
+    def _thread_pages(head: str, comments: list) -> list[str]:
+        """Split head + every comment into messages under THREAD_PAGE_CHARS."""
+        pages, cur = [], head
+        for c in comments:
+            who = esc(c.get("display_name") or "")
+            line = f"{who}: {esc(c.get('text') or '')}"
+            if len(cur) + len(line) + 1 > THREAD_PAGE_CHARS and cur != head:
+                pages.append(cur)
+                cur = head
+            cur = f"{cur}\n{line}"
+        pages.append(cur)
+        return pages
+
+    async def _show_thread(self, update, club_id, event_id, page, query):
+        loc = self.locale(update)
+        from integrations.telegram_bot import _safe_edit
+        api = self._api(update)
+        try:
+            feed = api.club_feed(club_id, limit=1, event_id=event_id)
+            event = next(
+                (e for e in feed.get("events") or [] if e.get("id") == event_id), None,
+            )
+            body = api.club_comments(club_id, event_id)
+        except Exception:
+            event, body = None, {"error": "err"}
+        if event is None or body.get("error"):
+            await _safe_edit(query, t(loc, "club.err"))
+            return
+        comments = body.get("comments") or []
+        head = f"\U0001F4AC {_wine_line(event, loc)}\n"
+        if not comments:
+            head = f"{head}\n{t(loc, 'club.thread.empty')}"
+        pages = self._thread_pages(head, comments)
+        page = max(0, min(page, len(pages) - 1))
+        text = pages[page]
+        if len(pages) > 1:
+            text += "\n\n" + t(loc, "club.thread.page", page=page + 1, pages=len(pages))
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                t(loc, "club.feed.newer"), callback_data=club_cb("th", club_id, event_id, page - 1),
+            ))
+        if page + 1 < len(pages):
+            nav.append(InlineKeyboardButton(
+                t(loc, "club.feed.older"), callback_data=club_cb("th", club_id, event_id, page + 1),
+            ))
+        rows = [nav] if nav else []
+        rows.append([
+            InlineKeyboardButton(
+                t(loc, "club.thread.btn_reply"), callback_data=club_cb("rp", event_id),
+            ),
+            InlineKeyboardButton(t(loc, "club.back"), callback_data=club_cb("fd", club_id, 0)),
+        ])
+        await _safe_edit(
+            query, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows),
+        )
 
     def _comment_again_markup(self, event_id):
         from integrations.telegram_nav import MENU, menu_cb
