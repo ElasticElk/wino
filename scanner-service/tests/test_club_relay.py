@@ -211,9 +211,12 @@ async def test_submit_confirms_with_undo_button():
     flow = handler._club_flow()
     flow._prompt_put("4242", kind="ask", club_id=3, prompt_id=901)
     update = _update("What about <b>Port</b>?")
+    update.message.reply_text = AsyncMock(return_value=MagicMock(message_id=88))
     await flow.on_text(update, MagicMock())
     call = update.message.reply_text.call_args
-    assert call.args[0] == "Sent to Thursday reds."
+    assert call.args[0] == "Sending to Thursday reds: What about &lt;b&gt;Port&lt;/b&gt;?"
+    # The confirmation is reported as the asker's own copy of the ask.
+    api.club_ask_copy.assert_called_once_with(55, "4242", 88)
     assert _labels(call.kwargs["reply_markup"]) == ["Undo"]
     assert call.kwargs["reply_markup"].inline_keyboard[0][0].callback_data == "cl:au:55"
 
@@ -229,7 +232,9 @@ async def test_club_name_is_escaped_in_confirmation():
     flow._prompt_put("4242", kind="ask", club_id=3, prompt_id=901)
     update = _update("Hi")
     await flow.on_text(update, MagicMock())
-    assert update.message.reply_text.call_args.args[0] == "Sent to &lt;i&gt;Reds&lt;/i&gt;."
+    assert update.message.reply_text.call_args.args[0] == (
+        "Sending to &lt;i&gt;Reds&lt;/i&gt;: Hi"
+    )
 
 
 @pytest.mark.asyncio
@@ -269,18 +274,23 @@ async def test_undo_outcomes():
     api = _api()
     handler = _handler(api)
     flow = handler._club_flow()
-    cases = [
-        ({"undone": True, "status_code": 200}, "club.ask.undone"),
+    api.club_ask_undo.return_value = {"undone": True, "status_code": 200}
+    query = _query("cl:au:55")
+    await flow.on_callback(_cb_update(query), MagicMock())
+    call = query.edit_message_text.call_args
+    assert call.args[0] == t("en", "club.ask.undone") == "Taken back. Nothing was sent."
+    assert call.kwargs.get("reply_markup") is None  # no buttons left
+    # Anything else leaves the confirmation (now the ask's copy) alone.
+    for result, key in [
         ({"error": "already_out", "status_code": 409}, "club.ask.out"),
         ({"error": "not_found", "status_code": 404}, "club.ask.gone"),
         ({"error": "boom", "status_code": 500}, "club.err"),
-    ]
-    for result, key in cases:
+    ]:
         api.club_ask_undo.return_value = result
         query = _query("cl:au:55")
         await flow.on_callback(_cb_update(query), MagicMock())
-        assert query.edit_message_text.call_args.args[0] == t("en", key)
-        assert "reply_markup" not in query.edit_message_text.call_args.kwargs
+        query.edit_message_text.assert_not_called()
+        assert query.answer.call_args.args[0] == t("en", key)
     api.club_ask_undo.assert_called_with(55)
 
 
@@ -392,3 +402,106 @@ def test_copy_en_af_parity():
     en = {k for k in catalog_keys("en") if k.startswith("club.ask.")}
     assert en and en == {k for k in catalog_keys("af") if k.startswith("club.ask.")}
     assert t("en", "club.ask.btn") == "Ask the club" == t("af", "club.ask.btn")
+
+
+# -- review fixes --------------------------------------------------------------
+def test_home_hides_ask_button_for_frozen_clubs():
+    assert "Ask the club" not in _labels(_home({"feature_club_relay": True}, frozen=True))
+
+
+@pytest.mark.asyncio
+async def test_frozen_club_gets_the_paused_copy():
+    api = _api()
+    api.get_club.return_value = {
+        "id": 3, "name": "Thursday reds", "kind": "private", "frozen": True,
+    }
+    handler = _handler(api)
+    query = _query("cl:ak:3")
+    await handler._club_flow().on_callback(_cb_update(query), MagicMock())
+    assert query.message.reply_text.call_args.args[0] == t("en", "club.global.frozen")
+    assert handler._club_comment_store.get("4242") is None
+    # And a submit that races a freeze says the same.
+    api.club_ask.return_value = {"error": "frozen", "status_code": 409}
+    flow = handler._club_flow()
+    flow._prompt_put("4242", kind="ask", club_id=3, prompt_id=901)
+    update = _update("Hi")
+    await flow.on_text(update, MagicMock())
+    assert update.message.reply_text.call_args.args[0] == t("en", "club.global.frozen")
+
+
+def _reply_update(text="a swipe"):
+    update = _update(text)
+    update.message.reply_to_message = MagicMock(message_id=33)
+    update.message.reply_to_message.from_user.is_bot = True
+    return update
+
+
+@pytest.mark.asyncio
+async def test_swipe_reply_closes_an_open_ask_prompt():
+    api = _api()
+    api.club_thread_resolve.return_value = {
+        "event_id": 9, "club_id": 3, "retracted": False, "muted": False,
+    }
+    api.add_club_comment.return_value = {"id": 1, "status_code": 201}
+    handler = _handler(api)
+    flow = handler._club_flow()
+    flow._prompt_put("4242", kind="ask", club_id=3, prompt_id=901)
+    update = _reply_update()
+    bot = AsyncMock()
+    update.message.get_bot = MagicMock(return_value=bot)
+    assert await flow.on_reply(update, MagicMock()) is True
+    assert handler._club_comment_store.get("4242") is None
+    bot.edit_message_reply_markup.assert_awaited_once_with(
+        chat_id=4242, message_id=901, reply_markup=None,
+    )
+    api.club_ask.assert_not_called()
+    api.add_club_comment.assert_called_once_with(3, 9, "a swipe")
+
+
+@pytest.mark.asyncio
+async def test_swipe_reply_to_a_switched_off_ask_is_answered_not_chatted():
+    api = _api()
+    api.club_thread_resolve.return_value = {"error": "ask_off", "status_code": 404}
+    handler = _handler(api)
+    update = _reply_update()
+    assert await handler._club_flow().on_reply(update, MagicMock()) is True
+    assert update.message.reply_text.call_args.args[0] == "That's switched off right now."
+    api.add_club_comment.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_palette_on_a_ping_stays_bare_but_cards_get_counts():
+    api = _api()
+    handler = _handler(api, **ON, feature_club_reactions="on")
+    flow = handler._club_flow()
+    palette = InlineKeyboardMarkup([reaction_buttons(9)])
+    for show, expect_edit in ((False, False), (True, True)):
+        api.club_event_react.return_value = {
+            "on": True, "counts": [1, 0, 0, 0, 0], "show_counts": show,
+            "status_code": 200,
+        }
+        query = _query("cl:rx:9:0")
+        query.message.reply_markup = palette
+        await flow.on_callback(_cb_update(query), MagicMock())
+        assert query.edit_message_reply_markup.called is expect_edit
+    api.club_event_react.assert_called_with(9, 0, chat_id=4242, message_id=7)
+
+
+@pytest.mark.asyncio
+async def test_react_on_a_switched_off_ask_says_so_and_drops_palette():
+    api = _api()
+    api.club_event_react.return_value = {"error": "ask_off", "status_code": 404}
+    handler = _handler(api, **ON, feature_club_reactions="on")
+    query = _query("cl:rx:9:0")
+    query.message.reply_markup = InlineKeyboardMarkup([reaction_buttons(9)])
+    await handler._club_flow().on_callback(_cb_update(query), MagicMock())
+    assert query.answer.call_args.args[0] == "That's switched off right now."
+    assert query.edit_message_reply_markup.call_args.kwargs["reply_markup"] is None
+
+
+def test_copy_wording_en_af():
+    assert t("en", "club.ask.off") == "That's switched off right now."
+    assert "show up here" in t("en", "club.ask.prompt")
+    assert "come back to you" not in t("en", "club.ask.prompt")
+    assert "hier" in t("af", "club.ask.prompt")
+    assert t("af", "club.ask.off") == "Dit is nou af."

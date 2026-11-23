@@ -342,7 +342,7 @@ def build_home(payload: dict, loc: str, flags=None) -> tuple[str, InlineKeyboard
         keyboard.append([InlineKeyboardButton(
             t(loc, "club.list.title"), callback_data=club_cb("li", payload["id"]),
         )])
-    if flags.get("feature_club_relay") and not is_global:
+    if flags.get("feature_club_relay") and not is_global and not payload.get("frozen"):
         keyboard.append([InlineKeyboardButton(
             t("en", "club.ask.btn"), callback_data=club_cb("ak", payload["id"]),
         )])
@@ -2137,6 +2137,9 @@ class ClubFlow:
         except Exception as e:
             logger.info("[club] comment post failed: %s", e)
             result = {"error": "err"}
+        if result.get("error") == "ask_off":
+            await message.reply_text(t(loc, "club.ask.off"), reply_markup=_menu_markup())
+            return True
         if result.get("error") == "retracted" or result.get("status_code") == 409:
             await message.reply_text(t(loc, "club.err"), reply_markup=_menu_markup())
             return True
@@ -2250,9 +2253,19 @@ class ClubFlow:
                 t(loc, "club.thread.post_failed"), reply_markup=_menu_markup(),
             )
             return True
+        if found.get("error") == "ask_off":
+            # A copy of an ask that is switched off: say so rather than let
+            # the chatbot answer a swipe-reply.
+            await message.reply_text(t(loc, "club.ask.off"), reply_markup=_menu_markup())
+            return True
         if found.get("error") or not found.get("event_id"):
             return False
+        open_prompt = self._prompt_get(chat_id)
         self._prompt_drop(chat_id)
+        if open_prompt:
+            await self._close_comment_prompt(
+                update, chat_id, open_prompt.get("prompt_id"),
+            )
         if found.get("retracted"):
             await message.reply_text(
                 t(loc, "club.thread.retracted"), reply_markup=_menu_markup(),
@@ -2390,10 +2403,11 @@ class ClubFlow:
         if not self.relay_on():
             await self._toast(query, t(loc, "club.ask.off"))
             return True
-        try:
-            await query.answer()
-        except Exception as e:
-            logger.info("[club] answer() failed: %s", e)
+        if action != "au":  # Undo answers its own tap (toast or edit)
+            try:
+                await query.answer()
+            except Exception as e:
+                logger.info("[club] answer() failed: %s", e)
         try:
             ident = int(rest[0]) if rest else 0
         except (TypeError, ValueError):
@@ -2420,6 +2434,11 @@ class ClubFlow:
         if club.get("kind") == "global":
             await query.message.reply_text(
                 t(loc, "club.ask.global"), reply_markup=_menu_markup(),
+            )
+            return
+        if club.get("frozen"):
+            await query.message.reply_text(
+                t(loc, "club.global.frozen"), reply_markup=_menu_markup(),
             )
             return
         chat_id = str(update.effective_chat.id)
@@ -2471,6 +2490,8 @@ class ClubFlow:
             await message.reply_text(t(loc, "club.comment.too_long"))
         elif error == "global":
             await message.reply_text(t(loc, "club.ask.global"), reply_markup=_menu_markup())
+        elif error == "frozen":
+            await message.reply_text(t(loc, "club.global.frozen"), reply_markup=_menu_markup())
         elif error == "not_enabled" or result.get("status_code") == 404:
             await message.reply_text(t(loc, "club.ask.off"), reply_markup=_menu_markup())
         elif error:
@@ -2480,10 +2501,23 @@ class ClubFlow:
                 t("en", "club.ask.undo"),
                 callback_data=club_cb("au", result.get("event_id") or 0),
             )]])
-            await message.reply_text(
-                t(loc, "club.ask.sent", club=esc(result.get("club_name") or "")),
+            sent = await message.reply_text(
+                t(
+                    loc, "club.ask.sent",
+                    club=esc(result.get("club_name") or ""), text=esc(text),
+                ),
                 parse_mode="HTML", reply_markup=markup,
             )
+            # This message is the asker's own copy: swipe-replies and reply
+            # pings resolve to the ask through it.
+            mid = getattr(sent, "message_id", None)
+            if mid and result.get("event_id"):
+                try:
+                    self._api(update).club_ask_copy(
+                        result["event_id"], chat_id, mid,
+                    )
+                except Exception as e:
+                    logger.info("[club] ask copy report failed: %s", e)
         return True
 
     async def _undo_ask(self, update, query, event_id) -> None:
@@ -2495,14 +2529,19 @@ class ClubFlow:
             logger.info("[club] ask undo failed: %s", e)
             result = {"error": "err"}
         if result.get("error") == "already_out":
-            text = t(loc, "club.ask.out")
+            toast = t(loc, "club.ask.out")
         elif result.get("status_code") == 404:
-            text = t(loc, "club.ask.gone")
+            toast = t(loc, "club.ask.gone")
         elif result.get("error"):
-            text = t(loc, "club.err")
+            toast = t(loc, "club.err")
         else:
-            text = t(loc, "club.ask.undone")
-        await _safe_edit(query, text)
+            # Taken back: the confirmation says so, with no buttons.
+            await _safe_edit(
+                query, t(loc, "club.ask.undone"), reply_markup=None,
+            )
+            return
+        # The confirmation is the ask's copy now: leave it as it is.
+        await self._toast(query, toast)
 
     # -- reactions and Want this (feature_club_reactions) -----------------
     def reactions_on(self) -> bool:
@@ -2563,10 +2602,19 @@ class ClubFlow:
             await self._toast(query, t(loc, "club.err"))
             return True
         try:
-            result = self._api(update).club_event_react(event_id, index)
+            result = self._api(update).club_event_react(
+                event_id, index,
+                chat_id=getattr(query.message, "chat_id", None)
+                or update.effective_chat.id,
+                message_id=getattr(query.message, "message_id", None),
+            )
         except Exception as e:
             logger.info("[club] react failed: %s", e)
             result = {"error": "err"}
+        if result.get("error") == "ask_off":
+            await self._toast(query, t(loc, "club.ask.off"))
+            await self._drop_palette(query)
+            return True
         if result.get("status_code") == 409 or result.get("error") == "retracted":
             await self._toast(query, t(loc, "club.rx.retracted"))
             return True
@@ -2577,10 +2625,12 @@ class ClubFlow:
         await self._toast(
             query, t(loc, "club.rx.on" if result.get("on") else "club.rx.undone", emoji=emoji),
         )
-        markup = self._with_counts(
-            getattr(query.message, "reply_markup", None),
-            result.get("counts") or [0] * len(PALETTE), event_id,
-        )
+        markup = None
+        if result.get("show_counts", True):  # reply pings stay bare
+            markup = self._with_counts(
+                getattr(query.message, "reply_markup", None),
+                result.get("counts") or [0] * len(PALETTE), event_id,
+            )
         if markup is not None:
             try:
                 await query.edit_message_reply_markup(reply_markup=markup)

@@ -40,8 +40,19 @@ def reactions_enabled() -> bool:
 REACTABLE_KINDS = (ClubEvent.KIND_OPENED, ClubEvent.KIND_ASK)
 
 
+def kind_reactable(event) -> bool:
+    """An ask only counts while Ask the club is on (old copies stay quiet)."""
+    if event.kind not in REACTABLE_KINDS:
+        return False
+    if event.kind == ClubEvent.KIND_ASK:
+        from wine_cellar.apps.club.relay import relay_enabled
+
+        return relay_enabled()
+    return True
+
+
 def reactable(event) -> bool:
-    return event.kind in REACTABLE_KINDS and not event.retracted
+    return kind_reactable(event) and not event.retracted
 
 
 def counts_for(event) -> list[int]:

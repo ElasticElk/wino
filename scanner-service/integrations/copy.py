@@ -256,10 +256,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.ask.prompt": (
             "What would you like to ask the club?\n\n"
             "Type it (280 characters max). Every member gets it, and replies "
-            "come back to you."
+            "show up here."
         ),
         "club.ask.line": "{name} asks the club: {text}",
-        "club.ask.sent": "Sent to {club}.",
+        "club.ask.sent": "Sending to {club}: {text}",
         "club.ask.undo": "Undo",
         "club.ask.undone": "Taken back. Nothing was sent.",
         "club.ask.out": "That one is already out.",
@@ -268,7 +268,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.ask.limit": (
             "That's 3 asks in the last hour. Try again in about {n} min."
         ),
-        "club.ask.off": "Ask the club isn't on yet.",
+        "club.ask.off": "That's switched off right now.",
         "club.ask.global": "This is a feed-only club, so there's nobody to ask.",
         "club.rx.on": "Reacted {emoji}",
         "club.rx.undone": "Removed {emoji}",
@@ -829,10 +829,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.ask.prompt": (
             "Wat wil jy die klub vra?\n\n"
             "Tik dit (hoogstens 280 karakters). Elke lid kry dit, en "
-            "antwoorde kom terug na jou."
+            "antwoorde verskyn hier."
         ),
         "club.ask.line": "{name} vra die klub: {text}",
-        "club.ask.sent": "Gestuur na {club}.",
+        "club.ask.sent": "Stuur na {club}: {text}",
         "club.ask.undo": "Undo",
         "club.ask.undone": "Teruggetrek. Niks is gestuur nie.",
         "club.ask.out": "Daardie een is reeds uit.",
@@ -841,7 +841,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "club.ask.limit": (
             "Dis 3 vrae in die laaste uur. Probeer weer oor ongeveer {n} min."
         ),
-        "club.ask.off": "Vra die klub is nog nie aan nie.",
+        "club.ask.off": "Dit is nou af.",
         "club.ask.global": "Dis 'n klub net vir aktiwiteit, so daar is niemand om te vra nie.",
         "club.rx.on": "Gereageer {emoji}",
         "club.rx.undone": "Reaksie {emoji} verwyder",

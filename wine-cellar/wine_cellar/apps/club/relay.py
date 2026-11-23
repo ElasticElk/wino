@@ -74,12 +74,14 @@ def ask_markup(event, loc) -> dict:
 
 def create_ask(user, club, text):
     """Returns (event, error). error is one of not_enabled, global, blank,
-    too_long, rate_limited, duplicate; ``duplicate`` also returns the event
+    too_long, rate_limited, frozen, duplicate; ``duplicate`` also returns the event
     already sent. Scheduling delivery is left to the caller's on_commit."""
     if not relay_enabled():
         return None, "not_enabled"
     if club.kind == Club.KIND_GLOBAL:
         return None, "global"
+    if club.frozen:
+        return None, "frozen"
     text = (text or "").strip()
     if not text:
         return None, "blank"
@@ -145,6 +147,119 @@ def undo_ask(user, event_id):
     return "undone"
 
 
+def asker_chat_ids(event) -> set:
+    return {
+        str(c) for c in TelegramUser.objects.filter(
+            user_id=event.actor_id, is_active=True,
+        ).values_list("chat_id", flat=True)
+    }
+
+
+def record_asker_copy(user, event_id, chat_id, message_id) -> str:
+    """The asker's confirmation message becomes their copy of the ask.
+    Returns 'ok', 'not_found' or 'already_out'."""
+    event = ClubEvent.objects.filter(
+        id=event_id, kind=ClubEvent.KIND_ASK, actor=user,
+    ).first()
+    if event is None or str(chat_id) not in {
+        str(c) for c in TelegramUser.objects.filter(
+            user=user, is_active=True,
+        ).values_list("chat_id", flat=True)
+    }:
+        return "not_found"
+    ClubEventDelivery.objects.get_or_create(
+        event=event, kind=ClubEventDelivery.KIND_ASK,
+        chat_id=str(chat_id), message_id=message_id,
+    )
+    if (event.payload or {}).get("sent_at"):
+        _edit_asker_copies(event)  # reported after delivery: catch up
+        return "already_out"
+    return "ok"
+
+
+def _edit_text(token, chat_id, message_id, text, markup) -> str:
+    """editMessageText. '' when fine or harmless, else an error."""
+    import requests
+
+    payload = {
+        "chat_id": chat_id, "message_id": message_id, "text": text,
+        "parse_mode": "HTML", "disable_web_page_preview": True,
+        "reply_markup": markup or {"inline_keyboard": []},
+    }
+    url = f"https://api.telegram.org/bot{token}/editMessageText"
+    try:
+        response = requests.post(url, json=payload, timeout=15)
+    except requests.RequestException as exc:
+        return f"network:{type(exc).__name__}"
+    if response.status_code == 200:
+        return ""
+    try:
+        description = str((response.json() or {}).get("description") or "")
+    except ValueError:
+        description = ""
+    low = description.lower()
+    if "message is not modified" in low or "message to edit not found" in low:
+        return ""
+    return f"{response.status_code}:{description}"[:200]
+
+
+def _edit_asker_copies(event, token=None) -> None:
+    """'Sent to <club>: <text>' with Reply and the palette, Undo gone."""
+    from wine_cellar.apps.wine.tasks import _bot_token
+
+    token = token or _bot_token()
+    if not token:
+        return
+    loc = locale_for_user(event.actor)
+    text = t(
+        loc, "club.ask.sent_copy",
+        club=html.escape(event.club.name), text=html.escape(ask_text(event)),
+    )
+    markup = ask_markup(event, loc)
+    chats = asker_chat_ids(event)
+    for delivery in event.deliveries.filter(
+        kind=ClubEventDelivery.KIND_ASK, message_id__isnull=False,
+    ):
+        if str(delivery.chat_id) not in chats:
+            continue
+        try:
+            error = _edit_text(
+                token, delivery.chat_id, delivery.message_id, text, markup,
+            )
+        except Exception:
+            logger.warning("asker copy edit failed", exc_info=True)
+            continue
+        if error:
+            ClubEventDelivery.objects.filter(id=delivery.id).update(error=error[:200])
+
+
+STUCK_AFTER = timedelta(seconds=UNDO_SECONDS)
+STUCK_GIVE_UP = timedelta(days=1)
+
+
+def deliver_stuck_asks(now=None) -> int:
+    """Safety net for a lost countdown task: asks still unsent a minute after
+    they were made (an Undo deletes the event, so none here were undone)."""
+    if not relay_enabled():
+        return 0
+    now = now or timezone.now()
+    ids = list(
+        ClubEvent.objects.filter(
+            kind=ClubEvent.KIND_ASK,
+            created__lte=now - STUCK_AFTER, created__gte=now - STUCK_GIVE_UP,
+        )
+        .exclude(payload__has_key="sent_at")
+        .values_list("id", flat=True)[:50]
+    )
+    done = 0
+    for event_id in ids:
+        try:
+            done += 1 if deliver_ask(event_id) else 0
+        except Exception:
+            logger.warning("stuck ask delivery failed", exc_info=True)
+    return done
+
+
 def deliver_ask(event_id) -> int:
     """Send the ask to every member but the asker. Returns copies sent.
     Claims the event first, so a second run (or a late Undo) is harmless."""
@@ -152,6 +267,11 @@ def deliver_ask(event_id) -> int:
     from wine_cellar.apps.wine.tasks import _bot_token
 
     if not relay_enabled():
+        return 0
+    token = _bot_token()
+    if not token:
+        # Leave sent_at unset so the every-minute sweep retries.
+        logger.warning("deliver_club_ask: bot_token missing")
         return 0
     with transaction.atomic():
         event = (
@@ -168,10 +288,10 @@ def deliver_ask(event_id) -> int:
         payload["sent_at"] = timezone.now().isoformat()
         event.payload = payload
         event.save(update_fields=["payload"])
-    token = _bot_token()
-    if not token:
-        logger.warning("deliver_club_ask: bot_token missing")
-        return 0
+    try:
+        _edit_asker_copies(event, token)
+    except Exception:
+        logger.warning("asker copy edit failed", exc_info=True)
     members = (
         ClubMembership.objects.filter(club=event.club, feed_muted=False)
         .exclude(user_id=event.actor_id)

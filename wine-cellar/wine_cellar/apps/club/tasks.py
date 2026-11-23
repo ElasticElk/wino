@@ -71,13 +71,19 @@ def _send(
 @shared_task(name="flush_club_notices")
 def flush_club_notices():
     """Send every due ClubNotice (batched comment pings). Never raises."""
+    from wine_cellar.apps.club.relay import deliver_stuck_asks
     from wine_cellar.apps.club.threads import flush_due_notices
 
     try:
-        return flush_due_notices()
+        sent = flush_due_notices()
     except Exception:  # pragma: no cover - last-resort guard
         logger.exception("flush_club_notices failed")
-        return 0
+        sent = 0
+    try:
+        deliver_stuck_asks()  # a lost deliver_club_ask countdown
+    except Exception:  # pragma: no cover - last-resort guard
+        logger.exception("deliver_stuck_asks failed")
+    return sent
 
 
 def _opened_markup(event, loc):

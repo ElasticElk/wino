@@ -17,6 +17,7 @@ from wine_cellar.apps.api.views import ScannerAPIView
 from wine_cellar.apps.club.models import (
     ClubComment,
     ClubEvent,
+    ClubEventDelivery,
     ClubMembership,
     TasteOff,
     TasteOffBottle,
@@ -25,8 +26,8 @@ from wine_cellar.apps.club.models import (
 from wine_cellar.apps.club.peek import effective_visibility, tighter_visibility
 from wine_cellar.apps.club.reactions import (
     PALETTE,
-    REACTABLE_KINDS,
     counts_for,
+    kind_reactable,
     mine_for,
     reactions_enabled,
     record_want,
@@ -37,6 +38,7 @@ from wine_cellar.apps.club.relay import (
     RATE_MAX,
     UNDO_SECONDS,
     create_ask,
+    record_asker_copy,
     relay_enabled,
     retry_minutes,
     schedule_delivery,
@@ -107,6 +109,15 @@ def _event_in_club(club, event_id):
     return ClubEvent.objects.filter(club=club, id=event_id).first()
 
 
+def _ask_hidden(event) -> bool:
+    """An ask while Ask the club is off: old copies must not ping anyone."""
+    return event.kind == ClubEvent.KIND_ASK and not relay_enabled()
+
+
+def _ask_off_response():
+    return Response({"error": "ask_off"}, status=status.HTTP_404_NOT_FOUND)
+
+
 def serialize_comment(comment: ClubComment) -> dict:
     return {
         "id": comment.id,
@@ -125,6 +136,8 @@ class ClubCommentCollectionView(CommentsEnabledMixin, ScannerAPIView):
         event = _event_in_club(membership.club, event_id)
         if event is None:
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        if _ask_hidden(event):
+            return _ask_off_response()
         rows = list(event.comments.select_related("user"))
         return Response(
             {"comments": [serialize_comment(c) for c in rows], "count": len(rows)}
@@ -137,6 +150,8 @@ class ClubCommentCollectionView(CommentsEnabledMixin, ScannerAPIView):
         event = _event_in_club(membership.club, event_id)
         if event is None:
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        if _ask_hidden(event):
+            return _ask_off_response()
         if event.retracted:
             return Response({"error": "retracted"}, status=status.HTTP_409_CONFLICT)
         text = str((request.data or {}).get("text") or "").strip()
@@ -188,6 +203,8 @@ class ClubThreadResolveView(ThreadsEnabledMixin, ScannerAPIView):
         )
         if event is None:
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        if _ask_hidden(event):
+            return _ask_off_response()
         return Response(
             {
                 "event_id": event.id,
@@ -305,7 +322,9 @@ class ClubEventReactView(ReactionsEnabledMixin, ScannerAPIView):
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
         if event.retracted:
             return Response({"error": "retracted"}, status=status.HTTP_409_CONFLICT)
-        if event.kind not in REACTABLE_KINDS:
+        if _ask_hidden(event):
+            return _ask_off_response()
+        if not kind_reactable(event):
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
         try:
             index = int((request.data or {}).get("i"))
@@ -314,8 +333,21 @@ class ClubEventReactView(ReactionsEnabledMixin, ScannerAPIView):
         except (TypeError, ValueError):
             return Response({"error": "bad_index"}, status=status.HTTP_400_BAD_REQUEST)
         on = toggle_reaction(request.user, event, index)
+        # Reply pings stay bare: only card copies show counts.
+        show_counts = True
+        message_id = (request.data or {}).get("message_id")
+        chat_id = (request.data or {}).get("chat_id")
+        if message_id and chat_id:
+            try:
+                show_counts = not ClubEventDelivery.objects.filter(
+                    event=event, chat_id=str(chat_id), message_id=int(message_id),
+                    kind=ClubEventDelivery.KIND_PING,
+                ).exists()
+            except (TypeError, ValueError):
+                pass
         return Response(
             {
+                "show_counts": show_counts,
                 "on": on,
                 "emoji": PALETTE[index],
                 "counts": counts_for(event),
@@ -385,6 +417,8 @@ class ClubRelayAskView(RelayEnabledMixin, ScannerAPIView):
                 {"error": "too_long", "max": ASK_MAX},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if err == "frozen":
+            return Response({"error": "frozen"}, status=status.HTTP_409_CONFLICT)
         if err in ("blank", "global"):
             return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
         if err:
@@ -408,6 +442,26 @@ class ClubAskUndoView(RelayEnabledMixin, ScannerAPIView):
         if result == "not_found":
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
         return Response({"undone": True})
+
+
+class ClubAskCopyView(RelayEnabledMixin, ScannerAPIView):
+    """POST {"chat_id", "message_id"}: the asker's confirmation message is
+    their own copy of the ask (swipe-replies and reply pings thread under it)."""
+
+    def post(self, request, event_id):
+        try:
+            message_id = int((request.data or {}).get("message_id"))
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "bad_message"}, status=status.HTTP_400_BAD_REQUEST,
+            )
+        result = record_asker_copy(
+            request.user, event_id, (request.data or {}).get("chat_id") or "",
+            message_id,
+        )
+        if result == "not_found":
+            return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"recorded": True, "already_out": result == "already_out"})
 
 
 def _club_list(club):

@@ -17,11 +17,13 @@ from wine_cellar.apps.club.models import (
     ClubEventDelivery,
     ClubMembership,
     ClubNotice,
+    ClubReaction,
 )
 from wine_cellar.apps.club.reactions import PALETTE
 from wine_cellar.apps.club.relay import deliver_ask
 from wine_cellar.apps.club.tasks import (
     deliver_club_event,
+    flush_club_notices,
     refresh_event_comment_card,
     refresh_event_reactions,
 )
@@ -617,3 +619,181 @@ def test_comment_text_is_escaped_in_thread_ping_of_ask(client, club):
     text = post.call_args_list[0].kwargs["json"]["text"]
     assert "<script>" not in text and "&lt;script&gt;" in text
     assert ClubComment.objects.filter(event=event).count() == 1
+
+
+# -- review fixes: the asker's own copy ---------------------------------------
+def _report_copy(client, user, event_id, chat_id, message_id):
+    url = reverse("api-club-ask-copy", kwargs={"event_id": event_id})
+    return _auth(client, user).post(
+        url, data={"chat_id": chat_id, "message_id": message_id},
+        content_type="application/json",
+    )
+
+
+def test_asker_copy_is_recorded_and_edited_on_delivery(client, club):
+    club_, users = club
+    _enable("feature_club_reactions")
+    event_id = _ask(client, users["riley"], club_, "<i>Port</i>?").json()["event_id"]
+    assert _report_copy(client, users["riley"], event_id, "100", 77).status_code == 200
+    # Someone else's chat, or someone else's ask, is not accepted.
+    assert _report_copy(client, users["riley"], event_id, "200", 78).status_code == 404
+    assert _report_copy(client, users["sam"], event_id, "200", 78).status_code == 404
+    with patch(POST, side_effect=_Mids()) as post:
+        assert deliver_ask(event_id) == 3
+    edit = [
+        c for c in post.call_args_list if c.args[0].endswith("/editMessageText")
+    ]
+    assert len(edit) == 1
+    body = edit[0].kwargs["json"]
+    assert body["chat_id"] == "100" and body["message_id"] == 77
+    assert body["text"] == "Sent to Thursday reds: &lt;i&gt;Port&lt;/i&gt;?"
+    rows = body["reply_markup"]["inline_keyboard"]
+    assert rows[-1] == [{"text": "Reply", "callback_data": f"cl:rp:{event_id}"}]
+    assert rows[0][0]["callback_data"] == f"cl:rx:{event_id}:0"  # bare palette
+    assert all("cl:au" not in b["callback_data"] for r in rows for b in r)
+    # The message resolves to the ask, replies thread under it, counts refresh.
+    from wine_cellar.apps.club.threads import _reply_target, resolve_message
+
+    assert resolve_message(users["riley"], "100", 77).id == event_id
+    event = ClubEvent.objects.get(id=event_id)
+    assert _reply_target(event, "100") == 77
+    with patch(EDIT, return_value=MagicMock(status_code=200)) as post:
+        assert refresh_event_reactions(event_id) == 4
+
+
+def test_copy_reported_after_delivery_is_edited_at_once(client, club):
+    club_, users = club
+    event_id = _ask(client, users["riley"], club_).json()["event_id"]
+    with patch(POST, side_effect=_Mids()):
+        deliver_ask(event_id)
+    with patch(EDIT, return_value=MagicMock(status_code=200)) as post:
+        response = _report_copy(client, users["riley"], event_id, "100", 91)
+    assert response.json()["already_out"] is True
+    assert post.call_args.kwargs["json"]["text"].startswith("Sent to Thursday reds")
+
+
+def test_undo_deletes_the_asker_copy_row(client, club):
+    club_, users = club
+    event_id = _ask(client, users["riley"], club_).json()["event_id"]
+    _report_copy(client, users["riley"], event_id, "100", 77)
+    assert _undo(client, users["riley"], event_id).status_code == 200
+    assert not ClubEventDelivery.objects.filter(chat_id="100", message_id=77).exists()
+
+
+# -- review fixes: delivery safety net ----------------------------------------
+def test_stuck_ask_is_delivered_by_the_minute_beat(client, club):
+    club_, users = club
+    event_id = _ask(client, users["riley"], club_).json()["event_id"]
+    with patch(POST, side_effect=_Mids()) as post:
+        flush_club_notices()
+    assert post.call_count == 0  # inside the Undo window
+    ClubEvent.objects.filter(id=event_id).update(
+        created=timezone.now() - timedelta(seconds=90),
+    )
+    with patch(POST, side_effect=_Mids()) as post:
+        flush_club_notices()
+    assert {c.kwargs["json"]["chat_id"] for c in post.call_args_list} == {
+        "200", "300", "400",
+    }
+    with patch(POST, side_effect=_Mids()) as post:
+        flush_club_notices()
+    assert post.call_count == 0  # sent once
+
+
+def test_stuck_sweep_skips_undone_and_flag_off(client, club):
+    club_, users = club
+    gone = _ask(client, users["riley"], club_, "one").json()["event_id"]
+    _undo(client, users["riley"], gone)
+    other = _ask(client, users["sam"], club_, "two").json()["event_id"]
+    ClubEvent.objects.filter(id=other).update(
+        created=timezone.now() - timedelta(minutes=5),
+    )
+    ServiceConfig.objects.filter(key="feature_club_relay").delete()
+    with patch(POST, side_effect=_Mids()) as post:
+        flush_club_notices()
+    assert post.call_count == 0
+
+
+def test_missing_bot_token_keeps_the_ask_unsent(client, club):
+    club_, users = club
+    event_id = _ask(client, users["riley"], club_).json()["event_id"]
+    ServiceConfig.objects.filter(key="bot_token").delete()
+    with patch(POST, side_effect=_Mids()) as post:
+        assert deliver_ask(event_id) == 0
+    assert post.call_count == 0
+    assert "sent_at" not in ClubEvent.objects.get(id=event_id).payload
+    ServiceConfig.objects.update_or_create(key="bot_token", defaults={"value": "T"})
+    with patch(POST, side_effect=_Mids()):
+        assert deliver_ask(event_id) == 3
+
+
+# -- review fixes: frozen clubs ------------------------------------------------
+def test_frozen_club_rejects_asks(client, club):
+    club_, users = club
+    Club.objects.filter(id=club_.id).update(frozen=True)
+    response = _ask(client, users["riley"], club_)
+    assert response.status_code == 409 and response.json()["error"] == "frozen"
+    assert not ClubEvent.objects.filter(kind=ClubEvent.KIND_ASK).exists()
+
+
+# -- review fixes: relay off hides old ask copies ------------------------------
+def test_old_ask_copies_are_404_when_relay_is_off(client, club):
+    club_, users = club
+    _enable("feature_club_reactions")
+    event_id = _ask(client, users["riley"], club_, "Port?").json()["event_id"]
+    with patch(POST, side_effect=_Mids()):
+        deliver_ask(event_id)
+    ServiceConfig.objects.filter(key="feature_club_relay").delete()
+    sam = _auth(client, users["sam"])
+    comments = reverse(
+        "api-club-event-comments", kwargs={"pk": club_.id, "event_id": event_id},
+    )
+    assert sam.post(
+        comments, data={"text": "hi"}, content_type="application/json",
+    ).status_code == 404
+    assert sam.get(comments).status_code == 404
+    resolve = reverse("api-club-thread-resolve")
+    delivery = ClubEventDelivery.objects.filter(
+        event_id=event_id, chat_id="200",
+    ).first()
+    response = sam.get(resolve, {"chat_id": "200", "message_id": delivery.message_id})
+    assert response.status_code == 404 and response.json()["error"] == "ask_off"
+    react = reverse("api-club-event-react", kwargs={"event_id": event_id})
+    with patch(RX_SCHEDULE):
+        response = sam.post(react, data={"i": 0}, content_type="application/json")
+    assert response.status_code == 404 and response.json()["error"] == "ask_off"
+    assert not ClubComment.objects.filter(event_id=event_id).exists()
+    assert not ClubReaction.objects.filter(event_id=event_id).exists()
+    from wine_cellar.apps.club.reactions import reaction_rows
+
+    assert reaction_rows(ClubEvent.objects.get(id=event_id)) == []
+
+
+# -- review fixes: reaction counts only on card copies ------------------------
+def test_react_response_says_pings_stay_bare(client, club):
+    club_, users = club
+    _enable("feature_club_reactions")
+    event_id = _ask(client, users["riley"], club_, "Port?").json()["event_id"]
+    event = ClubEvent.objects.get(id=event_id)
+    ClubEventDelivery.objects.create(
+        event=event, kind=ClubEventDelivery.KIND_PING, chat_id="200", message_id=11,
+    )
+    ClubEventDelivery.objects.create(
+        event=event, kind=ClubEventDelivery.KIND_ASK, chat_id="200", message_id=12,
+    )
+    react = reverse("api-club-event-react", kwargs={"event_id": event_id})
+    sam = _auth(client, users["sam"])
+    with patch(RX_SCHEDULE):
+        ping = sam.post(
+            react, data={"i": 0, "chat_id": "200", "message_id": 11},
+            content_type="application/json",
+        ).json()
+        copy = sam.post(
+            react, data={"i": 1, "chat_id": "200", "message_id": 12},
+            content_type="application/json",
+        ).json()
+        plain = sam.post(
+            react, data={"i": 2}, content_type="application/json",
+        ).json()
+    assert ping["show_counts"] is False
+    assert copy["show_counts"] is True and plain["show_counts"] is True

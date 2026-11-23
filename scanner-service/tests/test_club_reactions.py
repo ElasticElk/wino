@@ -37,6 +37,7 @@ def _query(data, markup=None):
     query.answer = AsyncMock()
     query.message = AsyncMock()
     query.message.chat_id = 4242
+    query.message.message_id = 7
     query.message.reply_text = AsyncMock()
     query.message.reply_markup = markup
     query.edit_message_text = AsyncMock()
@@ -69,7 +70,7 @@ async def test_tap_toasts_and_refreshes_only_the_emoji_row():
     handler = _handler(api, **ON)
     query = _query(club_cb("rx", 88, 0), _card_markup())
     await handler._club_flow().on_callback(_update(query), MagicMock())
-    api.club_event_react.assert_called_once_with(88, 0)
+    api.club_event_react.assert_called_once_with(88, 0, chat_id=4242, message_id=7)
     assert query.answer.call_args.args[0] == t("en", "club.rx.on", emoji=PALETTE[0])
     query.message.reply_text.assert_not_called()
     markup = query.edit_message_reply_markup.call_args.kwargs["reply_markup"]

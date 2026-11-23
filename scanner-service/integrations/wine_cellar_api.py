@@ -965,8 +965,19 @@ class WineCellarAPI:
             body["status_code"] = resp.status_code
         return body
 
-    def club_event_react(self, event_id: int, index: int) -> dict:
-        return self._club_post(f"/api/clubs/events/{event_id}/react/", {"i": index})
+    def club_event_react(
+        self, event_id: int, index: int, chat_id=None, message_id=None,
+    ) -> dict:
+        body = {"i": index}
+        if chat_id and message_id:
+            body.update(chat_id=str(chat_id), message_id=message_id)
+        return self._club_post(f"/api/clubs/events/{event_id}/react/", body)
+
+    def club_ask_copy(self, event_id: int, chat_id, message_id) -> dict:
+        return self._club_post(
+            f"/api/clubs/asks/{event_id}/copy/",
+            {"chat_id": str(chat_id), "message_id": message_id},
+        )
 
     def club_ask(self, club_id: int, text: str) -> dict:
         return self._club_post(f"/api/clubs/{club_id}/ask/", {"text": text})
